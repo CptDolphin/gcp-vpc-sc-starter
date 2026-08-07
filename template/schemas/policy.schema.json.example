@@ -11,6 +11,7 @@
     "perimeter",
     "restricted_services",
     "vpc_accessible_services",
+    "control_plane_projects",
     "onboarding",
     "attribute_budget"
   ],
@@ -86,6 +87,16 @@
           "type": "boolean"
         }
       }
+    },
+    "control_plane_projects": {
+      "type": "array",
+      "description": "Projekty plaszczyzny sterowania perimetru: bucket stanu Terraform, bucket kontraktow, monitoring. Bramka OPA odrzuca plik czlonka wskazujacy ktorykolwiek z nich, bo wciagniecie ich do konfiguracji egzekwowanej odcina konto apply od wlasnego stanu — jedyny tryb awarii, ktorego `git revert` nie cofa. WYMAGANA, choc moze byc pusta: brak sekcji i pusta lista daja ten sam skutek, wiec swiadoma decyzje 'nie mamy takich projektow' musi wymusic schema, a nie pamiec autora.",
+      "items": {
+        "type": "string",
+        "pattern": "^([a-z][a-z0-9-]{4,28}[a-z0-9]|[0-9]{6,20})$",
+        "description": "project_id albo numer projektu. Numer MUSI byc stringiem — YAML bez cudzyslowow daje liczbe, a porownanie z project_number (zawsze string) nigdy by nie trafilo: bramka wygladalaby na uzbrojona, nie lapiac niczego."
+      },
+      "uniqueItems": true
     },
     "onboarding": {
       "type": "object",

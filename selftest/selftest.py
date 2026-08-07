@@ -572,6 +572,73 @@ def test_rego() -> None:
     p = sh(["conftest", "test", "--policy", "policy", "--namespace", "vpcsc.onboarding", "bad-baseline.json"], cwd=ROOT)
     check("baseline bez aiplatform jest ODRZUCANY", p.returncode != 0, p.stdout[-800:])
 
+    # --- anty-samo-zablokowanie: projekty płaszczyzny sterowania -------------------------------------
+    # Jedyny tryb awarii tego repozytorium, którego `git revert` NIE COFA: projekt z bucketem stanu wciągnięty
+    # do perimetru odcina konto apply od jego własnego stanu (apply woła spoza granicy), a apply rewertu też
+    # potrzebuje stanu. Dlatego bramka ma tu więcej testów niż inne — cicha dziura kosztuje interwencję
+    # człowieka z uprawnieniami org-level, a nie kolejny commit.
+    czlonek = json.loads(decl.stdout)["members"][name]
+
+    def onboarding_na(doc: dict, plik: str):
+        (ROOT / plik).write_text(json.dumps(doc))
+        return sh(["conftest", "test", "--policy", "policy", "--namespace", "vpcsc.onboarding", plik], cwd=ROOT)
+
+    doc = json.loads(decl.stdout)
+    doc["policy"]["control_plane_projects"] = [czlonek["project_id"]]
+    p = onboarding_na(doc, "bad-control-plane.json")
+    check("czlonek na liscie control_plane_projects jest ODRZUCANY", p.returncode != 0, p.stdout[-800:])
+    # Komunikat MUSI tłumaczyć konsekwencję: samo „odrzucone" nie mówi czytelnikowi, czym ryzykuje ani
+    # dlaczego nie wystarczy zmergować i cofnąć.
+    check("komunikat bramki tlumaczy konsekwencje (stan, brak rewertu, org-level)",
+          all(s in p.stdout for s in ("bucketa stanu", "NIE cofa", "org-level")), p.stdout[-600:])
+
+    # ANTY-TAUTOLOGIA: niepusta lista wskazująca INNY projekt musi przepuścić zwykłego członka. Bez tego
+    # testu reguła odrzucająca wszystko przechodziłaby test negatywny i wyglądała na działającą.
+    doc = json.loads(decl.stdout)
+    doc["policy"]["control_plane_projects"] = ["prj-example-tfstate-admin"]
+    p = onboarding_na(doc, "ok-control-plane.json")
+    check("zwykly projekt PRZECHODZI mimo niepustej listy (test anty-tautologiczny)",
+          p.returncode == 0, p.stdout[-600:])
+
+    # Lista przyjmuje project_id ALBO numer — bramka, którą omija się wyborem formatu, nie jest bramką.
+    doc = json.loads(decl.stdout)
+    doc["policy"]["control_plane_projects"] = [czlonek["project_number"]]
+    p = onboarding_na(doc, "bad-control-plane-numer.json")
+    check("dopasowanie po NUMERZE projektu tez ODRZUCA", p.returncode != 0, p.stdout[-600:])
+
+    # Numer wpisany w YAML-u bez cudzysłowów jest liczbą, a `project_number` jest zawsze stringiem —
+    # porównanie nigdy by nie trafiło. Bramka wyglądałaby na uzbrojoną i nie łapała niczego.
+    doc = json.loads(decl.stdout)
+    doc["policy"]["control_plane_projects"] = [int(czlonek["project_number"])]
+    p = onboarding_na(doc, "bad-control-plane-typ.json")
+    check("numer NIE-string jest ODRZUCANY (inaczej bramka jest cichym no-opem)",
+          p.returncode != 0, p.stdout[-600:])
+
+    # Furtka istnieje po to, żeby nikt nie musiał WYŁĄCZAĆ bramki: usunięcie projektu z listy rozbraja ją
+    # dla wszystkich członków naraz i wygląda w diffie jak sprzątanie.
+    doc = json.loads(decl.stdout)
+    doc["policy"]["control_plane_projects"] = [czlonek["project_id"]]
+    doc["members"][name]["control_plane_exception"] = {
+        "justification": "stan Terraform przeniesiony poza perimetr, apply czyta go spoza granicy"}
+    p = onboarding_na(doc, "ok-control-plane-wyjatek.json")
+    check("jawny control_plane_exception PRZEPUSZCZA wpis (furtka zamiast wylaczania bramki)",
+          p.returncode == 0, p.stdout[-600:])
+
+    # Wyjątek „na zapas" na projekcie spoza listy rozbrajałby bramkę zawczasu: dopisany do wszystkich plików
+    # członków sprawia, że późniejsze rozszerzenie control_plane_projects nie odpala ani razu.
+    doc = json.loads(decl.stdout)
+    doc["members"][name]["control_plane_exception"] = {
+        "justification": "wyjatek wpisany zanim projekt trafil na liste plaszczyzny sterowania"}
+    p = onboarding_na(doc, "bad-control-plane-zapas.json")
+    check("wyjatek 'na zapas' (projekt spoza listy) jest ODRZUCANY", p.returncode != 0, p.stdout[-600:])
+
+    # Sekcja musi ZOSTAĆ w policy.yaml: brak sekcji i pusta lista dają ten sam skutek, więc różnicę wymusza
+    # `required` w schemacie. check-jsonschema jest jednak opcjonalny i lokalnie się SKIPuje — ta asercja
+    # używa samego YAML-a, więc nie ma jak się nie wykonać (ta sama lekcja co w test_acm_naming).
+    polityka = yaml.safe_load((ROOT / "perimeter/policy.yaml").read_text())
+    check("policy.yaml deklaruje sekcje control_plane_projects (nie da sie jej po cichu usunac)",
+          isinstance(polityka.get("control_plane_projects"), list), str(sorted(polityka.keys())))
+
     # NEGATYW na plan-JSON: reguła z ANY_IDENTITY i z method="*" musi paść.
     bad_plan = {
         "planned_values": {"root_module": {"resources": [{
@@ -733,6 +800,23 @@ def test_schemas() -> None:
     for schema, files in pairs:
         p = sh(["check-jsonschema", "--schemafile", schema, *files], cwd=ROOT)
         check(f"schema {pathlib.Path(schema).stem} akceptuje przyklady", p.returncode == 0, p.stdout[-500:])
+
+    # Furtka `control_plane_exception` musi przejść PRZEZ SCHEMĘ, bo validate.yml sprawdza schematy ZANIM
+    # uruchomi reguły OPA (`additionalProperties: false` odrzuciłoby ją wcześniej). Gdyby jej tam brakło,
+    # jedyną drogą przy realnej potrzebie byłoby usunięcie projektu z control_plane_projects — czyli
+    # rozbrojenie bramki dla wszystkich członków naraz.
+    czlonek = yaml.safe_load((ROOT / "perimeter/members/example-division-prj-example-vertex-dev.yaml").read_text())
+    czlonek["control_plane_exception"] = {
+        "justification": "stan Terraform przeniesiony poza perimetr, apply czyta go spoza granicy"}
+    (ROOT / "czlonek-wyjatek.yaml").write_text(yaml.safe_dump(czlonek, sort_keys=False, allow_unicode=True))
+    p = sh(["check-jsonschema", "--schemafile", "schemas/member.schema.json", "czlonek-wyjatek.yaml"], cwd=ROOT)
+    check("schema czlonka AKCEPTUJE control_plane_exception", p.returncode == 0, p.stdout[-400:])
+
+    # NEGATYW do powyższego: bez progu długości furtka degeneruje się do „ok" i przestaje być decyzją.
+    czlonek["control_plane_exception"] = {"justification": "ok"}
+    (ROOT / "czlonek-wyjatek-krotki.yaml").write_text(yaml.safe_dump(czlonek, sort_keys=False, allow_unicode=True))
+    p = sh(["check-jsonschema", "--schemafile", "schemas/member.schema.json", "czlonek-wyjatek-krotki.yaml"], cwd=ROOT)
+    check("schema czlonka ODRZUCA wyjatek bez uzasadnienia (min. 20 znakow)", p.returncode != 0, p.stdout[-400:])
 
 
 # ----------------------------------------------------------------- samodzielnosc materialu

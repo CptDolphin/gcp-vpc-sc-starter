@@ -30,6 +30,8 @@ a nie HCL.
 | Nowy członek zawsze `stage: dry-run` | `render_member.py` + reguła OPA | wejście od razu do konfiguracji egzekwowanej odcina cudzą produkcję po merge'u (DEC-4) |
 | Kanał wejściowy **nie nadpisuje** istniejącego pliku członka | `out.exists()` w `render_member.py` i `external-intake.yml` | powtórne zgłoszenie zapisałoby `stage: dry-run` na członku `enforced` — projekt traci ochronę PR-em wyglądającym na onboarding. Reguła OPA tego nie łapie: porównuje dwa PLIKI, a tu plik jest ten sam |
 | Apply jest single-flight | `concurrency` w `apply.yml`, bez `cancel-in-progress` | dwa równoległe apply nadpisują się na polityce org-level (DEC-6) |
+| Projekt z `policy.yaml` §`control_plane_projects` **nie wchodzi** do perimetru | reguła OPA w `onboarding.rego` (furtka: `control_plane_exception` w pliku członka) | **jedyne złamanie, którego `git revert` NIE COFA.** Bucket stanu leży w projekcie administracyjnym perimetru; w konfiguracji egzekwowanej konto apply traci dostęp do własnego stanu, bo woła z GitHub Actions — spoza granicy. Apply rewertu też potrzebuje stanu, więc pętli nie da się przerwać pipeline'em: wychodzi z niej człowiek z uprawnieniami org-level, ręcznie na żywej polityce |
+| Sekcja `control_plane_projects` **istnieje** (może być pusta) | `required` w `schemas/policy.schema.json` + asercja w selfteście | brak sekcji i pusta lista dają ten sam skutek — bez `required` bramkę rozbraja się „sprzątaniem" nieużywanego pola, a różnica między „zdecydowaliśmy, że nie ma takich projektów" a „nikt o tym nie pomyślał" znika z diffu |
 | Zakaz `ANY_IDENTITY` / `method: "*"` / `resources: ["*"]` | `perimeter.rego` na plan-JSON | reguła przestaje cokolwiek ograniczać, a wygląda tak samo (DEC-3) |
 | Kontrakt buduje się polami, nigdy `jsonencode(<zbiorcze>)` | `contract.tf` + test w selfteście | kontrakt zamienia się w drugą kopię stanu (DEC-8) |
 | Kontrakt i stan w **różnych** bucketach | `precondition` w `contract.tf` | jeden błąd w IAM odsłania pełną mapę granicy (DEC-8) |
@@ -84,7 +86,7 @@ python3 selftest/selftest.py          # rozpakowuje starter do katalogu tymczaso
 ```
 
 Wymaga na PATH: `terraform` (1.15.5), `conftest`, `tflint`, `python3` z `pyyaml`; opcjonalnie `actionlint`
-i `check-jsonschema` (ich brak daje SKIP z nazwą, nigdy ciche zielone). Oczekiwany wynik: **114/114**.
+i `check-jsonschema` (ich brak daje SKIP z nazwą, nigdy ciche zielone). Oczekiwany wynik: **129/129**.
 
 Sam skan samodzielności (bez terraforma i conftesta, sam Python) da się uruchomić na dowolnej ścieżce —
 przydaje się tam, gdzie materiał jest publikowany razem z innymi katalogami:
