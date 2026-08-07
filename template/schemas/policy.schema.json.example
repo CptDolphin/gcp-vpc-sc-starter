@@ -204,9 +204,7 @@
                   "minItems": 1,
                   "items": {
                     "type": "string",
-                    "not": {
-                      "const": "*"
-                    }
+                    "description": "Metody wypisane jawnie. `*` jest dopuszczalne WYLACZNIE dla uslug, ktorym Access Context Manager nie publikuje listy metod (supportedMethods puste — patrz policy.yaml §services_without_method_selectors); tam jest jedyna wartoscia, jaka API przyjmuje. Schema nie umie tego rozstrzygnac, bo zalezy od stanu API, wiec zawezenie egzekwuja dwie warstwy wyzej: regula OPA (na planie) i tools/check_supported_services.py (na zywej liscie uslug)."
                   }
                 }
               }
