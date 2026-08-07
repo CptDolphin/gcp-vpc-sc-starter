@@ -57,4 +57,10 @@ jobs:
       # Bez `--init` plugin google nie jest pobrany i tflint milczy zamiast sprawdzać — czyli bramka
       # wyglądałaby na zieloną, nie robiąc nic. Robimy to raz, na rozpakowanej kopii w selfteście.
       - name: selftest
+        # Atrapa tokenu, NIE poswiadczenia. Provider `google` odmawia inicjalizacji bez zadnych credentiali,
+        # a testy renderera sa plan-only i nie wolaja API — lokalnie dzialaly wylacznie dlatego, ze deweloper
+        # ma ADC. Bez tej zmiennej `terraform test` pada w CI na braku tozsamosci, a nie na logice renderera,
+        # czyli bramka mowilaby o czyms zupelnie innym niz to, co bada.
+        env:
+          GOOGLE_OAUTH_ACCESS_TOKEN: nie-uzywany-testy-sa-plan-only
         run: python3 selftest/selftest.py
