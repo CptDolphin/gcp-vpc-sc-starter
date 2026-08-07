@@ -1,0 +1,47 @@
+# Profil: zapytanie z wnętrza perimetru czyta dane leżące POZA Google Cloud (S3 / Azure Blob).
+#
+# CZYTAJ TO ZANIM UŻYJESZ — zakres jest znacznie węższy, niż sugeruje nazwa „egress poza GCP":
+#
+#   Pole `externalResources` w regule egress obsługuje WYŁĄCZNIE zasoby BigQuery Omni. Nie jest to ogólny
+#   „egress do AWS": nie przepuści nim ruchu Vertex AI, Cloud Run ani GKE. Jedyny obsługiwany przepływ to
+#   zapytanie BigQuery do tabeli zewnętrznej w S3/Azure. Formaty identyfikatorów są sztywne:
+#
+#       s3://BUCKET_NAME
+#       azure://myaccount.blob.core.windows.net/CONTAINER_NAME
+#
+#   ARN (`arn:aws:s3:::bucket`) NIE jest formatem, którego oczekuje API — to najczęstsza pomyłka i wychodzi
+#   dopiero na apply. Pilnuje jej reguła OPA `external_resource_format`.
+#
+# DLACZEGO to jest w katalogu profili, a nie w wyjątkach: wzorzec „dywizja ma hurtownię w S3 i pyta o nią
+# z BigQuery" powtarza się na tyle często, że trzeci wyjątek byłby marnotrawstwem (DEC-3). Ryzyko jest
+# jednak realne — to jedyna reguła w katalogu, która pozwala danym opuścić Google Cloud — dlatego `risk: high`
+# i CODEOWNERS Security na każdą zmianę tego pliku.
+#
+# CZEGO TU NIE MA (świadomie): egressu do projektów GCP. Jeśli potrzebujesz obu kierunków, weź także
+# `vertex-batch-training` — mieszanie celów wewnętrznych i zewnętrznych w jednej regule utrudnia późniejszą
+# ocenę „co właściwie wypływa", a atrybuty kosztują tyle samo w dwóch regułach co w jednej.
+
+schema_version: 1
+name: bq-omni-external-read
+summary: "BigQuery queries from inside the perimeter may read approved external tables in S3 / Azure Blob."
+risk: high
+
+parameters:
+  - name: query_identities
+    description: "Service accounts / users running the BigQuery queries (the egress rule's `from`)."
+  - name: external_resources
+    description: "Approved external buckets in s3://BUCKET or azure://ACCOUNT.blob.core.windows.net/CONTAINER form. Empty list = no egress rule rendered."
+
+egress:
+  - title: read-external-omni-tables
+    identities_from: query_identities
+    # `to_external_from` wskazuje parametr członka z listą zasobów ZEWNĘTRZNYCH. Pusta lista = reguła nie
+    # powstaje (ta sama bezpieczna degradacja co przy `to_projects_from`).
+    to_external_from: external_resources
+    operations:
+      # Tylko BigQuery — patrz nagłówek. Inna usługa w tej regule jest odrzucana przez OPA, bo API i tak
+      # nie zastosuje `externalResources` do niczego poza Omni, a reguła wyglądałaby na działającą.
+      - service: bigquery.googleapis.com
+        methods:
+          - JobService.Query
+          - JobService.InsertJob

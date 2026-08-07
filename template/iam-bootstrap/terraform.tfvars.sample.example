@@ -1,0 +1,17 @@
+# Skopiuj do terraform.tfvars i uzupełnij. Wszystkie wartości są jawne (nie sekrety).
+
+org_id              = "123456789012"       # gcloud organizations list
+identity_project_id = "prj-cloud-identity"  # projekt na konta serwisowe i pulę WIF (centralny, nie aplikacyjny)
+github_repository   = "ORG/gcp-vpc-sc"      # dokładnie to repo wpuszcza attribute_condition puli WIF
+state_bucket        = "bkt-tf-state-vpcsc"  # versioning + soft-delete, BEZ retention-lock
+
+# Domyślne — zmieniaj tylko świadomie:
+# apply_environment    = "perimeter-apply"  # musi zgadzać się z environment w .github/workflows/apply.yml
+# state_prefix         = "vpc-sc/perimeter" # musi zgadzać się z prefix w terraform/versions.tf repo perimetru
+# wif_pool_id          = "github-actions"
+# wif_provider_id      = "github"
+# grant_logging_viewer = true               # false = brak raportu naruszeń → promocja bez dowodu
+
+# Kanał zewnętrzny (repozytoria zespołów) — puste = nieaktywny:
+# contracts_bucket       = "bkt-tf-contracts"          # MUSI być inny niż state_bucket
+# contract_reader_groups = ["grp-example-division-cloud@example.com"]

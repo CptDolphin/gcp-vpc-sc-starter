@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/vpc-sc/profile.schema.json",
+  "title": "Rule profile",
+  "description": "Wersjonowany wzorzec reguł ingress/egress. Profil nie zna żadnej konkretnej tożsamości — dostaje ją z pliku członka przez parametry. Zmiana profilu dotyka wszystkich jego użytkowników, dlatego CODEOWNERS wymaga tu Security + Networking.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "name",
+    "summary",
+    "risk",
+    "parameters"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{2,40}$"
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 10
+    },
+    "risk": {
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    "parameters": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "description"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]{2,40}$"
+          },
+          "description": {
+            "type": "string",
+            "minLength": 10
+          }
+        }
+      }
+    },
+    "ingress": {
+      "$ref": "#/$defs/ruleList"
+    },
+    "egress": {
+      "$ref": "#/$defs/ruleList"
+    }
+  },
+  "$defs": {
+    "ruleList": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "title",
+          "identities_from",
+          "operations"
+        ],
+        "properties": {
+          "title": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{2,60}$"
+          },
+          "identities_from": {
+            "type": "string"
+          },
+          "access_levels_from": {
+            "type": "string"
+          },
+          "to": {
+            "const": "member_project",
+            "description": "Ingress kieruje wyłącznie na projekt członka. Wartość `*` jest niedozwolona z definicji — schema nie dopuszcza innej stałej."
+          },
+          "to_projects_from": {
+            "type": "string"
+          },
+          "operations": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "service",
+                "methods"
+              ],
+              "properties": {
+                "service": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9.-]+\\.googleapis\\.com$"
+                },
+                "methods": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "type": "string",
+                    "not": {
+                      "const": "*"
+                    },
+                    "description": "Metody wypisane jawnie. `*` odrzuca schema, a niezależnie od niej także reguła OPA no_wildcard_methods — dwie warstwy, bo to najczęstszy skrót, po którym profil przestaje cokolwiek ograniczać."
+                  }
+                }
+              }
+            }
+          },
+          "to_external_from": {
+            "type": "string",
+            "description": "Nazwa parametru członka z listą zasobów POZA Google Cloud. Obsługuje wyłącznie BigQuery Omni: s3://BUCKET albo azure://ACCOUNT.blob.core.windows.net/CONTAINER. ARN nie jest formatem, którego oczekuje API — pilnuje tego reguła OPA external_resource_format."
+          }
+        }
+      }
+    }
+  }
+}

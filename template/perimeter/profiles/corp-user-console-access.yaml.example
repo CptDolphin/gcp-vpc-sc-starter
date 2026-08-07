@@ -1,0 +1,41 @@
+# Profil: człowiek pracujący w konsoli / notebooku (Vertex AI Studio, Colab Enterprise, Workbench).
+#
+# DLACZEGO to jest część baseline'u, a nie dodatek na życzenie: dostęp z przeglądarki to ingress SPOZA
+# perimetru. Bez tego profilu pierwszy dzień po włączeniu enforce wygląda tak, że wszyscy data scientists
+# widzą „request is prohibited by organization's policy" i zespół sieciowy dostaje falę ticketów — a najprostszą
+# reakcją na taką falę jest rozluźnienie granicy, czyli dokładnie to, czego perimetr miał nie dopuścić.
+#
+# UWAGA SIECIOWA (pre-flight to sprawdza): Workbench z własnymi kernelami wymaga DNS peeringu
+# *.notebooks.googleusercontent.com na private.googleapis.com (199.36.153.8/30), a NIE na restricted VIP
+# (199.36.153.4/30). To jedyny znany wyjątek od reguły „wszystko przez restricted".
+
+schema_version: 1
+name: corp-user-console-access
+summary: "Named humans reach Vertex Studio / notebooks from the corporate network or a managed device."
+risk: medium
+
+parameters:
+  - name: user_groups
+    description: "Google groups whose members may use the console (never individual ad-hoc users)."
+  - name: access_levels
+    description: "Access levels: corporate IP range and/or device trust. Required — no bare identity access."
+
+ingress:
+  - title: console-and-notebooks
+    identities_from: user_groups
+    access_levels_from: access_levels
+    to: member_project
+    operations:
+      - service: aiplatform.googleapis.com
+        # `*` to JEDYNA wartość, jaką API tu przyjmuje: `supportedMethods` dla tej usługi jest puste
+        # (`gcloud access-context-manager supported-services describe <usluga>`), więc wypisanie metod
+        # jawnie kończy się `Error 400: METHOD ... is not supported`. Usługa jest wymieniona w policy.yaml
+        # §services_without_method_selectors, a check_supported_services.py pilnuje tej listy wobec API.
+        methods: ["*"]
+      - service: notebooks.googleapis.com
+        methods: ["*"]
+      # colab.googleapis.com NIE JEST wspierane przez VPC-SC (zweryfikowane: nie ma go wśród 226 usług
+      # z `supported-services list`, apply pada na Error 400). Colab Enterprise i tak podlega granicy
+      # przez aiplatform — runtime jest zasobem Vertex AI, więc osobna reguła nie była potrzebna.
+
+egress: []

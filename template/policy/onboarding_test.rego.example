@@ -1,0 +1,273 @@
+# Testy bramek onboardingu. Uruchamia je `conftest verify` (lub `opa test policy/`).
+#
+# Każda bramka ma parę testów: POZYTYWNY (poprawne wejście przechodzi) i NEGATYWNY (złe wejście PADA).
+# Sam test pozytywny niczego nie dowodzi — reguła, która nigdy nie odrzuca, też go przechodzi.
+
+package vpcsc.onboarding
+
+import rego.v1
+
+base_policy := {
+	"restricted_services": ["aiplatform.googleapis.com", "storage.googleapis.com"],
+	"onboarding": {"dry_run_min_days": 14, "clean_window_days": 7},
+}
+
+base_profiles := {"vertex-online-serving": {
+	"name": "vertex-online-serving",
+	"parameters": [{"name": "caller_identities", "description": "x"}, {"name": "access_levels", "description": "y"}],
+	"ingress": [{"title": "online-prediction", "identities_from": "caller_identities", "access_levels_from": "access_levels", "to": "member_project", "operations": [{"service": "aiplatform.googleapis.com", "methods": ["m"]}]}],
+}}
+
+healthy_member := {
+	"division": "risk",
+	"project_id": "prj-example-vertex-dev",
+	"project_number": "111111111111",
+	"owner_group": "grp@example.com",
+	"change_ref": "snow:RITM0000001",
+	"approved_by": "net@example.com",
+	"stage": "dry-run",
+	"dry_run_since": "2026-07-01",
+	"review_by": "2027-01-01",
+	"profiles": [{"name": "vertex-online-serving", "params": {"caller_identities": ["serviceAccount:a@b.iam.gserviceaccount.com"], "access_levels": ["corp_network"]}}],
+	"exceptions": [],
+}
+
+contributors := [{
+	"repository": "ORG/example-platform",
+	"division": "risk",
+	"allowed_projects": ["prj-example-vertex-dev"],
+}]
+
+healthy_input := {
+	"policy": base_policy,
+	"profiles": base_profiles,
+	"members": {"example-prj-example-vertex-dev": healthy_member},
+	"contributors": contributors,
+	"today": "2026-07-20",
+	"violations_last_window": {"example-prj-example-vertex-dev": 0},
+}
+
+test_healthy_member_passes if {
+	count(deny) == 0 with input as healthy_input
+}
+
+test_missing_aiplatform_denied if {
+	bad := object.union(healthy_input, {"policy": object.union(base_policy, {"restricted_services": ["storage.googleapis.com"]})})
+	count(deny) > 0 with input as bad
+}
+
+test_unknown_profile_denied if {
+	m := object.union(healthy_member, {"profiles": [{"name": "nie-ma-takiego", "params": {}}]})
+	bad := object.union(healthy_input, {"members": {"example-prj-example-vertex-dev": m}})
+	count(deny) > 0 with input as bad
+}
+
+test_missing_profile_param_denied if {
+	m := object.union(healthy_member, {"profiles": [{"name": "vertex-online-serving", "params": {"caller_identities": ["serviceAccount:a@b.iam.gserviceaccount.com"]}}]})
+	bad := object.union(healthy_input, {"members": {"example-prj-example-vertex-dev": m}})
+	count(deny) > 0 with input as bad
+}
+
+test_typo_in_param_name_denied if {
+	m := object.union(healthy_member, {"profiles": [{"name": "vertex-online-serving", "params": {"caller_identities": ["serviceAccount:a@b.iam.gserviceaccount.com"], "access_levels": ["corp_network"], "acces_levels": ["corp_network"]}}]})
+	bad := object.union(healthy_input, {"members": {"example-prj-example-vertex-dev": m}})
+	count(deny) > 0 with input as bad
+}
+
+# Promocja po 5 dniach zamiast wymaganych 14 — najczęstsza presja („zespół czeka").
+test_promotion_before_window_denied if {
+	m := object.union(healthy_member, {"stage": "enforced", "dry_run_since": "2026-07-15"})
+	bad := object.union(healthy_input, {"members": {"example-prj-example-vertex-dev": m}})
+	count(deny) > 0 with input as bad
+}
+
+test_promotion_after_window_passes if {
+	m := object.union(healthy_member, {"stage": "enforced", "dry_run_since": "2026-06-01"})
+	ok := object.union(healthy_input, {"members": {"example-prj-example-vertex-dev": m}})
+	count(deny) == 0 with input as ok
+}
+
+# Brak raportu ≠ zero naruszeń. Bez tego testu łatwo „naprawić" bramkę przez nieuruchomienie raportu.
+# UWAGA na `object.union`: robi GŁĘBOKIE scalenie, więc `{"violations_last_window": {}}` nie usunęłoby
+# istniejącego wpisu — trzeba `json.patch` z operacją remove. Ten test złapał dokładnie tę pomyłkę.
+test_promotion_without_report_denied if {
+	bad := json.patch(healthy_input, [
+		{"op": "replace", "path": "/members/example-prj-example-vertex-dev/stage", "value": "enforced"},
+		{"op": "replace", "path": "/members/example-prj-example-vertex-dev/dry_run_since", "value": "2026-06-01"},
+		{"op": "remove", "path": "/violations_last_window/example-prj-example-vertex-dev"},
+	])
+	count(deny) > 0 with input as bad
+}
+
+test_promotion_with_violations_denied if {
+	m := object.union(healthy_member, {"stage": "enforced", "dry_run_since": "2026-06-01"})
+	bad := object.union(healthy_input, {"members": {"example-prj-example-vertex-dev": m}, "violations_last_window": {"example-prj-example-vertex-dev": 3}})
+	count(deny) > 0 with input as bad
+}
+
+test_expired_review_denied if {
+	m := object.union(healthy_member, {"review_by": "2026-07-01"})
+	bad := object.union(healthy_input, {"members": {"example-prj-example-vertex-dev": m}})
+	count(deny) > 0 with input as bad
+}
+
+test_exception_without_justification_denied if {
+	m := object.union(healthy_member, {"exceptions": [{"title": "temp", "justification": "bo tak"}]})
+	bad := object.union(healthy_input, {"members": {"example-prj-example-vertex-dev": m}})
+	count(deny) > 0 with input as bad
+}
+
+# --- kanały wejścia ---------------------------------------------------------------------------------
+
+# Repo zespołu zgłaszające SWÓJ projekt — przechodzi.
+test_external_channel_allowed_project_passes if {
+	ok := json.patch(healthy_input, [{
+		"op": "replace",
+		"path": "/members/example-prj-example-vertex-dev/change_ref",
+		"value": "pr:ORG/example-platform#42",
+	}])
+	count(deny) == 0 with input as ok
+}
+
+# To samo repo zgłaszające CUDZY projekt — musi paść. Bez tej reguły wniosek wyglądałby tak samo legalnie
+# jak każdy inny, a projekt trafiłby do perimetru na wniosek zespołu, który nim nie zarządza.
+test_external_channel_foreign_project_denied if {
+	bad := json.patch(healthy_input, [
+		{"op": "replace", "path": "/members/example-prj-example-vertex-dev/change_ref", "value": "pr:ORG/example-platform#42"},
+		{"op": "replace", "path": "/members/example-prj-example-vertex-dev/project_id", "value": "prj-inna-dywizja-prod"},
+	])
+	count(deny) > 0 with input as bad
+}
+
+# Repo przypisane do dywizji `risk` deklarujące wpis dywizji `market` — musi paść: właścicielem wpisu
+# (i adresatem raportu naruszeń) zostałby ktoś, kto o niczym nie wie.
+test_external_channel_division_mismatch_denied if {
+	bad := json.patch(healthy_input, [
+		{"op": "replace", "path": "/members/example-prj-example-vertex-dev/change_ref", "value": "pr:ORG/example-platform#42"},
+		{"op": "replace", "path": "/members/example-prj-example-vertex-dev/division", "value": "other-division"},
+	])
+	count(deny) > 0 with input as bad
+}
+
+# Zgłoszenie z repozytorium, którego w ogóle nie ma w contributors.yaml — musi paść (brak mapowania
+# to brak uprawnienia, nie „domyślnie wolno").
+test_external_channel_unknown_repo_denied if {
+	bad := json.patch(healthy_input, [{
+		"op": "replace",
+		"path": "/members/example-prj-example-vertex-dev/change_ref",
+		"value": "pr:ORG/nieznane-repo#7",
+	}])
+	count(deny) > 0 with input as bad
+}
+
+# --- reguły baseline --------------------------------------------------------------------------------
+
+baseline_ok := [{
+	"title": "security-scanner-read",
+	"identities": ["serviceAccount:scanner@vendor.iam.gserviceaccount.com"],
+	"access_levels": [],
+	"allow_without_access_level": true,
+	"operations": [{"service": "storage.googleapis.com", "methods": ["google.storage.buckets.get"]}],
+}]
+
+test_baseline_with_explicit_flag_passes if {
+	ok := json.patch(healthy_input, [{"op": "add", "path": "/policy/baseline_ingress", "value": baseline_ok}])
+	count(deny) == 0 with input as ok
+}
+
+# Pominięcie pola NIE MOŻE dawać tego samego skutku co jego ustawienie — inaczej reguła bez warunku kontekstu
+# dla wszystkich członków przechodzi w cichym PR-ze.
+test_baseline_without_access_level_and_without_flag_denied if {
+	rule := json.remove(baseline_ok[0], ["allow_without_access_level"])
+	bad := json.patch(healthy_input, [{"op": "add", "path": "/policy/baseline_ingress", "value": [rule]}])
+	count(deny) > 0 with input as bad
+}
+
+# Baseline mnoży się przez liczbę członków, więc `*` kosztuje tu najwięcej i daje skanerowi prawo do
+# wszystkiego w KAŻDYM chronionym projekcie.
+test_baseline_wildcard_method_denied if {
+	rule := json.patch(baseline_ok[0], [{"op": "replace", "path": "/operations/0/methods", "value": ["*"]}])
+	bad := json.patch(healthy_input, [{"op": "add", "path": "/policy/baseline_ingress", "value": [rule]}])
+	count(deny) > 0 with input as bad
+}
+
+# --- egress do zasobów poza Google Cloud ------------------------------------------------------------
+
+omni_profile := {"bq-omni-external-read": {
+	"name": "bq-omni-external-read",
+	"parameters": [{"name": "query_identities", "description": "x"}, {"name": "external_resources", "description": "y"}],
+	"egress": [{
+		"title": "read-external-omni-tables",
+		"identities_from": "query_identities",
+		"to_external_from": "external_resources",
+		"operations": [{"service": "bigquery.googleapis.com", "methods": ["google.cloud.bigquery.v2.JobService.Query"]}],
+	}],
+}}
+
+omni_input(resources) := object.union(healthy_input, {
+	"profiles": object.union(base_profiles, omni_profile),
+	"members": {"example-prj-example-vertex-dev": object.union(healthy_member, {"profiles": [{
+		"name": "bq-omni-external-read",
+		"params": {"query_identities": ["serviceAccount:a@b.iam.gserviceaccount.com"], "external_resources": resources},
+	}]})},
+})
+
+test_external_resource_s3_passes if {
+	count(deny) == 0 with input as omni_input(["s3://approved-bucket"])
+}
+
+test_external_resource_azure_passes if {
+	count(deny) == 0 with input as omni_input(["azure://acct.blob.core.windows.net/container"])
+}
+
+# To jest ta pomyłka, dla której ta bramka istnieje: ARN wygląda poprawnie dla człowieka z AWS, a API go nie zna.
+test_external_resource_arn_denied if {
+	count(deny) > 0 with input as omni_input(["arn:aws:s3:::approved-bucket"])
+}
+
+test_external_resource_bare_bucket_denied if {
+	count(deny) > 0 with input as omni_input(["approved-bucket"])
+}
+
+# Zasoby zewnętrzne + usługa inna niż BigQuery = reguła, która wygląda na działającą i nie działa.
+test_external_resources_non_bigquery_denied if {
+	bad_profile := {"bq-omni-external-read": object.union(omni_profile["bq-omni-external-read"], {"egress": [{
+		"title": "read-external-omni-tables",
+		"identities_from": "query_identities",
+		"to_external_from": "external_resources",
+		"operations": [{"service": "aiplatform.googleapis.com", "methods": ["m"]}],
+	}]})}
+	bad := object.union(omni_input(["s3://approved-bucket"]), {"profiles": object.union(base_profiles, bad_profile)})
+	count(deny) > 0 with input as bad
+}
+
+
+# --- jeden projekt = jeden wpis ---------------------------------------------------------------------
+
+test_duplicate_project_number_denied if {
+	dup := object.union(healthy_member, {"project_id": "prj-inna-nazwa", "division": "risk"})
+	bad := object.union(healthy_input, {"members": {
+		"example-prj-example-vertex-dev": healthy_member,
+		"risk-prj-inna-nazwa": dup,
+	}})
+	count(deny) > 0 with input as bad
+}
+
+test_same_project_id_different_number_denied if {
+	dup := object.union(healthy_member, {"project_number": "999999999999"})
+	bad := object.union(healthy_input, {"members": {
+		"example-prj-example-vertex-dev": healthy_member,
+		"example-prj-example-vertex-dev-2": dup,
+	}})
+	count(deny) > 0 with input as bad
+}
+
+# Dwa RÓŻNE projekty w dwóch plikach to normalny stan — bramka nie może go blokować.
+test_two_distinct_projects_pass if {
+	other := object.union(healthy_member, {"project_id": "prj-example-vertex-stg", "project_number": "222222222222"})
+	ok := object.union(healthy_input, {
+		"members": {"example-prj-example-vertex-dev": healthy_member, "example-prj-example-vertex-stg": other},
+		"violations_last_window": {"example-prj-example-vertex-dev": 0, "example-prj-example-vertex-stg": 0},
+	})
+	count(deny) == 0 with input as ok
+}

@@ -1,0 +1,83 @@
+# .github/workflows/intake.yml
+# ServiceNow → PR. This is the ONLY entry point for a division joining the perimeter.
+#
+# WHY a PR and not a direct API call to Access Context Manager: a ticket-driven API call gives up the three
+# properties a security boundary cannot live without — an audit trail that explains WHY a rule exists,
+# a rollback that is just `git revert`, and drift detection (without a declared state there is nothing to
+# compare the live one against). The ticket stays what it is good at: the record of business approval.
+
+name: intake
+
+on:
+  repository_dispatch:
+    types: [vpc-sc-onboard]
+
+permissions:
+  contents: write # the bot commits a member file on a branch
+  pull-requests: write
+
+concurrency:
+  group: intake-${{ github.event.client_payload.project_id }}
+  cancel-in-progress: false
+
+jobs:
+  onboard:
+    name: verify ticket and open PR
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # THE payload is DATA, never authorization. A repository_dispatch is exactly as trustworthy as the
+      # token that sent it, and tokens leak. We call ServiceNow back and ask the system of record whether
+      # this ticket is really approved, by whom, and for which project.
+      - name: verify the ticket at the source
+        env:
+          SNOW_INSTANCE: ${{ secrets.SNOW_INSTANCE }}
+          SNOW_USER: ${{ secrets.SNOW_USER }}
+          SNOW_TOKEN: ${{ secrets.SNOW_TOKEN }}
+        run: |
+          python3 tools/snow_verify.py \
+            --ticket "${{ github.event.client_payload.snow_ticket }}" \
+            --expect-project "${{ github.event.client_payload.project_id }}"
+
+      - name: render the member file
+        env:
+          DIVISION: ${{ github.event.client_payload.division }}
+          PROJECT_ID: ${{ github.event.client_payload.project_id }}
+          PROJECT_NUMBER: ${{ github.event.client_payload.project_number }}
+          OWNER_GROUP: ${{ github.event.client_payload.owner_group }}
+          CHANGE_REF: "snow:${{ github.event.client_payload.snow_ticket }}"
+          APPROVED_BY: ${{ github.event.client_payload.approved_by }}
+          PROFILES_JSON: ${{ toJSON(github.event.client_payload.profiles) }}
+        run: |
+          python3 tools/render_member.py \
+            --division "$DIVISION" \
+            --project-id "$PROJECT_ID" \
+            --project-number "$PROJECT_NUMBER" \
+            --owner-group "$OWNER_GROUP" \
+            --change-ref "$CHANGE_REF" \
+            --approved-by "$APPROVED_BY" \
+            --profiles-json "$PROFILES_JSON" \
+            --out "perimeter/members/${DIVISION}-${PROJECT_ID}.yaml"
+
+      # The bot always writes stage: dry-run (render_member.py hard-codes it). Promotion to enforced is a
+      # separate, human-approved PR — see docs/3-runbook-promocja-i-break-glass.md.
+      - name: open the pull request
+        uses: peter-evans/create-pull-request@c5a7806660adbe173f04e3e038b0ccdcd758773c # v6.1.0
+        with:
+          branch: onboard/${{ github.event.client_payload.division }}-${{ github.event.client_payload.project_id }}
+          title: "onboard: ${{ github.event.client_payload.division }} / ${{ github.event.client_payload.project_id }} (dry-run)"
+          commit-message: "onboard: add ${{ github.event.client_payload.project_id }} to the dry-run configuration"
+          body: |
+            Opened automatically from ServiceNow **${{ github.event.client_payload.snow_ticket }}**
+            (verified against the ServiceNow API, not against the dispatch payload).
+
+            The project joins the **dry-run configuration only**: violations are logged, nothing is blocked
+            and the project is not protected yet. After a clean observation window a second PR promotes it
+            to enforced.
+
+            Reviewer checklist:
+            - [ ] the project really belongs to this division
+            - [ ] the requested profiles match the described use case
+            - [ ] pre-flight is green (Private Google Access, DNS on the restricted VIP)
+          labels: onboarding, dry-run

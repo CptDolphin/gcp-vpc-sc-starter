@@ -1,0 +1,90 @@
+# .github/workflows/plan.yml
+# Read-only plan against the real organization + policy gates on the plan JSON.
+#
+# WHY gates run on the plan and not only on the YAML: the YAML says what somebody wrote; the plan says what
+# will actually be sent to the API after the renderer resolved profiles and parameters. The plan is the thing
+# that changes the security boundary, so that is what we inspect.
+
+name: plan
+
+on:
+  pull_request:
+    paths:
+      - "perimeter/**"
+      - "terraform/**"
+      - "policy/**"
+      - ".github/workflows/plan.yml"
+
+permissions:
+  contents: read
+  id-token: write # required to mint the OIDC token exchanged via Workload Identity Federation
+  pull-requests: write
+
+concurrency:
+  group: plan-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  plan:
+    name: terraform plan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # Keyless. The read-only service account is the only thing this workflow can ever reach, because the
+      # WIF provider condition pins it to event_name == 'pull_request' — see docs/2-uprawnienia-i-wif.md.
+      - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.9
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.PLAN_SERVICE_ACCOUNT }}
+
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: "1.15.5"
+
+      - name: plan
+        run: |
+          terraform -chdir=terraform init -input=false
+          terraform -chdir=terraform plan -input=false -lock-timeout=5m -out=tfplan.binary
+          terraform -chdir=terraform show -json tfplan.binary > plan.json
+
+      - name: install conftest
+        run: |
+          curl -sSfL -o /tmp/conftest.tar.gz \
+            https://github.com/open-policy-agent/conftest/releases/download/v0.56.0/conftest_0.56.0_Linux_x86_64.tar.gz
+          tar -xzf /tmp/conftest.tar.gz -C /tmp conftest
+          sudo mv /tmp/conftest /usr/local/bin/
+
+      # --data feeds policy.yaml into the rules: the wildcard gate needs to know which services the API
+      # publishes no methods for. Without it the set is empty and every "*" is denied — fail-closed on purpose.
+      - name: policy gates on the plan
+        run: conftest test --policy policy --data perimeter/policy.yaml --namespace vpcsc.perimeter terraform/plan.json
+
+      # The only gate in the pipeline that talks to the live API, and the only place that can catch a service
+      # VPC-SC does not support. validate.yml stays offline by design; this job already holds credentials.
+      - name: baseline against the live list of supported services
+        run: python3 tools/check_supported_services.py --policy perimeter/policy.yaml
+
+      # The plan artifact is what apply consumes. Pinning its digest means the thing that was reviewed is
+      # byte-for-byte the thing that gets applied — no re-plan against a moved target between the two jobs.
+      - name: pin the plan
+        id: pin
+        run: |
+          sha=$(sha256sum terraform/tfplan.binary | cut -d' ' -f1)
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "plan sha256: \`$sha\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tfplan-${{ github.event.pull_request.number }}-${{ steps.pin.outputs.sha }}
+          path: terraform/tfplan.binary
+          retention-days: 5
+
+      - name: comment the human-readable diff
+        run: |
+          {
+            echo "### Plan"
+            echo '```'
+            terraform -chdir=terraform show -no-color tfplan.binary | head -200
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,10 @@
+# Artefakty planu i stanu — nigdy do repo. Plan zawiera pełną treść perimetru (tożsamości, zakresy IP),
+# a state dodatkowo metadane backendu.
+*.tfplan
+*.tfplan.binary
+plan.json
+declarations.json
+violations.json
+violations.md
+.terraform/
+.terraform.lock.hcl.bak

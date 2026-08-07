@@ -1,0 +1,29 @@
+# Piny narzędzi i providera dla repo perimetru.
+#
+# DLACZEGO >= 1.8: `terraform test` i provider-defined functions to floor całego stacku; niżej nie schodzimy.
+# DLACZEGO ~> 7.0 dla google: zasoby Access Context Managera (perimetr, per-resource, per-rule oraz warianty
+# dry-run) są stabilne w linii 7.x. Pinujemy MAJOR, bo perimetr to org-plane singleton — ciche breaking-change
+# w providerze objawiłoby się na obiekcie o organizacyjnym blast-radiusie.
+
+terraform {
+  required_version = ">= 1.8, < 2.0"
+
+  required_providers {
+    google = {
+      source  = "hashicorp/google"
+      version = "~> 7.0"
+    }
+  }
+
+  # Backend GCS. Stan perimetru = stan granicy bezpieczeństwa: bucket z versioning + soft-delete,
+  # BEZ retention-lock: stan jest nadpisywany przy każdym apply, a retencja WORM zabrania
+  # skasowania poprzedniej wersji — backend przestaje działać po pierwszym zapisie.
+  backend "gcs" {
+    bucket = "<STATE_BUCKET>"
+    prefix = "vpc-sc/perimeter"
+  }
+}
+
+# Tożsamość: WIF keyless z GitHub Actions (impersonacja SA perimetru). Żadnych kluczy SA w repo ani w
+# sekretach — provider bierze credentiale z tokenu OIDC wymienionego w workflow.
+provider "google" {}

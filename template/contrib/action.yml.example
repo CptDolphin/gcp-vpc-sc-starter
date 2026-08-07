@@ -1,0 +1,116 @@
+# contrib/action.yml
+# Composite action used BY A DIVISION'S OWN REPOSITORY to request a perimeter change.
+#
+# The division's repository never applies anything and needs NO permission in Access Context Manager.
+# It needs exactly two things: read on one JSON file (the contract) and a token that can open a PR.
+#
+# WHY not let them apply: Access Context Manager rewrites the whole org-level policy on every change
+# (read-modify-write). Two repositories applying in parallel overwrite each other's rules — the audit log
+# shows two successful updates and a rule is simply gone. On top of that, `servicePerimeters.update` cannot
+# be scoped below the organization, so every such repository would get the right to change the boundary for
+# the entire company.
+#
+# WHY the contract + gates bundle instead of a submodule: a submodule hands over the WHOLE perimeter
+# repository — including every division's service accounts (perimeter/members/) and your corporate IP ranges
+# (perimeter/access-levels/). Validating one file of your own needs neither.
+#
+# Usage in the division's repository:
+#
+#   - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+#   - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.9            # read-only on the contracts bucket prefix
+#     with:
+#       workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+#       service_account: ${{ vars.CONTRACT_READER_SA }}
+#   - uses: ORG/gcp-vpc-sc/contrib@main
+#     with:
+#       member-file: vpc-sc/prj-example-vertex-prod.yaml
+#       perimeter-repo: ORG/gcp-vpc-sc
+#       contract-uri: gs://ORG-tf-contracts/vpc-sc/contract.json
+#       app-token: ${{ steps.app.outputs.token }}
+
+name: Request VPC-SC perimeter change
+description: Validate a member declaration against the published contract, then ask the perimeter repository to open a PR.
+
+inputs:
+  member-file:
+    description: Path to the member YAML in THIS repository.
+    required: true
+  perimeter-repo:
+    description: ORG/REPO of the perimeter repository.
+    required: true
+  contract-uri:
+    description: "gs:// URI of the published contract (read-only access needed)."
+    required: true
+  app-token:
+    description: >
+      Token of a GitHub App installed on both repositories, with `pull_requests: write` on the perimeter
+      repository. GITHUB_TOKEN will NOT work — it is scoped to the repository it was issued for.
+    required: true
+  gates-version:
+    description: >
+      Release tag of the gates bundle, or `latest`. Pin it if you want reproducible validation; use `latest`
+      to see new rules the moment the platform ships them.
+    required: false
+    default: latest
+
+runs:
+  using: composite
+  steps:
+    - name: install tooling
+      shell: bash
+      run: |
+        pip install --quiet pyyaml check-jsonschema
+        curl -sSfL -o /tmp/conftest.tar.gz \
+          https://github.com/open-policy-agent/conftest/releases/download/v0.56.0/conftest_0.56.0_Linux_x86_64.tar.gz
+        tar -xzf /tmp/conftest.tar.gz -C /tmp conftest
+        sudo mv /tmp/conftest /usr/local/bin/
+
+    # Gates = RULES only (schemas + rego). No member data, no IP ranges — see publish-gates.yml.
+    - name: fetch the gates bundle
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.app-token }}
+      run: |
+        if [ "${{ inputs.gates-version }}" = "latest" ]; then
+          gh release download --repo "${{ inputs.perimeter-repo }}" --pattern 'gates.tar.gz' --clobber
+        else
+          gh release download "${{ inputs.gates-version }}" --repo "${{ inputs.perimeter-repo }}" \
+            --pattern 'gates.tar.gz' --clobber
+        fi
+        tar -xzf gates.tar.gz
+
+    # Contract = the list of options you may choose from (profiles, access level names, your own projects).
+    - name: fetch the contract
+      shell: bash
+      run: |
+        gcloud storage cat "${{ inputs.contract-uri }}" > contract.json
+        echo "contract from $(python3 -c 'import json;print(json.load(open("contract.json"))["schema_version"])') schema, \
+        $(python3 -c 'import json;print(len(json.load(open("contract.json"))["profiles"]))') profiles available"
+
+    # Validating HERE is the point: the team sees the error in its own pipeline, in seconds, instead of in
+    # a rejected PR in someone else's repository.
+    - name: validate the declaration
+      shell: bash
+      run: |
+        bash ./gates/validate-local.sh \
+          --member "${{ inputs.member-file }}" \
+          --gates ./gates \
+          --contract ./contract.json
+
+    # change_ref is built by the ACTION, not read from the file — a self-declared reference proves nothing,
+    # and the perimeter repository cross-checks it against the repository that actually sent the dispatch.
+    - name: request the change
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.app-token }}
+      run: |
+        change_ref="pr:${GITHUB_REPOSITORY}#${{ github.event.pull_request.number || github.run_number }}"
+        python3 -c "
+        import json, os, yaml
+        m = yaml.safe_load(open('${{ inputs.member-file }}'))
+        m['change_ref'] = '$change_ref'
+        print(json.dumps({'event_type': 'vpc-sc-external', 'client_payload': {
+            'member': m, 'source_repository': os.environ['GITHUB_REPOSITORY'],
+            'source_sha': os.environ['GITHUB_SHA']}}))
+        " | gh api --method POST "repos/${{ inputs.perimeter-repo }}/dispatches" --input -
+        echo "Zgłoszenie wysłane jako $change_ref — PR powstanie w ${{ inputs.perimeter-repo }}."

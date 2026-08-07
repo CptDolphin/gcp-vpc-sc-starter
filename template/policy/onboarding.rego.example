@@ -1,0 +1,255 @@
+# Bramki na DEKLARACJACH (pliki YAML w perimeter/), zanim cokolwiek trafi do planu.
+#
+# Wejście buduje tools/collect_declarations.py:
+#   { "policy": {...}, "profiles": {...}, "members": {...}, "today": "YYYY-MM-DD" }
+#
+# DLACZEGO część reguł działa tu, a nie na plan-JSON: promocja do enforced i wygasanie wpisów to warunki
+# o CZASIE i o INTENCJI (ticket, właściciel, data przeglądu) — w planie ich nie widać, bo plan pokazuje
+# tylko kształt zasobów. Reguły o kształcie reguł siedzą osobno, w perimeter.rego.
+
+package vpcsc.onboarding
+
+import rego.v1
+
+# --- baseline ---------------------------------------------------------------------------------------
+
+# Vertex AI jest powodem istnienia perimetru. Ta reguła działa NIEZALEŻNIE od trybu brownfield: nawet gdy
+# Terraform nie zarządza szkieletem, policy.yaml jest dokumentem, na którym opierają się wszystkie guardy —
+# ciche wyjęcie aiplatform zamieniłoby je w atrapę.
+deny contains msg if {
+	not "aiplatform.googleapis.com" in input.policy.restricted_services
+	msg := "policy.yaml: restricted_services musi zawierać aiplatform.googleapis.com (Vertex AI chroniony od dnia zero, DEC-1)"
+}
+
+# --- członkowie -------------------------------------------------------------------------------------
+
+# Profil musi istnieć w katalogu. Literówka w nazwie inaczej przechodzi jako „członek bez reguł":
+# projekt ląduje w perimetrze, żadna reguła nie powstaje, a po promocji ruch jest odcięty.
+deny contains msg if {
+	some name, m in input.members
+	some p in m.profiles
+	not input.profiles[p.name]
+	msg := sprintf("members/%s: profil %q nie istnieje w perimeter/profiles/", [name, p.name])
+}
+
+# Każdy parametr zadeklarowany w profilu musi mieć wartość w pliku członka — i odwrotnie, żadnych
+# parametrów-widm. Brakujący parametr renderuje się na pustą listę tożsamości, czyli regułę, która nikogo
+# nie autoryzuje (i nikt tego nie zauważy do czasu enforce).
+deny contains msg if {
+	some name, m in input.members
+	some p in m.profiles
+	some param in input.profiles[p.name].parameters
+	not p.params[param.name]
+	msg := sprintf("members/%s: profil %q wymaga parametru %q", [name, p.name, param.name])
+}
+
+deny contains msg if {
+	some name, m in input.members
+	some p in m.profiles
+	some key, _ in p.params
+	not param_declared(input.profiles[p.name], key)
+	msg := sprintf("members/%s: parametr %q nie jest zadeklarowany w profilu %q (literówka?)", [name, key, p.name])
+}
+
+param_declared(profile, key) if {
+	some param in profile.parameters
+	param.name == key
+}
+
+# Jeden projekt = jeden plik członka. Dwa pliki na ten sam projekt to nie „duplikat w dokumentacji": renderer
+# wyprodukowałby dwa zasoby ACM o różnych kluczach `for_each` i tej samej treści, więc Terraform próbowałby
+# dodać ten projekt do perimetru dwa razy (błąd API albo — przy zasobach granularnych — dwóch właścicieli tego
+# samego wpisu, z których każdy apply usuwa cudzy). Gorzej: dwie dywizje uważałyby się za właściciela.
+deny contains msg if {
+	some name1, m1 in input.members
+	some name2, m2 in input.members
+	name1 < name2
+	m1.project_number == m2.project_number
+	msg := sprintf(
+		"members/%s i members/%s deklarują ten sam projekt (%s) — jeden projekt może mieć tylko jeden wpis",
+		[name1, name2, m1.project_number],
+	)
+}
+
+# To samo dla project_id: numer i ID muszą się zgadzać 1:1, a rozjazd (ten sam ID, inny numer) oznacza
+# literówkę w numerze — czyli dopisanie do perimetru CUDZEGO projektu pod właściwie wyglądającą nazwą.
+deny contains msg if {
+	some name1, m1 in input.members
+	some name2, m2 in input.members
+	name1 < name2
+	m1.project_id == m2.project_id
+	m1.project_number != m2.project_number
+	msg := sprintf(
+		"members/%s i members/%s mają ten sam project_id (%s), ale różne numery (%s vs %s) — jeden z nich wskazuje inny projekt",
+		[name1, name2, m1.project_id, m1.project_number, m2.project_number],
+	)
+}
+
+# --- promocja do enforced ---------------------------------------------------------------------------
+
+# Okno obserwacji: minimum dni w dry-run. Bez tej bramki „promocja" staje się formalnością zaraz po
+# merge'u wniosku — a wtedy cała dwustopniowość jest teatrem (DEC-4).
+deny contains msg if {
+	some name, m in input.members
+	m.stage == "enforced"
+	days := days_between(m.dry_run_since, input.today)
+	days < input.policy.onboarding.dry_run_min_days
+	msg := sprintf(
+		"members/%s: promocja do enforced po %d dniach dry-run, wymagane minimum %d (perimeter/policy.yaml)",
+		[name, days, input.policy.onboarding.dry_run_min_days],
+	)
+}
+
+# Raport naruszeń (violations-report.yml) wstrzykuje `violations_last_window` per członek. Brak klucza =
+# brak dowodu, że okno było czyste — a „nie mamy danych" nie jest tym samym co „nie było naruszeń".
+deny contains msg if {
+	some name, m in input.members
+	m.stage == "enforced"
+	not input.violations_last_window[name]
+	msg := sprintf("members/%s: brak raportu naruszeń dla okna obserwacji — promocja bez dowodu, że jest czysto", [name])
+}
+
+deny contains msg if {
+	some name, m in input.members
+	m.stage == "enforced"
+	count := input.violations_last_window[name]
+	count > 0
+	msg := sprintf("members/%s: %d naruszeń w oknie obserwacji — napraw przepływy albo dodaj profil przed promocją", [name, count])
+}
+
+# --- kanały wejścia ---------------------------------------------------------------------------------
+# Trzy kanały prowadzą do jednego mutatora (DEC-7). Każdy ma inny dowód autoryzacji:
+#   snow:  ticket zweryfikowany oddzwonieniem do ServiceNow (workflow intake — poza rego)
+#   pr:    repozytorium zespołu — TU sprawdzamy, czy wolno mu wnioskować o TEN projekt
+#   manual: wpis ręczny — dowodem jest approval CODEOWNERS (poza rego; egzekwuje branch protection)
+
+# Kanał `pr:` może zgłaszać WYŁĄCZNIE projekty przypisane temu repozytorium w perimeter/contributors.yaml.
+# Bez tej reguły repo dowolnego zespołu dopisałoby sobie cudzy projekt do perimetru — a wniosek wyglądałby
+# tak samo legalnie jak każdy inny.
+deny contains msg if {
+	some name, m in input.members
+	startswith(m.change_ref, "pr:")
+	repo := contributor_repo(m.change_ref)
+	not contributor_allows(repo, m.project_id)
+	msg := sprintf(
+		"members/%s: repozytorium %q nie ma projektu %q na liście dozwolonych (perimeter/contributors.yaml)",
+		[name, repo, m.project_id],
+	)
+}
+
+# Repo zgłaszające musi należeć do tej samej dywizji co wpis — inaczej zespół A zgłasza w imieniu zespołu B,
+# a właścicielem wpisu (i adresatem raportu naruszeń) zostaje ktoś, kto o niczym nie wie.
+deny contains msg if {
+	some name, m in input.members
+	startswith(m.change_ref, "pr:")
+	repo := contributor_repo(m.change_ref)
+	some c in object.get(input, "contributors", [])
+	c.repository == repo
+	c.division != m.division
+	msg := sprintf("members/%s: repozytorium %q jest przypisane do dywizji %q, a wpis deklaruje %q",
+		[name, repo, c.division, m.division])
+}
+
+contributor_repo(ref) := repo if {
+	trimmed := trim_prefix(ref, "pr:")
+	parts := split(trimmed, "#")
+	repo := parts[0]
+}
+
+contributor_allows(repo, project) if {
+	some c in object.get(input, "contributors", [])
+	c.repository == repo
+	project in c.allowed_projects
+}
+
+# --- reguły baseline ---------------------------------------------------------------------------------
+# Reguła stosowana do WSZYSTKICH członków bez warunku kontekstu to realne poszerzenie granicy. Dopuszczamy
+# to (skaner woła z własnej infrastruktury i nie spełni korpo-access-levelu), ale wyłącznie JAWNIE — pole
+# `allow_without_access_level: true`. Pominięcie pola nie może dawać tego samego skutku co jego ustawienie.
+deny contains msg if {
+	some rule in object.get(input.policy, "baseline_ingress", [])
+	count(object.get(rule, "access_levels", [])) == 0
+	not object.get(rule, "allow_without_access_level", false)
+	msg := sprintf(
+		"policy.yaml baseline_ingress[%q]: brak access_levels — dopuszczalne tylko z jawnym allow_without_access_level: true (approval Security)",
+		[rule.title],
+	)
+}
+
+# Baseline mnoży się przez liczbę członków, więc `*` w metodach kosztuje tu najwięcej — i daje skanerowi
+# prawo do wszystkiego w każdym chronionym projekcie.
+# WYJĄTEK ten sam co w perimeter.rego i z tego samego powodu: dla usług, którym ACM nie publikuje listy metod
+# (`supportedMethods` puste), `*` jest JEDYNĄ wartością, jaką API przyjmuje. Tutaj listę czytamy wprost
+# z `input.policy` — collect_declarations.py podaje cały baseline, więc `--data` nie jest potrzebne.
+# `object.get` z domyślną pustą listą: brak pola = zero wyjątków = każdy `*` odrzucony (fail-closed).
+deny contains msg if {
+	some rule in object.get(input.policy, "baseline_ingress", [])
+	some op in rule.operations
+	"*" in op.methods
+	not op.service in object.get(input.policy, "services_without_method_selectors", [])
+	msg := sprintf("policy.yaml baseline_ingress[%q]: method \"*\" na %s — wypisz metody jawnie", [rule.title, op.service])
+}
+
+# --- egress do zasobów POZA Google Cloud ------------------------------------------------------------
+# Pole `externalResources` w regule egress obsługuje WYŁĄCZNIE zasoby BigQuery Omni (s3:// i azure://).
+# Obie reguły poniżej łapią błąd, który inaczej wychodzi dopiero na apply — a przy granicy bezpieczeństwa
+# „wyjdzie na apply" znaczy: w oknie, w którym pipeline już zaczął zmieniać politykę produkcyjną.
+
+# Operacja na innej usłudze niż BigQuery wygląda w pliku tak samo poprawnie jak właściwa, a nie zadziała:
+# API zastosuje regułę, ale `externalResources` nie obejmie ruchu tej usługi. Efekt = reguła-atrapa.
+deny contains msg if {
+	some pname, prof in input.profiles
+	some rule in object.get(prof, "egress", [])
+	object.get(rule, "to_external_from", "") != ""
+	some op in rule.operations
+	op.service != "bigquery.googleapis.com"
+	msg := sprintf(
+		"profiles/%s: reguła %q ma zasoby zewnętrzne i operację na %s — externalResources działa wyłącznie dla BigQuery Omni",
+		[pname, rule.title, op.service],
+	)
+}
+
+# Format identyfikatora. `arn:aws:s3:::bucket` to najczęstsza pomyłka (bo tak wygląda w AWS), a API oczekuje
+# `s3://BUCKET`. Bez tej bramki literówka przechodzi review i pada dopiero na apply.
+deny contains msg if {
+	some name, m in input.members
+	some prof in m.profiles
+	some rule in object.get(input.profiles[prof.name], "egress", [])
+	key := object.get(rule, "to_external_from", "")
+	key != ""
+	some res in object.get(prof.params, key, [])
+	not valid_external_resource(res)
+	msg := sprintf(
+		"members/%s: %q nie jest obsługiwanym zasobem zewnętrznym — wymagane s3://BUCKET albo azure://ACCOUNT.blob.core.windows.net/CONTAINER",
+		[name, res],
+	)
+}
+
+valid_external_resource(res) if startswith(res, "s3://")
+
+valid_external_resource(res) if startswith(res, "azure://")
+
+# --- higiena wpisów ---------------------------------------------------------------------------------
+
+# Data przeglądu w przeszłości = wpis, którego nikt nie potwierdził. Sweeper otwiera PR offboardingowy,
+# ale sama bramka pilnuje, żeby taki wpis nie przeszedł niezauważony w innym PR-ze.
+deny contains msg if {
+	some name, m in input.members
+	m.review_by < input.today
+	msg := sprintf("members/%s: review_by (%s) minął — potwierdź wpis albo go usuń", [name, m.review_by])
+}
+
+# Wyjątek bez uzasadnienia to reguła, której nikt nie umie później ocenić.
+deny contains msg if {
+	some name, m in input.members
+	some e in object.get(m, "exceptions", [])
+	count(e.justification) < 20
+	msg := sprintf("members/%s: wyjątek %q wymaga uzasadnienia (min. 20 znaków)", [name, e.title])
+}
+
+# Prosta różnica dat ISO (YYYY-MM-DD) w dniach — bez stref czasowych, bo okno liczymy w dobach.
+days_between(from, to) := days if {
+	f := time.parse_ns("2006-01-02", from)
+	t := time.parse_ns("2006-01-02", to)
+	days := (t - f) / 86400000000000
+}

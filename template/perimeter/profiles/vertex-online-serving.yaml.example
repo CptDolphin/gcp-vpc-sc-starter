@@ -1,0 +1,36 @@
+# Profil: wywołanie online prediction / Gemini na projekcie członka przez kod działający POZA perimetrem.
+#
+# DLACZEGO profil, a nie surowa reguła w tickecie: ten sam wzorzec powtarza się w każdej dywizji, która
+# wystawia model aplikacji. Napisany raz i zreview'owany raz, kosztuje ~6 atrybutów na członka zamiast
+# nieprzewidywalnej liczby z ręcznie pisanej reguły (limit 6000/konfigurację — policy.yaml).
+
+schema_version: 1
+name: vertex-online-serving
+summary: "Callers outside the perimeter invoke Vertex online prediction on the member project."
+risk: low # low | medium | high — steruje ścieżką review (validate.yml)
+
+# Parametry, które MUSI podać członek w members/*.yaml (profiles[].params).
+parameters:
+  - name: caller_identities
+    description: "Service accounts calling the prediction endpoint (never ANY_*; explicit SAs only)."
+  - name: access_levels
+    description: "Access levels the caller must satisfy (corporate network / managed device)."
+
+ingress:
+  - title: online-prediction
+    # `identities_from` / `access_levels_from` wskazują parametr członka. Renderer w Terraform robi lookup —
+    # dzięki temu profil nie zna żadnej konkretnej tożsamości, a plik członka nie zna składni VPC-SC.
+    identities_from: caller_identities
+    access_levels_from: access_levels
+    to: member_project # jedyna dozwolona wartość: projekt członka (nigdy "*")
+    operations:
+      - service: aiplatform.googleapis.com
+        # Metody wypisane JAWNIE. `*` byłoby wygodniejsze i dawało wywołującemu prawo do trenowania,
+        # eksportu modelu i czytania datasetów — czyli dokładnie tego, przed czym perimetr ma chronić.
+        # `*` to JEDYNA wartość, jaką API tu przyjmuje: `supportedMethods` dla tej usługi jest puste
+        # (`gcloud access-context-manager supported-services describe <usluga>`), więc wypisanie metod
+        # jawnie kończy się `Error 400: METHOD ... is not supported`. Usługa jest wymieniona w policy.yaml
+        # §services_without_method_selectors, a check_supported_services.py pilnuje tej listy wobec API.
+        methods: ["*"]
+
+egress: []

@@ -1,0 +1,72 @@
+# .github/workflows/drift.yml
+# Nightly: does the live perimeter still match what git says?
+#
+# WHY this exists at all: it is the property that a ticket-driven API integration would have taken away.
+# Because the perimeter is declared, a change made by hand in the console is detectable — it shows up here
+# as a non-empty plan on an untouched repository.
+
+name: drift
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  issues: write
+
+jobs:
+  drift:
+    name: detect out-of-band changes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.9
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.PLAN_SERVICE_ACCOUNT }}
+
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: "1.15.5"
+
+      - name: plan with detailed exit code
+        id: plan
+        run: |
+          terraform -chdir=terraform init -input=false
+          set +e
+          terraform -chdir=terraform plan -input=false -detailed-exitcode -no-color > drift.txt
+          code=$?
+          set -e
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          # 0 = no changes, 2 = changes present, 1 = error. Only 2 means drift, so 2 must NOT fail the job —
+          # the drift itself is reported as an issue below. A real error (1) still fails loudly.
+          tail -60 drift.txt >> "$GITHUB_STEP_SUMMARY"
+          if [ "$code" = "1" ]; then
+            exit 1
+          fi
+
+      - name: open an issue on drift
+        if: steps.plan.outputs.code == '2'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('drift.txt', 'utf8').slice(0, 60000);
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `drift: the live perimeter differs from git (${new Date().toISOString().slice(0,10)})`,
+              labels: ['drift', 'security'],
+              body: [
+                'The nightly plan is not empty on an unchanged repository. Someone changed the perimeter',
+                'outside this pipeline, or an apply did not complete.',
+                '',
+                'Do not "fix" this by applying blindly: first find out WHO changed WHAT (audit logs),',
+                'then decide whether git or the live state is right.',
+                '', '```', body, '```',
+              ].join('\n'),
+            });

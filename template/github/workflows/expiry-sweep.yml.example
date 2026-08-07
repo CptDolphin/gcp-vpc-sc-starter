@@ -1,0 +1,68 @@
+# .github/workflows/expiry-sweep.yml
+# Members whose review_by has passed get an offboarding PR opened for them.
+#
+# WHY: a perimeter without expiry only grows. Nobody ever files a ticket to be REMOVED, so after two years
+# the member list stops describing reality and every review turns into archaeology. Expiry flips the default
+# from "stays forever unless someone objects" to "leaves unless someone confirms".
+
+name: expiry-sweep
+
+on:
+  schedule:
+    - cron: "0 7 1 * *" # first day of the month
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sweep:
+    name: propose offboarding for stale members
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: find expired members
+        id: find
+        run: |
+          pip install --quiet pyyaml
+          python3 - <<'PY' > expired.txt
+          import datetime, pathlib, yaml
+          today = datetime.date.today()
+          for f in sorted(pathlib.Path("perimeter/members").glob("*.yaml")):
+              m = yaml.safe_load(f.read_text())
+              if datetime.date.fromisoformat(str(m["review_by"])) < today:
+                  print(f"{f}\t{m['project_id']}\t{m['owner_group']}")
+          PY
+          count=$(wc -l < expired.txt | tr -d ' ')
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          cat expired.txt >> "$GITHUB_STEP_SUMMARY"
+
+      - name: remove expired member files
+        if: steps.find.outputs.count != '0'
+        run: cut -f1 expired.txt | xargs -r git rm
+
+      # The PR is a PROPOSAL, not an execution: the owner has the review window to say "still needed" and
+      # push a new review_by instead. Removing a member is itself a change to the boundary, so it goes
+      # through the same gates as adding one.
+      - name: open the offboarding PR
+        if: steps.find.outputs.count != '0'
+        uses: peter-evans/create-pull-request@c5a7806660adbe173f04e3e038b0ccdcd758773c # v6.1.0
+        with:
+          branch: offboard/expired-${{ github.run_id }}
+          title: "offboard: ${{ steps.find.outputs.count }} member(s) past their review date"
+          commit-message: "offboard: remove members whose review_by has passed"
+          body: |
+            These members passed their `review_by` date and nobody confirmed them.
+
+            **Owners:** to keep a project in the perimeter, close this PR for your entry and open one that
+            sets a new `review_by` (with a ticket). Silence means the project leaves the perimeter.
+
+            Removing a project from the enforced configuration means it stops being protected — that is a
+            security change, so this PR needs the same review as onboarding.
+          labels: offboarding, expiry

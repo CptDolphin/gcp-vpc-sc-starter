@@ -1,0 +1,39 @@
+# Lokalne bramki przed commitem — te same, które CI uruchamia ponownie.
+# DLACZEGO duplikacja: pre-commit skraca pętlę zwrotną, CI jest tym, co realnie blokuje merge. Bramka
+# wyłącznie lokalna jest sugestią, bo `--no-verify` istnieje.
+repos:
+  - repo: https://github.com/antonbabenko/pre-commit-terraform
+    rev: v1.96.1
+    hooks:
+      - id: terraform_fmt
+      - id: terraform_validate
+      # `__GIT_WORKING_DIR__` rozwiązuje hook do korzenia repo — bez tego tflint szuka konfiguracji w
+      # katalogu stacku i po cichu jej nie znajduje (ta sama pułapka co przy `--chdir` w CI).
+      - id: terraform_tflint
+        args:
+          - --args=--config=__GIT_WORKING_DIR__/.tflint.hcl
+          - --args=--minimum-failure-severity=notice
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-yaml
+      - id: check-json
+
+  - repo: local
+    hooks:
+      # Deklaracje muszą przejść schemat i reguły ZANIM trafią do planu — schemat łapie nudne błędy
+      # (brak właściciela, zła data) z komunikatem, na który da się zareagować bez czytania rego.
+      - id: declarations
+        name: schema + reguly onboardingu
+        entry: bash -c 'python3 tools/collect_declarations.py > /tmp/decl.json && conftest test --policy policy --namespace vpcsc.onboarding /tmp/decl.json'
+        language: system
+        pass_filenames: false
+        files: ^perimeter/

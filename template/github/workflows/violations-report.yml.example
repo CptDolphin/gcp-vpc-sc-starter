@@ -1,0 +1,66 @@
+# .github/workflows/violations-report.yml
+# Turns raw dry-run violations into something an owner can act on, and into the EVIDENCE the promotion gate
+# requires. Without this workflow "14 clean days" is a claim; with it, it is a file.
+
+name: violations-report
+
+on:
+  schedule:
+    - cron: "0 6 * * 1" # Monday morning: the report lands before the week's promotion PRs
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "observation window in days"
+        default: "14"
+
+permissions:
+  contents: read
+  id-token: write
+  issues: write
+
+jobs:
+  report:
+    name: dry-run violations per member
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.9
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.PLAN_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2.2.1
+
+      # dryRun=true is the whole filter: these are the calls that WOULD have been blocked. After a member is
+      # promoted the same calls appear with dryRun=false and an actual denial — which is what we are avoiding.
+      - name: read audit logs
+        env:
+          ORG_ID: ${{ vars.ORG_ID }}
+          DAYS: ${{ github.event.inputs.days || '14' }}
+        run: |
+          gcloud logging read \
+            'protoPayload.metadata."@type"="type.googleapis.com/google.cloud.audit.VpcServiceControlAuditMetadata"
+             AND protoPayload.metadata.dryRun="true"' \
+            --organization="$ORG_ID" --freshness="${DAYS}d" --format=json > raw.json
+          echo "entries: $(python3 -c 'import json,sys;print(len(json.load(open("raw.json"))))')"
+
+      - name: build the report
+        run: |
+          pip install --quiet pyyaml
+          python3 tools/collect_declarations.py > declarations.json
+          python3 tools/violations_report.py \
+            --logs raw.json --declarations declarations.json \
+            --json-out violations.json --markdown-out violations.md
+          cat violations.md >> "$GITHUB_STEP_SUMMARY"
+
+      # violations.json is the artifact a promotion PR must attach. The rego rule treats a MISSING entry as
+      # "no evidence" rather than "no violations" — otherwise skipping the report would be the easy way to
+      # pass the gate.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: violations
+          path: |
+            violations.json
+            violations.md
+          retention-days: 30

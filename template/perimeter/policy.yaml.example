@@ -1,0 +1,154 @@
+# perimeter/policy.yaml — baseline perimetru. WŁASNOŚĆ CENTRALNA (Security + Networking, CODEOWNERS).
+#
+# To jedyny plik, w którym mieszka treść chroniona przed dywizjami: lista usług objętych granicą, parametry
+# okna dry-run i budżet atrybutów. Dywizje dokładają WYŁĄCZNIE pliki w members/ (i, przez wyjątek, w profiles/).
+#
+# DLACZEGO to nie jest zmienna Terraform: baseline ma być czytelny dla człowieka, który nie zna HCL
+# (audytor, security officer, nowy członek zespołu sieciowego) i ma być diffowalny w PR bez czytania planu.
+
+schema_version: 1
+
+organization:
+  org_id: "<ORG_ID>" # numer organizacji GCP
+  # Nazwa (numer) org-level access policy. Organizacja ma DOKŁADNIE JEDNĄ taką politykę — perimetr jest
+  # org-plane singletonem, stąd single-flight apply w workflow (DEC-6).
+  access_policy_name: "<ACCESS_POLICY_NUMBER>"
+
+perimeter:
+  name: ai_core # nazwa techniczna (immutable po utworzeniu)
+  title: "AI core perimeter"
+  # BROWNFIELD vs GREENFIELD — najważniejszy przełącznik w tym pliku.
+  #
+  # false (DOMYŚLNIE, gdy perimetr JUŻ ISTNIEJE): Terraform NIE zarządza szkieletem. Dokłada wyłącznie
+  #   członków i reguły do istniejącego perimetru, którego treść (restricted_services) pozostaje u
+  #   obecnego właściciela. Blast-radius pierwszego apply = dodanie zasobów, zero ryzyka nadpisania
+  #   cudzej konfiguracji. `restricted_services` niżej służy wtedy TYLKO za dokumentację i wejście dla
+  #   guardów OPA — nie jest wysyłane do API.
+  # true (greenfield albo świadome przejęcie): Terraform tworzy/zarządza szkieletem. Przy istniejącym
+  #   perimetrze WYMAGA importu (docs/4-brownfield-import.md) — inaczej apply spróbuje utworzyć obiekt,
+  #   który już jest, albo nadpisze jego treść listą z tego pliku.
+  manage_skeleton: false
+
+# Usługi objęte granicą. aiplatform = Vertex AI (Agent Engine, RAG Engine, Vector Search, Model Garden).
+# DLACZEGO nie samo aiplatform: Vertex realnie czyta i pisze przez inne API — model z GCS, dane z BigQuery,
+# obrazy treningowe z Artifact Registry, notebooki przez notebooks. Perimetr chroniący tylko aiplatform
+# zostawia dane w miejscu, z którego i tak da się je wyprowadzić. Guard OPA (baseline_locked.rego) blokuje
+# usunięcie aiplatform z tej listy.
+restricted_services:
+  - aiplatform.googleapis.com
+  - storage.googleapis.com
+  - bigquery.googleapis.com
+  - artifactregistry.googleapis.com
+  - notebooks.googleapis.com
+  - logging.googleapis.com
+  - monitoring.googleapis.com
+
+# vpc_accessible_services = co wolno wołać Z WNĘTRZA perimetru. Trzymamy 1:1 z restricted_services.
+# DLACZEGO 1:1: pod-skopowana lista cicho psuje bootstrap workloadów (usługa objęta granicą, ale
+# niedostępna od środka = błąd, który wygląda jak awaria aplikacji, nie jak polityka).
+vpc_accessible_services:
+  enable_restriction: true
+  same_as_restricted: true
+
+# Usługi, dla których Access Context Manager NIE PUBLIKUJE listy wspieranych metod — sprawdź komendą
+# `gcloud access-context-manager supported-services describe <usluga>`: pole `supportedMethods` jest puste.
+# Dla nich `methods: ["*"]` w profilu jest JEDYNĄ wartością, jaką API przyjmuje; wypisanie metod jawnie
+# kończy się `Error 400: METHOD ... is not supported`. To nie jest poluzowanie reguły „wypisz metody jawnie",
+# tylko jej granica: tam, gdzie API nie zna metod, wybór jest między `*` a regułą, która nie powstanie.
+#
+# Lista jest DEKLARACJĄ pod CODEOWNERS security, ale nie jest jej się wierzy na słowo: `tools/check_supported_services.py`
+# w `plan.yml` porównuje ją z żywym API i PADA, gdy ktoś dopisze tu usługę, która metody publikuje
+# (czyli próbuje przemycić `*` tam, gdzie da się wypisać metody) albo użyje `*` dla usługi spoza listy.
+services_without_method_selectors:
+  - aiplatform.googleapis.com
+  - notebooks.googleapis.com
+  - monitoring.googleapis.com
+
+# Parametry dwustopniowego onboardingu (DEC-4). Zmiana tych wartości = zmiana reżimu bezpieczeństwa
+# dla wszystkich dywizji, dlatego siedzą w baseline, a nie w pliku członka.
+onboarding:
+  dry_run_min_days: 14 # minimum od dry_run_since do promocji
+  clean_window_days: 7 # ostatnie N dni muszą być bez naruszeń
+
+# Budżet atrybutów: perimetr ma limit 6000 atrybutów NA KONFIGURACJĘ, liczony osobno dla enforced i dry-run
+# (docs: VPC SC quotas). Guard CI liczy zachowawczo i pada powyżej progu — próg, nie limit, żeby zapchanie
+# było wykryte z zapasem na reakcję (nowy profil / konsolidacja / decyzja o drugim perimetrze, DEC-1).
+attribute_budget:
+  limit_per_config: 6000
+  warn_at_percent: 70
+
+# Kontrakt — wąski JSON publikowany po każdym apply dla repozytoriów zespołów.
+#
+# DLACZEGO to istnieje: zespół musi wiedzieć, jakie profile są dostępne i jakich parametrów wymagają. Bez
+# kontraktu musiałby wciągnąć to repo jako submodule — a wtedy dostaje RAZEM Z TYM katalog members/ wszystkich
+# dywizji i wasze zakresy IP z access-levels/. Kontrakt daje mu ~4 KB tego, co potrzebuje.
+#
+# DLACZEGO nie data source: provider Terraforma NIE MA data source dla service perimetra (sprawdzone w google
+# i google-beta — są tylko access_policy, access_policy_iam_policy i supported_service/s). Odczyt treści
+# perimetru wymagałby `servicePerimeters.get` na organizacji, czyli wglądu w całą granicę. To zresztą
+# oficjalna rekomendacja HashiCorpa: publikuj dane do konsumpcji zewnętrznej osobno, nie przez remote state.
+contract:
+  # Dedykowany bucket, NIE ten ze stanem. Jeden błąd w polityce kontraktów ma wtedy w najgorszym razie
+  # skutek „ktoś przeczytał listę profili", a nie „ktoś przeczytał pełną mapę granicy".
+  bucket: "<CONTRACTS_BUCKET>"
+  path: "vpc-sc/contract.json"
+  # Czy publikować listę członków (division/project_id/stage — BEZ reguł i tożsamości). Zespoły zwykle chcą
+  # wiedzieć, czy ich projekt już jest w perimetrze i na jakim etapie.
+  publish_members: true
+  # Nazwa bucketa STANU — wyłącznie do guardu. Terraform nie pozwala odczytać konfiguracji backendu z HCL,
+  # więc `precondition` w contract.tf nie ma jak sprawdzić samodzielnie, czy nie publikujemy kontraktu tam,
+  # gdzie leży state. Ta wartość musi być identyczna z `bucket` w terraform/versions.tf.
+  state_bucket: "<STATE_BUCKET>"
+
+# Reguły ingress stosowane do KAŻDEGO członka perimetru — niezależnie od wybranych profili.
+#
+# DLACZEGO to nie jest profil: skanery bezpieczeństwa, monitoring i backup potrzebują dostępu do WSZYSTKICH
+# projektów w perimetrze. Gdyby były profilem, każda dywizja musiałaby pamiętać, żeby go wybrać — a pierwsza,
+# która zapomni, wypadnie ze skanowania dokładnie w momencie promocji do enforced. I nikt tego nie zauważy,
+# bo brak findingów wygląda jak brak problemów.
+#
+# To jest ta klasa przepływów, o której ludzie zapominają przed pierwszym enforce: „to nasze własne narzędzia",
+# a perimetr nie zna tej kategorii — widzi wywołanie API spoza granicy i odrzuca je.
+#
+# Każda reguła tutaj konsumuje budżet atrybutów × liczbę członków, więc trzymamy je WĄSKO: konkretne
+# tożsamości, konkretne metody read-only.
+baseline_ingress:
+  - title: security-scanner-read
+    # Konta serwisowe skanerów (CNAPP typu Wiz, SCC, agentless). Imiennie — nigdy ANY_SERVICE_ACCOUNT.
+    identities:
+      - "serviceAccount:<SCANNER_SA>@<SCANNER_PROJECT>.iam.gserviceaccount.com"
+    # Skaner woła z własnej infrastruktury, więc nie spełni korporacyjnego access levelu. Pusta lista
+    # oznacza autoryzację wyłącznie tożsamością — dopuszczalne TYLKO dla operacji read-only i tylko dla
+    # tożsamości, którą sami kontrolujemy. Reguła OPA `ingress bez access levelu` jest tu świadomie
+    # obchodzona przez `allow_without_access_level: true` i wymaga approvalu Security.
+    access_levels: []
+    allow_without_access_level: true
+    operations:
+      - service: storage.googleapis.com
+        methods: ["google.storage.buckets.get", "google.storage.buckets.list", "google.storage.objects.list"]
+      - service: compute.googleapis.com
+        methods: ["InstancesService.Get", "InstancesService.List", "DisksService.Get"]
+      - service: bigquery.googleapis.com
+        methods: ["TableService.GetTable", "DatasetService.ListDatasets"]
+      # aiplatform nie publikuje metod (services_without_method_selectors) — `*` to jedyna wartość, jaką
+      # API przyjmuje. Zawężenie skanera zostaje po stronie jego własnych uprawnień IAM, nie tutaj.
+      - service: aiplatform.googleapis.com
+        methods: ["*"]
+
+# Monitoring perimetru — metryki log-based i alerty (terraform/monitoring.tf).
+#
+# DLACZEGO to jest tutaj, a nie „w monitoringu": perimetr bez alertu jest granicą, o której dowiesz się od
+# użytkownika. Trzy sygnały mają konsumenta: naruszenia ENFORCED (ktoś jest blokowany teraz — page),
+# naruszenia DRY-RUN (ktoś zobaczy blokadę po promocji — informacyjnie) i zmiana konfiguracji POZA
+# pipeline'em (git przestał opisywać rzeczywistość).
+#
+# Pominięcie tej sekcji = brak metryk i alertów. Bezpieczna degradacja w sensie „nic się nie zepsuje",
+# ale świadomie ślepa — jeśli ją pomijasz, zapisz gdzieś, kto zamiast tego patrzy na SCC.
+monitoring:
+  # Projekt, w którym powstają metryki i alerty. Zwykle centralny projekt monitoringu, nie projekt dywizji.
+  project_id: "<MONITORING_PROJECT>"
+  # Kanały powiadomień (utworzone osobno — alert bez kanału to alert, którego nikt nie widzi).
+  notification_channels: []
+  # Konto apply pipeline'u — jego zmiany są OCZEKIWANE i wykluczamy je z alertu o zmianach poza pipeline'em.
+  # Musi zgadzać się z APPLY_SERVICE_ACCOUNT w zmiennych repo, inaczej alert będzie odpalał przy każdym apply.
+  apply_service_account: "sa-vpcsc-apply@<PROJEKT>.iam.gserviceaccount.com"

@@ -1,0 +1,77 @@
+# iam-bootstrap — tożsamości i uprawnienia dla repozytorium perimetru
+
+**Applikuje: zespół IAM / architekt** (uprawnienia org-admin). **Nie** pipeline perimetru — to jest kod,
+który *nadaje* uprawnienia, więc nie może go stosować tożsamość, która z nich korzysta.
+
+Osobny katalog = osobny state i osobny właściciel. Cały stack jest jednorazowy: po apply repozytorium
+perimetru działa samo, a ten katalog rusza się tylko przy zmianie modelu dostępów.
+
+## Co powstaje
+
+| Zasób | Po co |
+|---|---|
+| `sa-vpcsc-plan` | read-only; uruchamiane przez **każdy** pull request |
+| `sa-vpcsc-apply` | jedyna tożsamość modyfikująca perimetr; tylko z `main` + environment z reviewerami |
+| custom rola `vpcScPerimeterWriter` | `servicePerimeters.get/list/**update**` + access levels — **bez** create/delete |
+| 4 role read-only na org dla `plan` | `policyReader` (plan), `cloudasset.viewer` + `compute.networkViewer` + `dns.reader` (pre-flight) |
+| `storage.objectAdmin` na **prefiksie** stanu | backend GCS bierze blokadę (`.tflock`), sam odczyt nie wystarcza nawet dla `plan` |
+| pula WIF + provider z `attribute_condition` | dostęp keyless; warunek pinuje **jedno** repozytorium |
+| IAM Deny na `servicePerimeters.delete` / `policies.delete` | twardy zakaz ponad rolami |
+
+## Trzy rzeczy, które warto podnieść przy zatwierdzaniu requestu
+
+**1. To NIE jest `policyEditor`.** Predefiniowana rola daje read-write na politykach razem z prawem
+usunięcia perimetru. Perimetr już istnieje i ma istnieć dalej, więc bierzemy wyłącznie `update`. Różnicę
+widać jednym poleceniem:
+
+```bash
+gcloud iam roles describe roles/accesscontextmanager.policyEditor --format='value(includedPermissions)'
+```
+
+**2. Zakres org-level nie jest naszym wyborem.** Uprawnienia Access Context Managera można nadać wyłącznie
+na organizacji albo na konkretnej polityce — grant na folderze lub projekcie **nie ma żadnego efektu**
+([docs](https://docs.cloud.google.com/access-context-manager/docs/access-control)). Dlatego zawężamy zestaw
+operacji (custom rola + Deny), a nie zasięg. To pierwsze pytanie, które padnie na review.
+
+**3. `_member`, nigdy `_binding`.** `google_organization_iam_binding` jest **authoritative** dla całej roli
+na organizacji: przejąłby ją i przy pierwszym apply usunął wszystkie inne przypisania tej roli w firmie.
+W tym kodzie jest wyłącznie `google_organization_iam_member`.
+
+## Uruchomienie
+
+```bash
+cp terraform.tfvars.sample terraform.tfvars    # uzupełnij 4 wartości
+terraform init
+terraform plan     # <- to jest artefakt do review; przeczytać PRZED apply
+terraform apply
+```
+
+## Weryfikacja po apply (dowód, nie założenie)
+
+```bash
+# custom rola ma dokładnie 9 uprawnień i ani jednego create/delete
+gcloud iam roles describe vpcScPerimeterWriter --organization=<ORG_ID> \
+  --format='value(includedPermissions)' | tr ',' '\n'
+
+# konto plan realnie czyta perimetr
+gcloud access-context-manager perimeters list --policy=<POLICY> \
+  --impersonate-service-account=sa-vpcsc-plan@<PROJ>.iam.gserviceaccount.com
+
+# konto plan NIE może nic zmienić (ma się nie udać — to jest ten test, który potwierdza podział)
+gcloud access-context-manager perimeters update <PERIMETER> --policy=<POLICY> \
+  --add-resources=projects/<NUM> \
+  --impersonate-service-account=sa-vpcsc-plan@<PROJ>.iam.gserviceaccount.com
+
+# Deny działa: apply też nie skasuje perimetru
+gcloud access-context-manager perimeters delete <PERIMETER> --policy=<POLICY> \
+  --impersonate-service-account=sa-vpcsc-apply@<PROJ>.iam.gserviceaccount.com
+```
+
+Dwa ostatnie polecenia **mają zakończyć się błędem**. Jeśli przejdą, podział uprawnień nie działa i nie ma
+sensu iść dalej — a dowiedzieć się o tym z testu jest tanio, z incydentu drogo.
+
+## Do potwierdzenia na dev przed apply
+
+- czy `servicePerimeters.patch` wymaga u was `resourcemanager.projects.get` na dodawanym projekcie
+  (jeśli tak → dochodzi `roles/browser` na folderach dywizji, nadal read-only),
+- nazwy zespołów i projekt tożsamości — wpisane w `terraform.tfvars`.

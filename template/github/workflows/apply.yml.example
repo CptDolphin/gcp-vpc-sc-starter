@@ -1,0 +1,79 @@
+# .github/workflows/apply.yml
+# The ONLY job in this repository that mutates the perimeter.
+#
+# Two things make it safe, and both are load-bearing:
+#   * environment `perimeter-apply` with required reviewers — a merged PR still does not apply until a human
+#     approves the run. This gate lives in GitHub, independent of CODEOWNERS.
+#   * single-flight concurrency — Access Context Manager modifies the org-level policy as a whole
+#     (read-modify-write), so two parallel applies can silently overwrite each other.
+
+name: apply
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "perimeter/**"
+      - "terraform/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+# cancel-in-progress MUST stay false: cancelling an apply mid-flight leaves the policy half-written.
+concurrency:
+  group: vpc-sc-apply
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    name: terraform apply
+    runs-on: ubuntu-latest
+    environment: perimeter-apply # required reviewers: networking + security
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # The write-capable service account. Its WIF condition pins ref == refs/heads/main AND
+      # environment == perimeter-apply, so this identity is unreachable from a pull request.
+      - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.9
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.APPLY_SERVICE_ACCOUNT }}
+
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: "1.15.5"
+
+      # We re-plan on main and apply that plan. WHY not reuse the PR artifact: main may have moved between
+      # review and merge (another division's PR), and applying a stale plan would silently revert it.
+      # The safety here comes from the human gate above plus the policy gates that run again below.
+      - name: plan on main
+        run: |
+          terraform -chdir=terraform init -input=false
+          terraform -chdir=terraform plan -input=false -lock-timeout=10m -out=tfplan.binary
+          terraform -chdir=terraform show -json tfplan.binary > plan.json
+
+      - name: install conftest
+        run: |
+          curl -sSfL -o /tmp/conftest.tar.gz \
+            https://github.com/open-policy-agent/conftest/releases/download/v0.56.0/conftest_0.56.0_Linux_x86_64.tar.gz
+          tar -xzf /tmp/conftest.tar.gz -C /tmp conftest
+          sudo mv /tmp/conftest /usr/local/bin/
+
+      # Gates run AGAIN here. A gate that only runs on the PR protects the PR, not the boundary.
+      - name: policy gates on the plan
+        run: conftest test --policy policy --namespace vpcsc.perimeter terraform/plan.json
+
+      - name: apply
+        run: terraform -chdir=terraform apply -input=false -auto-approve tfplan.binary
+
+      # Done means measured. The outputs say who is really enforced now — paste-able into the ticket.
+      - name: report what is live
+        run: |
+          {
+            echo "### Perimeter after apply"
+            echo '```json'
+            terraform -chdir=terraform output -json | head -60
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

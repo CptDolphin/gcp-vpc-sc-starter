@@ -1,0 +1,60 @@
+# Bramka startera: rozpakuj szablony i uruchom na nich WSZYSTKIE realne bramki.
+#
+# DLACZEGO to jest jedyny job, który się liczy: `template/` to martwy tekst — nic tam nie sprawdzi się samo.
+# Dopiero `install.sh` ożywia szablony w katalogu tymczasowym, a `selftest.py` puszcza na nich terraform,
+# conftest, tflint, actionlint i narzędzia na realnych deklaracjach. Połowa przypadków jest NEGATYWNA:
+# sprawdzają, że bramka PADA na złym wejściu. Bramka, która nigdy nie odrzuca, przechodzi każdy test
+# pozytywny i nie chroni niczego.
+#
+# Czego ten job NIE sprawdza: realnego API Google. Tę warstwę pokrywa `tools/check_supported_services.py`
+# w pipelinie docelowego repo — jedynym miejscu, które ma poświadczenia GCP.
+
+name: selftest
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  selftest:
+    name: rozpakuj szablony i uruchom bramki
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      # Wersja terraforma jest pinowana w .tool-versions startera i MUSI się z nią zgadzać: `terraform test`
+      # i provider-defined functions to floor całego stacku, a cicha zmiana wersji zmienia wynik bramek.
+      - name: odczytaj pinowaną wersję terraforma
+        id: wersje
+        run: echo "terraform=$(grep '^terraform ' .tool-versions | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: ${{ steps.wersje.outputs.terraform }}
+          terraform_wrapper: false # wrapper psuje kody wyjścia, na których stoi selftest
+
+      - name: narzędzia
+        run: |
+          pip install --quiet pyyaml check-jsonschema
+          curl -sSfL -o /tmp/conftest.tar.gz \
+            https://github.com/open-policy-agent/conftest/releases/download/v0.56.0/conftest_0.56.0_Linux_x86_64.tar.gz
+          tar -xzf /tmp/conftest.tar.gz -C /tmp conftest && sudo mv /tmp/conftest /usr/local/bin/
+          curl -sSfL -o /tmp/tflint.zip \
+            https://github.com/terraform-linters/tflint/releases/download/v0.63.1/tflint_linux_amd64.zip
+          unzip -q /tmp/tflint.zip -d /tmp && sudo mv /tmp/tflint /usr/local/bin/
+          bash <(curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash) \
+            > /dev/null && sudo mv ./actionlint /usr/local/bin/
+
+      # Bez `--init` plugin google nie jest pobrany i tflint milczy zamiast sprawdzać — czyli bramka
+      # wyglądałaby na zieloną, nie robiąc nic. Robimy to raz, na rozpakowanej kopii w selfteście.
+      - name: selftest
+        run: python3 selftest/selftest.py

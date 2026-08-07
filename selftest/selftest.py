@@ -1,0 +1,806 @@
+#!/usr/bin/env python3
+"""Test end-to-end startera: rozpakuj szablony → zbuduj repo → uruchom każdą bramkę na dobrym i złym wejściu.
+
+Co ten test naprawdę sprawdza (i czego NIE):
+  * TAK — że `install.sh` mapuje nazwy poprawnie i że rozpakowane pliki DZIAŁAJĄ (terraform waliduje,
+    reguły rego przechodzą własne testy, narzędzia liczą na realnych deklaracjach);
+  * TAK — że każda bramka PADA na złym wejściu. Bramka, która nigdy nie odrzuca, przechodzi każdy test
+    pozytywny i nie chroni niczego — dlatego testy negatywne są tu ważniejsze od pozytywnych;
+  * NIE — mechaniki GitHuba (needs:, environments, OIDC) ani realnego API Google. Pierwszą warstwę pokrywa
+    `actionlint`, drugą dopiero pierwszy apply na środowisku docelowym.
+
+Wymaga na PATH: terraform (1.15.5), conftest, python3 (pyyaml). Opcjonalnie: actionlint, check-jsonschema.
+Uruchomienie:  python3 selftest/selftest.py
+"""
+import hashlib
+import json
+import os
+import pathlib
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+
+try:
+    import yaml
+except ImportError:  # pragma: no cover
+    sys.exit("brakuje pyyaml: pip install pyyaml")
+
+HERE = pathlib.Path(__file__).resolve().parent
+STARTER = HERE.parent
+results = []
+ROOT: pathlib.Path | None = None
+
+
+def check(name: str, cond: bool, detail: str = "") -> None:
+    results.append((name, bool(cond), detail))
+    print(("  OK   " if cond else "  FAIL ") + name + (f"\n         [{detail}]" if detail and not cond else ""))
+
+
+def sh(cmd, **kw):
+    return subprocess.run(cmd, capture_output=True, text=True, **kw)
+
+
+def have(tool: str) -> bool:
+    return shutil.which(tool) is not None
+
+
+def strip_heredocs(text: str) -> str:
+    """Usuwa treść heredoców, zostawiając sam kod.
+
+    DLACZEGO to istnieje: guardy w tym pliku sprawdzają, czego w kodzie NIE MA (`terraform apply`,
+    `cp -R perimeter`, `google_organization_iam_binding`). Trzy razy z rzędu taki guard wywrócił się o
+    WŁASNĄ DOKUMENTACJĘ — komentarz albo instrukcję dla człowieka w heredocu, która wymienia zakazaną
+    konstrukcję, żeby wyjaśnić, dlaczego jej nie używamy. Test psujący się o dokumentację uczy tylko
+    usuwania komentarzy, więc guardy tekstowe idą przez ten filtr.
+    """
+    out, skip_until = [], None
+    for line in text.splitlines():
+        if skip_until is not None:
+            if line.strip() == skip_until:
+                skip_until = None
+            continue
+        m = re.search(r"<<-?'?([A-Z][A-Z0-9_]*)'?\s*$", line)
+        if m:
+            skip_until = m.group(1)
+            continue
+        out.append(line)
+    return "\n".join(out)
+
+
+# --------------------------------------------------------------------- rozpakowanie
+def bootstrap() -> None:
+    global ROOT
+    ROOT = pathlib.Path(tempfile.mkdtemp(prefix="vpcsc-starter-selftest-"))
+    print(f"\n== rozpakowanie szablonow (install.sh) -> {ROOT} ==")
+
+    p = sh(["bash", str(STARTER / "install.sh"), str(ROOT)])
+    check("install.sh konczy sie sukcesem", p.returncode == 0, p.stdout + p.stderr)
+
+    expected = {
+        ".github/CODEOWNERS", ".github/pull_request_template.md",
+        ".github/workflows/intake.yml", ".github/workflows/validate.yml",
+        ".github/workflows/plan.yml", ".github/workflows/apply.yml",
+        ".github/workflows/drift.yml", ".github/workflows/violations-report.yml",
+        ".github/workflows/expiry-sweep.yml", ".github/workflows/break-glass.yml",
+        ".github/workflows/external-intake.yml", ".github/workflows/publish-gates.yml",
+        "contrib/action.yml", "contrib/validate-local.sh", "contrib/README.md",
+        ".gitignore", ".pre-commit-config.yaml", ".tool-versions",
+        "perimeter/policy.yaml", "perimeter/access-levels/corp.yaml", "perimeter/contributors.yaml",
+        "perimeter/members/example-division-prj-example-vertex-dev.yaml",
+        "perimeter/profiles/vertex-online-serving.yaml",
+        "perimeter/profiles/vertex-batch-training.yaml",
+        "perimeter/profiles/corp-user-console-access.yaml",
+        "perimeter/profiles/bq-omni-external-read.yaml",
+        "policy/onboarding.rego", "policy/onboarding_test.rego",
+        "policy/perimeter.rego", "policy/perimeter_test.rego",
+        "schemas/member.schema.json", "schemas/policy.schema.json", "schemas/profile.schema.json",
+        "schemas/access-level.schema.json",
+        "terraform/locals.tf", "terraform/members.tf", "terraform/outputs.tf",
+        "terraform/perimeter.tf", "terraform/rules.tf", "terraform/versions.tf",
+        "terraform/contract.tf", "terraform/tests/renderer.tftest.hcl", "terraform/monitoring.tf",
+        "iam-bootstrap/README.md", "iam-bootstrap/main.tf", "iam-bootstrap/variables.tf",
+        "iam-bootstrap/versions.tf", "iam-bootstrap/terraform.tfvars.sample",
+        "tools/attribute_budget.py", "tools/collect_declarations.py", "tools/preflight_check.sh",
+        "tools/render_member.py", "tools/snow_verify.py", "tools/violations_report.py",
+        "tools/bootstrap_github.sh", "docs/access-request.md",
+        "tools/check_supported_services.py",
+        "tools/perimeter_to_policy.py", "tools/brownfield_import.sh",
+        ".tflint.hcl", ".github/dependabot.yml", "tests/README.md",
+        "tests/snow-approved.json", "tests/snow-not-approved.json", "tests/snow-self-approved.json",
+        "tests/snow-wrong-project.json", "tests/dispatch-example.json",
+    }
+    # Dokumentacja jedzie razem z kodem. Wyliczamy ją z katalogu startera zamiast przepisywać listę:
+    # przepisana lista wywracałaby ten test przy każdym nowym dokumencie, a to uczy dopisywania nazw
+    # zamiast czytania, co się realnie zmieniło.
+    expected |= {f"docs/{f.relative_to(STARTER / 'docs')}"
+                 for f in (STARTER / "docs").rglob("*") if f.is_file()}
+    expected.add("AGENTS.md")
+    got = {str(f.relative_to(ROOT)) for f in ROOT.rglob("*") if f.is_file()}
+    check("install.sh mapuje nazwy 1:1 (bez .example, github/ -> .github/)", expected == got,
+          f"brakuje={sorted(expected - got)} nadmiarowe={sorted(got - expected)}")
+
+    # Anty-tautologia do powyższego: zbiory mogą się zgadzać także wtedy, gdy docs/ jest puste po obu
+    # stronach. Te dwa pliki są cytowane w treści alertu produkcyjnego i w komunikacie bramki CI —
+    # jeśli ich nie ma w docelowym repo, odsyłacz prowadzi donikąd dokładnie wtedy, gdy jest potrzebny.
+    check("docs/ ląduje w docelowym repo (alert i bramka CI na nie wskazują)",
+          {"docs/0-decyzje.md", "docs/3-runbook-promocja-i-break-glass.md"} <= got,
+          f"brakuje: {sorted({'docs/0-decyzje.md', 'docs/3-runbook-promocja-i-break-glass.md'} - got)}")
+
+    # --only: tryb wdrożenia etapami. Obie strony muszą być pewne — kopiuje dokładnie jeden plik,
+    # a wzorzec bez trafienia PADA (cichy sukces = etap uznany za wdrożony, a w repo nic nie ma).
+    solo = pathlib.Path(tempfile.mkdtemp(prefix="vpcsc-only-"))
+    p = sh(["bash", str(STARTER / "install.sh"), str(solo), "--only", "validate.yml"])
+    got_solo = {str(f.relative_to(solo)) for f in solo.rglob("*") if f.is_file()}
+    check("install.sh --only kopiuje dokladnie jeden plik",
+          p.returncode == 0 and got_solo == {".github/workflows/validate.yml"}, f"{p.returncode} {got_solo}")
+    p = sh(["bash", str(STARTER / "install.sh"), str(solo), "--only", "nie-ma-takiego"])
+    check("install.sh --only bez trafienia PADA", p.returncode != 0, f"rc={p.returncode}")
+    shutil.rmtree(solo, ignore_errors=True)
+
+    # Szablony muszą pozostać martwe: w template/ nie ma ANI JEDNEGO pliku-kropki ani żywego .tf,
+    # bo działałyby w TYM repo (pre-commit walidowałby cudzy szkielet, git czytałby cudze .gitattributes).
+    dotfiles = [str(f) for f in (STARTER / "template").rglob(".*")]
+    live_tf = [str(f) for f in (STARTER / "template").rglob("*.tf")]
+    check("template/ nie zawiera plikow-kropek", not dotfiles, str(dotfiles))
+    check("template/ nie zawiera zywych *.tf", not live_tf, str(live_tf))
+
+
+# --------------------------------------------------------------------- terraform
+def test_terraform() -> None:
+    print("\n== terraform ==")
+    if not have("terraform"):
+        check("terraform dostepny", False, "brak terraform na PATH — pomijam fmt/validate")
+        return
+    tf = ROOT / "terraform"
+    p = sh(["terraform", f"-chdir={tf}", "fmt", "-check", "-recursive"])
+    check("terraform fmt -check", p.returncode == 0, p.stdout + p.stderr)
+    p = sh(["terraform", f"-chdir={tf}", "init", "-backend=false", "-input=false"])
+    check("terraform init -backend=false", p.returncode == 0, p.stdout[-800:] + p.stderr[-800:])
+    p = sh(["terraform", f"-chdir={tf}", "validate"])
+    check("terraform validate", p.returncode == 0, p.stdout + p.stderr)
+
+    # `terraform console` wymaga zainicjalizowanego BACKENDU (inaczej: „init with -reconfigure"), a startowy
+    # backend to GCS z placeholderem. Podmieniamy go na lokalny plikiem *_override.tf — to zabieg wyłącznie
+    # testowy, w rozpakowanej kopii; nie dotyka szablonu.
+    (tf / "zz_selftest_override.tf").write_text('terraform {\n  backend "local" {}\n}\n')
+    p = sh(["terraform", f"-chdir={tf}", "init", "-reconfigure", "-input=false"])
+    check("init z lokalnym backendem (override na czas testu)", p.returncode == 0, p.stdout[-500:] + p.stderr[-500:])
+
+    # Renderer musi umieć policzyć reguły BEZ dostępu do chmury — `terraform console` liczy locals lokalnie.
+    p = sh(["terraform", f"-chdir={tf}", "console"], input="length(local.ingress_rules_all)\n")
+    check("renderer liczy reguly ingress z YAML (terraform console)",
+          p.returncode == 0 and p.stdout.strip().splitlines()[-1].strip() == "2",
+          f"stdout={p.stdout!r} stderr={p.stderr[-400:]!r}")
+
+    # Natywne testy Terraforma — to one pilnują logiki renderera (jedynego miejsca w repo, gdzie jest logika).
+    p = sh(["terraform", f"-chdir={tf}", "test"])
+    check("terraform test (renderer)", p.returncode == 0 and "0 failed" in p.stdout, p.stdout[-1200:])
+
+    # Przykładowy członek jest w dry-run, więc konfiguracja EGZEKWOWANA musi być pusta. To pilnuje
+    # najważniejszej własności startera: świeże repo nie blokuje nikomu ruchu.
+    p = sh(["terraform", f"-chdir={tf}", "console"], input="length(local.ingress_rules_enforced)\n")
+    check("swieze repo nie ma zadnej reguly egzekwowanej",
+          p.returncode == 0 and p.stdout.strip().splitlines()[-1].strip() == "0", p.stdout + p.stderr[-300:])
+
+    # Sekcje opcjonalne MUSZA byc opcjonalne NAPRAWDE. `count` na zasobie nie wystarcza: blok `locals` liczy
+    # sie zawsze, wiec odwolanie do nieistniejacej sekcji wywraca `validate` — czyli funkcja opisana jako
+    # opcjonalna jest w praktyce obowiazkowa. Wykryte przy pierwszym przygotowaniu prawdziwego testu na
+    # organizacji, gdzie policy.yaml celowo nie mial ani kontraktu, ani monitoringu.
+    polityka = ROOT / "perimeter/policy.yaml"
+    oryginal = polityka.read_text()
+    okrojona = yaml.safe_load(oryginal)
+    for sekcja in ("contract", "monitoring", "baseline_ingress"):
+        okrojona.pop(sekcja, None)
+    polityka.write_text(yaml.safe_dump(okrojona, sort_keys=False, allow_unicode=True))
+    p = sh(["terraform", f"-chdir={tf}", "validate"])
+    check("validate przechodzi BEZ sekcji contract/monitoring/baseline_ingress",
+          p.returncode == 0, p.stdout[-900:] + p.stderr[-900:])
+    polityka.write_text(oryginal)
+
+
+# --------------------------------------------------------------------- iam-bootstrap
+def test_iam_bootstrap() -> None:
+    """Stack nadający uprawnienia jest osobny (applikuje go zespół IAM), ale psuje się tak samo łatwo."""
+    print("\n== iam-bootstrap ==")
+    if not have("terraform"):
+        check("terraform dostepny", False, "brak terraform na PATH")
+        return
+    d = ROOT / "iam-bootstrap"
+    p = sh(["terraform", f"-chdir={d}", "fmt", "-check", "-recursive"])
+    check("iam-bootstrap: fmt -check", p.returncode == 0, p.stdout + p.stderr)
+    p = sh(["terraform", f"-chdir={d}", "init", "-backend=false", "-input=false"])
+    check("iam-bootstrap: init -backend=false", p.returncode == 0, p.stdout[-600:] + p.stderr[-600:])
+    p = sh(["terraform", f"-chdir={d}", "validate"])
+    check("iam-bootstrap: validate", p.returncode == 0, p.stdout + p.stderr)
+
+    body = (d / "main.tf").read_text()
+    # NAJGROŹNIEJSZY footgun tego stacku: *_iam_binding jest authoritative dla roli na CAŁEJ organizacji
+    # i przy pierwszym apply usunąłby wszystkie inne jej przypisania w firmie.
+    # Szukamy DEKLARACJI zasobu, nie nazwy w tekście — plik zawiera komentarz ostrzegawczy z tą nazwą,
+    # a test, który wywraca się na własnej dokumentacji, uczy tylko usuwania komentarzy.
+    declared_bindings = re.findall(r'^resource\s+"(google_\w*_iam_binding)"', body, re.M)
+    check("iam-bootstrap: zero zasobow *_iam_binding (tylko _member)",
+          not declared_bindings, str(declared_bindings))
+    # Custom rola nie może nieść operacji, których świadomie nie prosimy.
+    for forbidden in ("servicePerimeters.create", "servicePerimeters.delete", "accessLevels.delete"):
+        in_perms = f'"accesscontextmanager.{forbidden}",' in body
+        check(f"iam-bootstrap: custom rola BEZ {forbidden}", not in_perms)
+    # Guardrail WIF: warunek musi pinować repozytorium, nigdy `true`.
+    check("iam-bootstrap: attribute_condition pinuje repozytorium",
+          "assertion.repository ==" in body and 'attribute_condition = "true"' not in body)
+    # Deny na SA używa formatu principal:// (allow-owy "serviceAccount:" tu NIE działa).
+    check("iam-bootstrap: deny uzywa principal://.../serviceAccounts/",
+          "principal://iam.googleapis.com/projects/-/serviceAccounts/" in body)
+
+
+# --------------------------------------------------------------------- kontrakt
+def test_contract() -> None:
+    """Kontrakt zastępuje submodule — jego wartość polega na tym, CZEGO w nim nie ma."""
+    print("\n== kontrakt ==")
+    body = (ROOT / "terraform/contract.tf").read_text()
+
+    # Pola wypisane jawnie. `jsonencode(local.<coś-ogólnego>)` to dokładnie ten błąd, po którym kontrakt
+    # zamienia się w drugą kopię state'u.
+    check("kontrakt buduje dokument JAWNIE (bez jsonencode na zbiorczym locals)",
+          "jsonencode(local.contract_document)" in body and "jsonencode(local.policy)" not in body)
+
+    # Nie publikujemy treści access levels (zakresy IP, device policy) — tylko nazwy.
+    check("kontrakt publikuje tylko NAZWY access levels",
+          "sort(keys(local.access_levels))" in body)
+
+    # Reguły i tożsamości nie wychodzą na zewnątrz: sekcja members ma dokładnie trzy pola.
+    members_block = body[body.find("members = lookup"):body.find("attribute_budget = local.contract_budget")]
+    for forbidden in ("identities", "operations", "access_levels ="):
+        check(f"kontrakt: sekcja members bez `{forbidden.strip(' =')}`", forbidden not in members_block)
+
+    # Guard na wspólny bucket — jeden błąd w IAM nie może odsłonić state'u.
+    check("kontrakt: precondition na bucket inny niz bucket stanu",
+          "precondition" in body and 'lookup(local.contract, "state_bucket", "")' in body)
+
+    # Paczka bramek wypuszcza REGUŁY, nie dane. Gdyby ktoś dodał tam perimeter/, wracamy do problemu
+    # submodule'a — dlatego to jest test, nie komentarz.
+    gates = (ROOT / ".github/workflows/publish-gates.yml").read_text()
+    # Szukamy INSTRUKCJI KOPIOWANIA, nie wzmianki: plik zawiera komentarz wyjaśniający, dlaczego perimeter/
+    # do paczki NIE wchodzi. Guard dopasowujący tekst trafiałby w tę dokumentację.
+    copies_perimeter = re.search(r"^\s*cp\s+(-R\s+)?perimeter", strip_heredocs(gates), re.M)
+    check("paczka bramek NIE kopiuje katalogu perimeter/", copies_perimeter is None,
+          copies_perimeter.group(0) if copies_perimeter else "")
+    check("paczka bramek zawiera schemas i policy",
+          "cp -R schemas" in gates and "cp -R policy" in gates)
+
+    # Pusta lista czlonkow jest dwuznaczna („nikogo nie ma" kontra „nie publikujemy"), a konsument sprawdza
+    # na niej, czy jego projekt juz jest w perimetrze. Bez flagi ta bramka bylaby cicho nieobecna.
+    check("kontrakt niesie flage members_published (pusta lista nie jest dwuznaczna)",
+          "members_published = local.contract_enabled &&" in body)
+
+    # Action zespołu nie może już wymagać submodule'a.
+    action = (ROOT / "contrib/action.yml").read_text()
+    check("contrib/action: brak zaleznosci od submodule", "submodules: true" not in action)
+    check("contrib/action: pobiera kontrakt i paczke bramek",
+          "gcloud storage cat" in action and "gh release download" in action)
+
+    # Do czego kontrakt SLUZY po stronie zespolu: rozstrzyga „czy moge o to wnioskowac" i „czy to juz jest
+    # w perimetrze" BEZ dostepu do repo perimetru. Uruchamiamy realny blok walidacji z validate-local.sh
+    # (wyciety z heredoca), zeby to byla bramka, a nie akapit w dokumentacji.
+    vlocal = (ROOT / "contrib/validate-local.sh").read_text()
+    # split po znaczniku, a potem po pierwszym newline: za `<<'PY'` stoi jeszcze reszta linii powłoki
+    # (`|| fail=…`), ktora nie jest Pythonem i wywalilaby import na IndentationError.
+    blok = vlocal.split("<<'PY'", 1)[1].split("\n", 1)[1].split("\nPY\n", 1)[0]
+    (ROOT / "sprawdz_kontrakt.py").write_text(blok)
+    kontrakt = {
+        "members_published": True,
+        "access_levels": ["corp"],
+        "profiles": [{"name": "vertex-online-serving", "parameters": [], "risk": "low"}],
+        "contributors": [{"repository": "example-org/example-repo", "division": "example-division",
+                          "allowed_projects": ["prj-example-vertex-dev"]}],
+        "members": [{"division": "example-division", "project_id": "prj-example-vertex-dev",
+                     "stage": "enforced"}],
+    }
+    (ROOT / "kontrakt.json").write_text(json.dumps(kontrakt))
+    zgloszenie = {"division": "example-division", "project_id": "prj-example-vertex-dev",
+                  "stage": "dry-run", "profiles": [{"name": "vertex-online-serving", "params": {}}]}
+    (ROOT / "zgloszenie.yaml").write_text(json.dumps(zgloszenie))  # JSON jest poprawnym YAML-em
+
+    # GITHUB_REPOSITORY wyczyszczone celowo: blok pyta o nie, zeby sprawdzic wpis w contributors, a test ma
+    # dowodzic reguly o CZLONKOSTWIE. Zostawione, w CI wskazywaloby biezace repozytorium i zaszumialo wynik.
+    srodowisko = {k: v for k, v in os.environ.items() if k != "GITHUB_REPOSITORY"}
+    p = sh([sys.executable, "sprawdz_kontrakt.py", "zgloszenie.yaml", "kontrakt.json"], cwd=ROOT, env=srodowisko)
+    check("kontrakt ODRZUCA zgloszenie projektu, ktory juz jest czlonkiem",
+          p.returncode != 0 and "jest już członkiem perimetru" in p.stdout, p.stdout + p.stderr)
+
+    # POZYTYW: ten sam blok musi przepuszczac projekt, ktorego jeszcze nie ma — inaczej „odrzuca" znaczy
+    # „odrzuca wszystko" i test wyzej niczego nie dowodzi.
+    kontrakt["members"] = []
+    (ROOT / "kontrakt.json").write_text(json.dumps(kontrakt))
+    p = sh([sys.executable, "sprawdz_kontrakt.py", "zgloszenie.yaml", "kontrakt.json"], cwd=ROOT, env=srodowisko)
+    check("kontrakt PRZEPUSZCZA projekt, ktorego jeszcze nie ma (test anty-tautologiczny)",
+          p.returncode == 0, p.stdout + p.stderr)
+
+
+# --------------------------------------------------------------------- monitoring
+def test_monitoring() -> None:
+    """Perimetr bez alertu to granica, o której dowiadujesz się od użytkownika."""
+    print("\n== monitoring ==")
+    body = (ROOT / "terraform/monitoring.tf").read_text()
+
+    # Dwie metryki muszą być ROZŁĄCZNE: enforced page'uje, dry-run informuje. Wspólna metryka oznacza alert
+    # odpalający przy normalnej pracy okna obserwacji — czyli alert, który po tygodniu jest ignorowany.
+    check("metryka enforced filtruje dryRun=false", 'dryRun=\\"false\\"' in body)
+    check("metryka dry-run filtruje dryRun=true", 'dryRun=\\"true\\"' in body)
+
+    # Alert bez runbooka to zgadywanie o 3:00 (zasada repo: każdy critical niesie procedurę).
+    critical = body[body.find('display_name = "VPC-SC: ruch odrzucony'):]
+    check("alert enforced ma severity CRITICAL", 'severity     = "CRITICAL"' in critical[:600])
+    check("alert enforced ma dokumentacje z procedura",
+          "documentation {" in critical and "break-glass" in critical)
+    check("alert enforced grupuje po tozsamosci (nie zalewa organizacji)",
+          'group_by_fields      = ["metric.label.principal"]' in critical)
+
+    # Alert o zmianach poza pipeline'em musi wykluczać WŁASNE konto apply — inaczej odpala przy każdym apply
+    # i uczy ignorowania.
+    check("alert out-of-band wyklucza konto apply",
+          "principalEmail!=" in body and "apply_service_account" in body)
+
+    # Metryki i alerty są opcjonalne (count), ale przykładowa policy MA je włączać — starter pokazuje
+    # kompletne wdrożenie, nie minimalne.
+    check("monitoring jest opcjonalny (count), ale wlaczony w przykladzie",
+          "local.monitoring_enabled ? 1 : 0" in body
+          and "monitoring:" in (ROOT / "perimeter/policy.yaml").read_text())
+
+
+# --------------------------------------------------------------------- brownfield
+def test_brownfield() -> None:
+    """Przejęcie cudzego perimetru to moment, w którym najłatwiej nadpisać cudzą konfigurację."""
+    print("\n== brownfield ==")
+
+    imp = (ROOT / "tools/brownfield_import.sh").read_text()
+    p = sh(["bash", "-n", str(ROOT / "tools/brownfield_import.sh")])
+    check("brownfield_import.sh: skladnia", p.returncode == 0, p.stderr[-300:])
+
+    # Bez argumentów MUSI paść — skrypt operujący na cudzym perimetrze nie może mieć domyślnych wartości.
+    p = sh(["bash", str(ROOT / "tools/brownfield_import.sh")])
+    check("brownfield_import.sh bez argumentow PADA", p.returncode != 0, f"rc={p.returncode}")
+
+    # Kolejność jest istotą tej procedury: porównanie PRZED importem. Gdyby import był pierwszy, apply
+    # wyrównałby żywy perimetr do treści repo.
+    idx_diff = imp.find("--diff")
+    idx_import = imp.find("import {")
+    check("porownanie policy.yaml wykonuje sie PRZED blokiem import",
+          -1 < idx_diff < idx_import, f"diff@{idx_diff} import@{idx_import}")
+
+    # Skrypt nie może applikować — od apply jest człowiek po przeczytaniu planu.
+    # Kod, nie dokumentacja: skrypt POKAZUJE człowiekowi komendę apply w instrukcji, ale sam jej nie wywołuje.
+    imp_code = strip_heredocs(imp)
+    check("brownfield_import.sh NIE applikuje",
+          not re.search(r"^\s*terraform .*\bapply\b", imp_code, re.M),
+          "znaleziono wywołanie apply w KODZIE (nie w instrukcji)")
+
+    # Niepusty plan musi kończyć się kodem błędu, nie zachętą do apply.
+    check("niepusty plan (kod 2) konczy sie bledem", 'exit 2' in imp)
+
+    conv = (ROOT / "tools/perimeter_to_policy.py").read_text()
+    # Kierunek jest jednoznaczny: rzeczywistość → plik. Skrypt, który nadpisuje policy.yaml automatycznie,
+    # zamieniłby „przeczytaj różnicę" w „zaakceptuj różnicę".
+    check("perimeter_to_policy.py nie nadpisuje policy.yaml",
+          "w\")" not in conv and "write_text" not in conv)
+    check("perimeter_to_policy.py bierze konfiguracje EGZEKWOWANA (status)",
+          'live.get("status"' in conv)
+
+
+# --------------------------------------------------------------------- rego
+def test_external_egress_and_guard() -> None:
+    """Egress poza GCP + guard na komendę, która promuje CAŁĄ konfigurację dry-run naraz.
+
+    Guard sprawdzamy BEHAWIORALNIE, nie przez grep po treści workflowa: interesuje nas, czy wzorzec
+    (a) nie trafia w siebie na czystym repo i (b) łapie realne wywołanie. Sam fakt istnienia stepa o
+    właściwej nazwie nie dowodzi niczego — trzy razy w tym pliku guard tekstowy wywrócił się o dokumentację.
+    """
+    print("\n== egress zewnetrzny + guard dry-run ==")
+
+    prof = (ROOT / "perimeter/profiles/bq-omni-external-read.yaml").read_text()
+    check("profil zewnetrzny: tylko BigQuery w operacjach",
+          "bigquery.googleapis.com" in prof and "aiplatform.googleapis.com" not in prof)
+    check("profil zewnetrzny: risk high (jedyna regula wypuszczajaca dane z GCP)", "risk: high" in prof)
+
+    member = (ROOT / "perimeter/members/example-division-prj-example-vertex-dev.yaml").read_text()
+    check("przykladowy czlonek uzywa profilu zewnetrznego (sciezka jest TESTOWANA)",
+          "bq-omni-external-read" in member and "s3://" in member)
+
+    rules = (ROOT / "terraform/rules.tf").read_text()
+    check("external_resources renderowane w OBU konfiguracjach",
+          rules.count("external_resources = each.value.external_resources") == 2,
+          f"znaleziono {rules.count('external_resources = each.value.external_resources')}")
+
+    # Wzorzec guardu wyciągamy z workflowa, żeby test i CI sprawdzały DOKŁADNIE to samo wyrażenie.
+    wf = (ROOT / ".github/workflows/validate.yml").read_text()
+    m = re.search(r"grep -rnE '([^']+)' tools \.github/workflows", wf)
+    check("guard no-dry-run-commit istnieje w validate.yml", m is not None)
+    if not m:
+        return
+    pattern = m.group(1)
+
+    def guard_hits() -> str:
+        found = sh(["grep", "-rnE", pattern, "tools", ".github/workflows"], cwd=ROOT).stdout
+        # ta sama filtracja komentarzy co w workflow
+        return "\n".join(l for l in found.splitlines()
+                          if not re.match(r"^[^:]+:[0-9]+:\s*#", l))
+
+    check("guard nie trafia w SIEBIE na czystym repo", guard_hits() == "", guard_hits()[:300])
+
+    bad = ROOT / "tools/zz_guard_probe.sh"
+    bad.write_text("#!/usr/bin/env bash\ngcloud access-context-manager perimeters dry-run enforce p --policy=1\n")
+    try:
+        check("guard lapie realne wywolanie komendy commitujacej dry-run", guard_hits() != "")
+    finally:
+        bad.unlink()
+
+    runbook = (STARTER / "docs/3-runbook-promocja-i-break-glass.md").read_text()
+    check("runbook tlumaczy, DLACZEGO ta komenda jest zakazana",
+          "perimeters dry-run enforce" in runbook and "trzydzieści dywizji" in runbook)
+
+
+def test_lint_and_pinning() -> None:
+    """tflint (jeśli jest) + guardy na to, czego brak nie widać w zielonym przebiegu.
+
+    Dwa realne tryby awarii, oba złapane przy wdrażaniu tej bramki:
+      * `tflint --chdir=X` szuka `.tflint.hcl` w X, nie w korzeniu repo — bez `--config` konfiguracja jest
+        cicho ignorowana i przebieg jest zielony na domyślnym presecie, bez pluginu google;
+      * akcje przypięte ruchomym tagiem to mutowalna referencja: kto kontroluje tag, kontroluje kod
+        wykonywany z naszym tokenem OIDC — a job apply może zmienić perimetr całej organizacji.
+    """
+    print("\n== tflint i pinowanie akcji ==")
+
+    cfg = ROOT / ".tflint.hcl"
+    check("jest .tflint.hcl", cfg.exists())
+    if cfg.exists():
+        body = cfg.read_text()
+        check("tflint: plugin google wlaczony", 'plugin "google"' in body and "enabled = true" in body)
+        check("tflint: preset recommended", 'preset  = "recommended"' in body or 'preset = "recommended"' in body)
+
+    wf = (ROOT / ".github/workflows/validate.yml").read_text()
+    check("CI uruchamia tflint na obu stackach",
+          wf.count("tflint --chdir=") == 2, f"wystapien: {wf.count('tflint --chdir=')}")
+    # To jest guard NA GUARD: bez --config krok „tflint" istnieje i nic nie sprawdza.
+    check("CI przekazuje tflint --config (inaczej konfiguracja jest ignorowana)",
+          wf.count('--config="$PWD/.tflint.hcl"') == 2)
+    check("CI ustawia prog severity na notice (regulyo dokumentacji sa Notice)",
+          "--minimum-failure-severity=notice" in wf)
+    check("pre-commit ma hook terraform_tflint",
+          "terraform_tflint" in (ROOT / ".pre-commit-config.yaml").read_text())
+
+    # Pinowanie: każda akcja third-party z pełnym SHA. Wzorzec ten sam co w guardzie CI.
+    uses = []
+    for f in list((ROOT / ".github/workflows").glob("*.yml")) + [ROOT / "contrib/action.yml"]:
+        # Zakotwiczone na początku linii: `uses:` pojawia się też WEWNĄTRZ wzorca grepa w guardzie CI,
+        # a niezakotwiczony wzorzec wyciągał stamtąd fragmenty regexa i zgłaszał je jako nieprzypięte akcje.
+        uses += re.findall(r"^\s*-?\s*uses:\s*(\S+)", f.read_text(), re.M)
+    third_party = [u for u in uses if not u.startswith("./") and not u.startswith("ORG/")]
+    unpinned = [u for u in third_party if not re.search(r"@[0-9a-f]{40}$", u)]
+    check("wszystkie akcje third-party przypiete SHA-em", not unpinned, f"bez SHA: {unpinned}")
+    check("guard na pinowanie jest w CI", "actions pinned to a SHA" in wf)
+    check("jest dependabot (pin bez aktualizacji to martwy pin)",
+          (ROOT / ".github/dependabot.yml").exists())
+
+    # `have()` nie wystarcza: `tflint` bywa shimem menedżera wersji, który istnieje na PATH i pada przy
+    # uruchomieniu (brak przypiętej wersji). Wtedy FAIL mówiłby o konfiguracji tflinta, nie o kodzie startera.
+    runnable = have("tflint") and sh(["tflint", "--version"]).returncode == 0
+    if not runnable:
+        print("  SKIP  tflint nieuruchamialny lokalnie (CI instaluje go w validate.yml)")
+        return
+    for stack in ["terraform", "iam-bootstrap"]:
+        p = sh(["tflint", f"--chdir={stack}", f"--config={ROOT}/.tflint.hcl",
+                "--minimum-failure-severity=notice"], cwd=ROOT)
+        # Odróżniamy „linter znalazł problem w starterze" od „linter nie ma jak się uruchomić w tym
+        # środowisku" (shim menedżera wersji bez przypiętej wersji, brak pluginu). Drugie to nie wada kodu,
+        # a zgłoszone jako FAIL wysyłałoby czytelnika naprawiać terraform zamiast swojego PATH.
+        if "No version is set for shim" in p.stderr or "plugin" in p.stderr and "not found" in p.stderr:
+            print(f"  SKIP  tflint: {stack} — brak srodowiska (uruchom `tflint --init`, przypnij wersje)")
+            continue
+        check(f"tflint czysty: {stack}", p.returncode == 0, (p.stdout + p.stderr)[-600:])
+
+
+def test_acm_naming() -> None:
+    """Nazwy obiektów ACM: litera na początku, dalej tylko alfanumeryczne i `_`.
+
+    DLACZEGO osobny test, skoro pilnuje tego schema: `check-jsonschema` jest opcjonalny i lokalnie się
+    SKIPuje — i dokładnie dlatego przez kilka commitów siedział tu `ai-core` oraz `corp-network`, czyli nazwy,
+    które API odrzuca. Ten test używa wyłącznie stdlib, więc nie ma jak się nie wykonać. Myślnik w `title`
+    jest w porządku — ograniczenie dotyczy tylko short_name.
+    """
+    print("\n== nazwy obiektow ACM ==")
+    acm_name = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]{0,49}$")
+
+    policy = yaml.safe_load((ROOT / "perimeter/policy.yaml").read_text())
+    peri_name = policy["perimeter"]["name"]
+    check(f"nazwa perimetru {peri_name!r} zgodna z API (bez myslnika)", bool(acm_name.match(peri_name)))
+
+    levels = []
+    for f in sorted((ROOT / "perimeter/access-levels").glob("*.yaml")):
+        levels += yaml.safe_load(f.read_text())["access_levels"]
+    check("katalog access levels nie jest pusty", len(levels) > 0)
+    bad = [al["name"] for al in levels if not acm_name.match(al["name"])]
+    check("nazwy access levels zgodne z API", not bad, f"niepoprawne: {bad}")
+
+    # Nazwy w kompozycji muszą wskazywać istniejący poziom — literówka daje błąd API, nie planu.
+    known = {al["name"] for al in levels}
+    dangling = [(al["name"], req) for al in levels for req in al.get("required_access_levels", []) if req not in known]
+    check("required_access_levels wskazuja istniejace poziomy", not dangling, f"wiszace: {dangling}")
+
+    # Poziomy używane przez członków i baseline też muszą istnieć — inaczej reguła autoryzuje nieistniejący kontekst.
+    used = set()
+    for f in sorted((ROOT / "perimeter/members").glob("*.yaml")):
+        for prof in yaml.safe_load(f.read_text()).get("profiles", []):
+            used |= set(prof.get("params", {}).get("access_levels", []))
+    for rule in policy.get("baseline_ingress", []):
+        used |= set(rule.get("access_levels", []))
+    check("poziomy uzywane w members/baseline istnieja w katalogu", used <= known, f"brakuje: {sorted(used - known)}")
+
+
+def test_rego() -> None:
+    print("\n== reguly OPA ==")
+    if not have("conftest"):
+        check("conftest dostepny", False, "brak conftest na PATH — pomijam reguly")
+        return
+
+    p = sh(["conftest", "verify", "--policy", "policy"], cwd=ROOT)
+    passed = "0 failures" in p.stdout
+    check("conftest verify (testy jednostkowe regul)", p.returncode == 0 and passed, p.stdout[-1500:])
+
+    # Realne deklaracje ze startera muszą przechodzić bramki onboardingu.
+    decl = sh([sys.executable, "tools/collect_declarations.py", "--today", "2026-07-28"], cwd=ROOT)
+    check("collect_declarations.py dziala", decl.returncode == 0, decl.stderr[-500:])
+    (ROOT / "declarations.json").write_text(decl.stdout)
+    p = sh(["conftest", "test", "--policy", "policy", "--namespace", "vpcsc.onboarding", "declarations.json"], cwd=ROOT)
+    check("przykladowy czlonek przechodzi bramki onboardingu", p.returncode == 0, p.stdout[-1200:])
+
+    # NEGATYW: promocja do enforced dzień po wejściu do dry-run musi zostać odrzucona.
+    doc = json.loads(decl.stdout)
+    name = next(iter(doc["members"]))
+    doc["members"][name]["stage"] = "enforced"
+    doc["violations_last_window"] = {name: 0}
+    (ROOT / "bad-promotion.json").write_text(json.dumps(doc))
+    p = sh(["conftest", "test", "--policy", "policy", "--namespace", "vpcsc.onboarding", "bad-promotion.json"], cwd=ROOT)
+    check("promocja przed oknem obserwacji jest ODRZUCANA", p.returncode != 0, p.stdout[-800:])
+
+    # NEGATYW: usunięcie aiplatform z baseline'u musi zostać odrzucone (to jest powód istnienia perimetru).
+    doc2 = json.loads(decl.stdout)
+    doc2["policy"]["restricted_services"] = [s for s in doc2["policy"]["restricted_services"]
+                                             if s != "aiplatform.googleapis.com"]
+    (ROOT / "bad-baseline.json").write_text(json.dumps(doc2))
+    p = sh(["conftest", "test", "--policy", "policy", "--namespace", "vpcsc.onboarding", "bad-baseline.json"], cwd=ROOT)
+    check("baseline bez aiplatform jest ODRZUCANY", p.returncode != 0, p.stdout[-800:])
+
+    # NEGATYW na plan-JSON: reguła z ANY_IDENTITY i z method="*" musi paść.
+    bad_plan = {
+        "planned_values": {"root_module": {"resources": [{
+            "address": "google_access_context_manager_service_perimeter_ingress_policy.rule[\"x\"]",
+            "type": "google_access_context_manager_service_perimeter_ingress_policy",
+            "values": {
+                "ingress_from": [{"identity_type": "ANY_IDENTITY", "identities": [], "sources": []}],
+                "ingress_to": [{"resources": ["*"], "operations": [
+                    {"service_name": "aiplatform.googleapis.com", "method_selectors": [{"method": "*"}]}]}],
+            }}]}},
+        "resource_changes": [],
+    }
+    (ROOT / "bad-plan.json").write_text(json.dumps(bad_plan))
+    p = sh(["conftest", "test", "--policy", "policy", "--namespace", "vpcsc.perimeter", "bad-plan.json"], cwd=ROOT)
+    check("plan z ANY_IDENTITY / method=* / resources=* jest ODRZUCANY", p.returncode != 0, p.stdout[-800:])
+
+
+# --------------------------------------------------------------------- narzedzia
+def test_tools() -> None:
+    print("\n== narzedzia ==")
+    decl = (ROOT / "declarations.json").read_text()
+
+    p = sh([sys.executable, "tools/attribute_budget.py", "--input", "declarations.json", "--format", "json"], cwd=ROOT)
+    check("attribute_budget.py liczy budzet", p.returncode == 0, p.stderr[-400:])
+    if p.returncode == 0:
+        doc = json.loads(p.stdout)
+        check("budzet: swieze repo daleko od limitu", doc["worst_pct"] < 5, json.dumps(doc)[:300])
+
+    # NEGATYW: sztucznie zawyżone zużycie musi przekroczyć próg i zwrócić kod błędu.
+    over = json.loads(decl)
+    over["policy"]["attribute_budget"]["limit_per_config"] = 10
+    (ROOT / "over-budget.json").write_text(json.dumps(over))
+    p = sh([sys.executable, "tools/attribute_budget.py", "--input", "over-budget.json"], cwd=ROOT)
+    check("attribute_budget.py PADA po przekroczeniu progu", p.returncode == 1, p.stdout[-300:])
+
+    # render_member.py MUSI wymuszać dry-run niezależnie od tego, co przyszło w payloadzie.
+    p = sh([sys.executable, "tools/render_member.py", "--division", "x", "--project-id", "prj-x-test",
+            "--project-number", "123456789012", "--owner-group", "g@example.com",
+            "--change-ref", "snow:RITM0000009", "--approved-by", "n@example.com",
+            "--profiles-json", '[{"name":"vertex-online-serving","params":{}}]',
+            "--today", "2026-07-28", "--out", "rendered.yaml"], cwd=ROOT)
+    rendered = (ROOT / "rendered.yaml").read_text() if (ROOT / "rendered.yaml").exists() else ""
+    check("render_member.py wymusza stage: dry-run", p.returncode == 0 and "stage: dry-run" in rendered,
+          p.stderr[-300:] + rendered[:200])
+    check("render_member.py ustawia date przegladu", "review_by: '2027-01-24'" in rendered or "review_by: 2027-01-24" in rendered,
+          rendered[:300])
+
+    # NEGATYW: powtorne zgloszenie tego samego projektu NIE MOZE nadpisac istniejacego wpisu. Gdyby moglo,
+    # czlonek `enforced` wracalby do `dry-run` (render zawsze ustawia dry-run) — projekt tracilby ochrone
+    # PR-em wygladajacym na onboarding. Regula OPA tego nie zlapie: porownuje dwa PLIKI, a tu plik jest ten sam.
+    (ROOT / "istniejacy.yaml").write_text("division: x\nproject_id: prj-x-test\nstage: enforced\n")
+    p = sh([sys.executable, "tools/render_member.py", "--division", "x", "--project-id", "prj-x-test",
+            "--project-number", "123456789012", "--owner-group", "g@example.com",
+            "--change-ref", "snow:RITM0000009", "--approved-by", "n@example.com",
+            "--profiles-json", '[{"name":"vertex-online-serving","params":{}}]',
+            "--today", "2026-07-28", "--out", "istniejacy.yaml"], cwd=ROOT)
+    zachowany = (ROOT / "istniejacy.yaml").read_text()
+    check("render_member.py ODRZUCA nadpisanie istniejacego czlonka", p.returncode != 0,
+          p.stdout + p.stderr)
+    check("render_member.py NIE degraduje enforced do dry-run", "stage: enforced" in zachowany, zachowany[:200])
+
+    # snow_verify.py fail-closed: ticket w innym stanie albo na inny projekt = brak PR-a.
+    # Fixture'y bierzemy z tests/ — tych samych, które cytuje docs/5-servicenow-intake.md. Generowanie ich
+    # w kodzie testu dawało zieloną bramkę na danych, których czytelnik dokumentacji nie ma.
+    p = sh([sys.executable, "tools/snow_verify.py", "--ticket", "RITM0000001",
+            "--expect-project", "prj-x-test", "--offline-fixture", "tests/snow-approved.json"], cwd=ROOT)
+    check("snow_verify.py przepuszcza zatwierdzony ticket (fixture z tests/)", p.returncode == 0,
+          p.stdout + p.stderr)
+
+    for fixture, opis in [("tests/snow-not-approved.json", "approval w toku"),
+                          ("tests/snow-self-approved.json", "samo-zatwierdzenie"),
+                          ("tests/snow-wrong-project.json", "podmiana projektu po approvalu")]:
+        p = sh([sys.executable, "tools/snow_verify.py", "--ticket", "RITM0000001",
+                "--expect-project", "prj-x-test", "--offline-fixture", fixture], cwd=ROOT)
+        check(f"snow_verify.py ODRZUCA: {opis}", p.returncode != 0, p.stdout + p.stderr)
+
+    fixture_bad = {"result": [{"approval": "requested", "assignment_group.name": "network-team",
+                               "u_project_id": "prj-x-test"}]}
+    (ROOT / "snow-pending.json").write_text(json.dumps(fixture_bad))
+    p = sh([sys.executable, "tools/snow_verify.py", "--ticket", "RITM0000009",
+            "--expect-project", "prj-x-test", "--offline-fixture", "snow-pending.json"], cwd=ROOT)
+    check("snow_verify.py ODRZUCA ticket bez zatwierdzenia", p.returncode == 1, p.stdout + p.stderr)
+
+    fixture_swap = {"result": [{"approval": "approved", "assignment_group.name": "network-team",
+                                "u_project_id": "prj-inny"}]}
+    (ROOT / "snow-swap.json").write_text(json.dumps(fixture_swap))
+    p = sh([sys.executable, "tools/snow_verify.py", "--ticket", "RITM0000009",
+            "--expect-project", "prj-x-test", "--offline-fixture", "snow-swap.json"], cwd=ROOT)
+    check("snow_verify.py ODRZUCA podmiane projektu w payloadzie", p.returncode == 1, p.stdout + p.stderr)
+
+    # violations_report.py: brak wpisu != zero naruszeń — raport MUSI wypisać 0 dla każdego członka.
+    (ROOT / "raw-logs.json").write_text("[]")
+    p = sh([sys.executable, "tools/violations_report.py", "--logs", "raw-logs.json",
+            "--declarations", "declarations.json", "--json-out", "violations.json",
+            "--markdown-out", "violations.md"], cwd=ROOT)
+    viol = json.loads((ROOT / "violations.json").read_text()) if (ROOT / "violations.json").exists() else {}
+    check("violations_report.py wypisuje wpis dla KAZDEGO czlonka", p.returncode == 0 and len(viol) == 1,
+          p.stderr[-300:] + json.dumps(viol))
+
+
+# --------------------------------------------------------------------- workflows
+def test_workflows() -> None:
+    print("\n== workflows ==")
+    wf = sorted((ROOT / ".github/workflows").glob("*.yml"))
+    check("dziesiec workflow po rozpakowaniu", len(wf) == 10, str([f.name for f in wf]))
+
+    if have("actionlint"):
+        p = sh(["actionlint", *[str(f) for f in wf]])
+        check("actionlint (skladnia + shellcheck w run:)", p.returncode == 0, p.stdout[-1500:])
+    else:
+        check("actionlint dostepny", False, "brak actionlint na PATH — pomijam")
+
+    apply_yml = (ROOT / ".github/workflows/apply.yml").read_text()
+    # Trzy własności apply, których utrata jest cicha i kosztowna.
+    check("apply: single-flight concurrency (bez cancel-in-progress)",
+          "group: vpc-sc-apply" in apply_yml and "cancel-in-progress: false" in apply_yml)
+    check("apply: environment z reviewerami", "environment: perimeter-apply" in apply_yml)
+    check("apply: bramki OPA uruchamiane PONOWNIE przed apply",
+          "conftest test" in apply_yml and apply_yml.index("conftest test") < apply_yml.index("terraform -chdir=terraform apply"))
+
+    intake = (ROOT / ".github/workflows/intake.yml").read_text()
+    check("intake: ticket weryfikowany przez API, nie z payloadu", "snow_verify.py" in intake)
+
+    ext = (ROOT / ".github/workflows/external-intake.yml").read_text()
+    # Kanał zewnętrzny ma dwa niezbywalne zabezpieczenia: change_ref musi wskazywać repozytorium, które
+    # NAPRAWDĘ wysłało dispatch, a stage jest nadpisywany na dry-run niezależnie od treści payloadu.
+    check("external-intake: change_ref sprawdzany wobec repozytorium zgłaszającego",
+          'ref.startswith(f"pr:{source}#")' in ext)
+    check("external-intake: stage wymuszany na dry-run", 'member["stage"] = "dry-run"' in ext)
+    # Trzecie zabezpieczenie: istniejący wpis nie może zostać nadpisany. Sprawdzamy też KOLEJNOŚĆ — wymuszenie
+    # dry-run po sprawdzeniu istnienia jest bezpieczne, przed nim byłoby cichą degradacją członka `enforced`.
+    check("external-intake: nie nadpisuje istniejacego czlonka",
+          "if out.exists():" in ext and ext.index("if out.exists():") < ext.index('member["stage"] = "dry-run"'))
+
+    for f in wf:
+        body = f.read_text()
+        if "id-token: write" in body:
+            # Warunek jest o TOŻSAMOŚCI, nie o wersji akcji: sprawdzamy, że workflow uwierzytelnia się przez
+            # `auth` z `workload_identity_provider`. Wersja jest przypięta SHA-em i będzie się zmieniać
+            # (Dependabot), więc wpisanie tu `@v2` robiło z tego testu detektor aktualizacji, nie bramkę.
+            uses_auth = re.search(r"uses:\s*google-github-actions/auth@", body) is not None
+            check(f"{f.name}: uzywa WIF (bez kluczy SA)",
+                  uses_auth and "workload_identity_provider:" in body)
+    joined = "\n".join(f.read_text() for f in wf)
+    check("zaden workflow nie zawiera klucza SA ani hasla",
+          "private_key" not in joined and "credentials_json" not in joined)
+
+
+# --------------------------------------------------------------------- schematy (opcjonalnie)
+def test_schemas() -> None:
+    print("\n== json schema (opcjonalnie) ==")
+    if not have("check-jsonschema"):
+        print("  SKIP  check-jsonschema niedostepny lokalnie (CI instaluje go w validate.yml)")
+        return
+    pairs = [("schemas/policy.schema.json", ["perimeter/policy.yaml"]),
+             ("schemas/profile.schema.json", sorted(str(p.relative_to(ROOT)) for p in (ROOT / "perimeter/profiles").glob("*.yaml"))),
+             ("schemas/member.schema.json", sorted(str(p.relative_to(ROOT)) for p in (ROOT / "perimeter/members").glob("*.yaml"))),
+             ("schemas/access-level.schema.json", sorted(str(p.relative_to(ROOT)) for p in (ROOT / "perimeter/access-levels").glob("*.yaml")))]
+    for schema, files in pairs:
+        p = sh(["check-jsonschema", "--schemafile", schema, *files], cwd=ROOT)
+        check(f"schema {pathlib.Path(schema).stem} akceptuje przyklady", p.returncode == 0, p.stdout[-500:])
+
+
+# ----------------------------------------------------------------- samodzielnosc materialu
+def test_samodzielnosc() -> None:
+    """Ten katalog ma stać sam dla siebie: bez repo, z którego pochodzi, i bez nazw konkretnej organizacji.
+
+    DLACZEGO to jest TEST, a nie jednorazowe sprzątanie: identyfikatory wracają. Ktoś wkleja przykład
+    z realnego zgłoszenia, ktoś podpiera komentarz numerem wewnętrznego ADR-a — i po trzech miesiącach
+    materiał znowu opisuje konkretną firmę. Skan kosztuje sekundę i biegnie przy każdym przebiegu.
+
+    Reguły mieszkają w `skan_samodzielnosci.py` — osobno, bo ten sam skan wpina się jako tania bramka
+    tam, gdzie materiał jest publikowany (wymaga samego Pythona, w przeciwieństwie do reszty selftestu).
+    """
+    print("\n== samodzielnosc materialu ==")
+    sys.path.insert(0, str(HERE))
+    import skan_samodzielnosci as skan
+
+    # Skanujemy ROZPAKOWANE repo (to, co realnie dostaje odbiorca) ORAZ starter, bo README i docs/
+    # startera też idą na zewnątrz.
+    for etykieta, base in [("rozpakowane repo", ROOT), ("starter", STARTER)]:
+        trafienia = skan.skanuj_sciezke(base)
+        check(f"{etykieta}: zero odsylaczy do organizacji i repo macierzystego",
+              not trafienia, "; ".join(trafienia[:6]))
+
+    # Anty-tautologia: skan, który nic nie znajduje na czystym wejściu, mógłby po prostu nie działać
+    # (zły regex, pominięte rozszerzenie). Podkładamy tekst naruszający KAŻDĄ z pięciu klas reguł
+    # i wymagamy kompletu trafień. Wartości w próbce są wymyślone — próbka jest częścią materiału
+    # publicznego, więc nie może nieść niczego realnego.
+    # Próbkę SKLEJAMY z kawałków, zamiast wpisać wprost. DLACZEGO: ten plik też podlega skanowi, więc
+    # próbka napisana dosłownie zapaliłaby guard na jego własnym teście — a wtedy jedynym wyjściem jest
+    # wyłączenie pliku ze skanu, czyli zrobienie w nim dziury. Sklejenie kosztuje jedną linijkę i zostawia
+    # plik w pełni skanowany. Wartości są wymyślone; próbka jest częścią materiału publicznego.
+    probka = (
+        "Przyklad naruszenia: repo " + "labu, ADR GCP-" + "0999, klie" + "nt prosi o dostep.\n"
+        "Numer projektu 987654" + "321098, zgloszenie RITM" + "0912345, dostawca: Hetz" + "ner.\n"
+    )
+    powody = {powod for _, _, powod in skan.skanuj_tekst(probka)}
+    check("skan samodzielnosci LAPIE wszystkie szesc klas naruszen (test anty-tautologiczny)",
+          len(powody) == 6, f"zlapane klasy ({len(powody)}): {sorted(powody)}")
+
+    # Skan musi tez umiec powiedziec CZYSTO — inaczej zielone nic nie znaczy, bo zawsze cos zglasza.
+    check("skan samodzielnosci nie zglasza nic na czystym tekscie",
+          not skan.skanuj_tekst("Zwykly akapit o perimetrze i regulach ingress. Projekt 123456789012."))
+
+
+def main() -> int:
+    bootstrap()
+    test_samodzielnosc()
+    test_terraform()
+    test_iam_bootstrap()
+    test_contract()
+    test_monitoring()
+    test_brownfield()
+    test_external_egress_and_guard()
+    test_acm_naming()
+    test_lint_and_pinning()
+    test_rego()
+    test_tools()
+    test_workflows()
+    test_schemas()
+
+    ok = sum(1 for _, c, _ in results if c)
+    total = len(results)
+    print(f"\n== wynik: {ok}/{total} ==")
+    if ROOT:
+        print(f"(katalog testowy: {ROOT})")
+    return 0 if ok == total else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

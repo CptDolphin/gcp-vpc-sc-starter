@@ -1,0 +1,9 @@
+{
+  "result": [
+    {
+      "approval": "requested",
+      "assignment_group.name": "network-team",
+      "u_project_id": "prj-x-test"
+    }
+  ]
+}

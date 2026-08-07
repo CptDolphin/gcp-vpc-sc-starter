@@ -1,0 +1,142 @@
+# .github/workflows/validate.yml
+# Cheap, credential-free gates that run on every PR. Nothing here touches Google Cloud, so a syntax-level
+# PR can never go red because of expired credentials or a broken remote state.
+
+name: validate
+
+on:
+  pull_request:
+    paths:
+      - "perimeter/**"
+      - "policy/**"
+      - "schemas/**"
+      - "terraform/**"
+      - ".github/workflows/validate.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  declarations:
+    name: schema, policy and budget
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: install tooling
+        run: |
+          pip install --quiet pyyaml check-jsonschema
+          curl -sSfL -o /tmp/conftest.tar.gz \
+            https://github.com/open-policy-agent/conftest/releases/download/v0.56.0/conftest_0.56.0_Linux_x86_64.tar.gz
+          tar -xzf /tmp/conftest.tar.gz -C /tmp conftest
+          sudo mv /tmp/conftest /usr/local/bin/
+
+      # JSON Schema first: it rejects the boring failures (missing owner, missing review date, a project
+      # number that is not a number) with a message a human can act on, before OPA sees the file.
+      - name: json schema
+        run: |
+          check-jsonschema --schemafile schemas/policy.schema.json perimeter/policy.yaml
+          check-jsonschema --schemafile schemas/profile.schema.json perimeter/profiles/*.yaml
+          check-jsonschema --schemafile schemas/member.schema.json perimeter/members/*.yaml
+          check-jsonschema --schemafile schemas/access-level.schema.json perimeter/access-levels/*.yaml
+
+      # `gcloud access-context-manager perimeters dry-run enforce` commits the WHOLE dry-run configuration to
+      # enforced in one call. With a single org-wide perimeter that means promoting every division at once,
+      # including the ones that entered dry-run yesterday — a mass outage with nothing in git to revert.
+      # Promotion here is per member (one `stage` field, one PR), so this command must never enter a workflow
+      # or a script. We search executable surfaces only and skip comment lines: docs/ explains the ban on
+      # purpose, and a guard that trips over its own documentation only teaches people to delete comments.
+      - name: guard - no dry-run commit command
+        run: |
+          # The pattern is written as a character class on purpose. Spelled out literally, this very line
+          # would be the guard's own first hit — the search surface includes .github/workflows.
+          hits=$(grep -rnE 'dry-run[[:space:]-]+enforce' tools .github/workflows 2>/dev/null \
+                 | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' || true)
+          if [ -n "$hits" ]; then
+            echo "$hits"
+            echo '::error::The gcloud dry-run commit command promotes EVERY member at once. Promotion is per member: change stage in perimeter/members/<file>.yaml. See docs/3-runbook-promocja-i-break-glass.md.'
+            exit 1
+          fi
+
+      # Every third-party action must be pinned to a full commit SHA. A moving tag (`@v4`) is a mutable
+      # reference: whoever controls the tag controls what runs with our OIDC token — and the apply job can
+      # modify the perimeter of the whole organization. Dependabot keeps the pins fresh (.github/dependabot.yml);
+      # without it a pin is just an old version wearing a security badge.
+      - name: guard - actions pinned to a SHA
+        run: |
+          # Tylko wykonywalne YAML-e. `-r contrib` łapało przykład workflowa w contrib/README.md, czyli
+          # dokumentację — a guard, który wywraca się o własny przykład, uczy usuwania przykładów.
+          bad=$(grep -hnE '^\s*(- )?uses:' .github/workflows/*.yml contrib/action.yml 2>/dev/null \
+                | grep -vE 'uses:\s*\./' \
+                | grep -vE 'uses:\s*[^@]+@[0-9a-f]{40}([[:space:]]|$)' || true)
+          if [ -n "$bad" ]; then
+            echo "$bad"
+            echo '::error::Third-party actions must be pinned to a 40-character commit SHA (keep the version in a trailing comment).'
+            exit 1
+          fi
+
+      # The rego rules need context (policy + profiles + members + today), so we build one document first.
+      - name: collect declarations
+        run: python3 tools/collect_declarations.py > declarations.json
+
+      - name: rego unit tests
+        run: conftest verify --policy policy
+
+      # Promotion gates read violations_last_window. On a PR that does not promote anyone this is empty and
+      # the rules simply do not fire; on a promotion PR the reviewer must attach the report artifact.
+      - name: onboarding rules
+        run: conftest test --policy policy --namespace vpcsc.onboarding declarations.json
+
+      - name: attribute budget
+        run: python3 tools/attribute_budget.py --input declarations.json --format markdown | tee -a "$GITHUB_STEP_SUMMARY"
+
+  terraform:
+    name: terraform fmt and validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: "1.15.5"
+      - run: terraform -chdir=terraform fmt -check -recursive
+      # -backend=false on purpose: this job has no cloud credentials and must not need any.
+      - run: terraform -chdir=terraform init -backend=false
+      - run: terraform -chdir=terraform validate
+      # Natywne testy renderera — sprawdzają, czy YAML tłumaczy się na właściwe reguły. Bez credentiali:
+      # `command = plan` na locals, żadnego apply.
+      - run: terraform -chdir=terraform test
+
+  tflint:
+    name: tflint (static analysis)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: terraform-linters/setup-tflint@6e1e0642c0289bd619021bf6b34e3c08ed1e005a # v6.3.0
+        with:
+          tflint_version: v0.63.1
+
+      # Plugin google jest ściągany z GitHuba — bez tego kroku reguły dla zasobów Google nie działają, a
+      # przebieg i tak jest zielony.
+      - run: tflint --init
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # `--config` z BEZWZGLĘDNĄ ścieżką: `--chdir` przenosi też miejsce, w którym tflint szuka konfiguracji,
+      # więc bez tego .tflint.hcl z roota repo jest cicho ignorowany (patrz nagłówek .tflint.hcl).
+      # `--minimum-failure-severity=notice`: reguły o dokumentacji mają severity Notice, a bramka, która
+      # przepuszcza własne findingi, jest ozdobą.
+      - name: tflint - perimeter stack
+        run: tflint --chdir=terraform --config="$PWD/.tflint.hcl" --minimum-failure-severity=notice
+
+      - name: tflint - iam-bootstrap stack
+        run: tflint --chdir=iam-bootstrap --config="$PWD/.tflint.hcl" --minimum-failure-severity=notice

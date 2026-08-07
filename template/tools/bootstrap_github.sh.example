@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+# Konfiguracja repo w GitHub Enterprise: ochrona gałęzi, environments z reviewerami, zmienne.
+# Uruchom NA MASZYNIE Z DOSTĘPEM DO ENTERPRISE (VDI), z `gh` zalogowanym na konto firmowe.
+#
+# DLACZEGO skrypt, a nie klikanie: te ustawienia SĄ częścią mechanizmu bezpieczeństwa, nie higieną repo.
+# Environment z reviewerami to jedyna bramka niezależna od CODEOWNERS — wyklikana ręcznie bywa pominięta
+# przy odtwarzaniu repo i nikt tego nie zauważy, dopóki apply nie pojedzie bez zatwierdzenia.
+#
+#   ./bootstrap-github.sh --org <ORG> --repo gcp-vpc-sc \
+#       --net-team network-team --sec-team security-team \
+#       --wif "projects/123/locations/global/workloadIdentityPools/github-actions/providers/github" \
+#       --sa-plan sa-vpcsc-plan@proj.iam.gserviceaccount.com \
+#       --sa-apply sa-vpcsc-apply@proj.iam.gserviceaccount.com \
+#       --org-id 123456789012
+#
+#   ...--dry-run   # pokaż, co zostanie wykonane, bez wykonywania
+set -euo pipefail
+
+ORG="" REPO="gcp-vpc-sc" NET_TEAM="" SEC_TEAM="" WIF="" SA_PLAN="" SA_APPLY="" ORG_ID="" DRY=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --org) shift; ORG="${1:-}" ;;
+    --repo) shift; REPO="${1:-}" ;;
+    --net-team) shift; NET_TEAM="${1:-}" ;;
+    --sec-team) shift; SEC_TEAM="${1:-}" ;;
+    --wif) shift; WIF="${1:-}" ;;
+    --sa-plan) shift; SA_PLAN="${1:-}" ;;
+    --sa-apply) shift; SA_APPLY="${1:-}" ;;
+    --org-id) shift; ORG_ID="${1:-}" ;;
+    --dry-run) DRY=1 ;;
+    *) echo "nieznany argument: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+for v in ORG NET_TEAM SEC_TEAM WIF SA_PLAN SA_APPLY ORG_ID; do
+  [ -n "${!v}" ] || { echo "brakuje --${v,,} (patrz nagłówek skryptu)" >&2; exit 2; }
+done
+
+run() {
+  if [ "$DRY" -eq 1 ]; then printf '  [dry-run] %s\n' "$*"; else "$@"; fi
+}
+
+SLUG="$ORG/$REPO"
+echo "== repo $SLUG =="
+
+# 1. Repo — PRYWATNE. Treść perimetru to mapa tego, co i skąd sięga po wasze dane.
+if gh repo view "$SLUG" >/dev/null 2>&1; then
+  echo "  repo już istnieje — pomijam tworzenie"
+else
+  run gh repo create "$SLUG" --private --description "VPC Service Controls perimeter — membership and rules as code"
+fi
+
+# 2. Zmienne. NIE sekrety: to identyfikatory, nie poświadczenia — dostęp daje dopiero warunek na puli WIF.
+echo "== zmienne =="
+run gh variable set WIF_PROVIDER --repo "$SLUG" --body "$WIF"
+run gh variable set PLAN_SERVICE_ACCOUNT --repo "$SLUG" --body "$SA_PLAN"
+run gh variable set APPLY_SERVICE_ACCOUNT --repo "$SLUG" --body "$SA_APPLY"
+run gh variable set ORG_ID --repo "$SLUG" --body "$ORG_ID"
+
+# 3. Environments z wymaganymi reviewerami.
+#    perimeter-apply → sieć + security; break-glass → INNY zestaw (ta sama lista znosi sens rozdzielenia).
+echo "== environments =="
+# UWAGA: `gh api` przy 404 wypisuje treść błędu na STDOUT, więc sprawdzenie "czy pusto" NIE wystarcza —
+# do payloadu trafiłby wtedy JSON błędu zamiast ID. Wymagamy liczby (wykryte na dry-run).
+team_id() {
+  local out
+  out="$(gh api "orgs/$ORG/teams/$1" --jq .id 2>/dev/null || true)"
+  case "$out" in
+    ''|*[!0-9]*) return 1 ;;
+    *) printf '%s' "$out" ;;
+  esac
+}
+
+if ! net_id="$(team_id "$NET_TEAM")" || ! sec_id="$(team_id "$SEC_TEAM")"; then
+  echo "  BŁĄD: nie znaleziono zespołu ($NET_TEAM / $SEC_TEAM) w orgu $ORG — albo brak uprawnień do jego odczytu." >&2
+  echo "  Environment bez wymaganych reviewerów jest GORSZY niż jego brak: wygląda na bramkę, a przepuszcza apply." >&2
+  exit 1
+fi
+
+env_payload() {
+  python3 -c "
+import json,sys
+ids = [int(x) for x in sys.argv[1:]]
+print(json.dumps({'wait_timer': 0, 'reviewers': [{'type': 'Team', 'id': i} for i in ids],
+                  'deployment_branch_policy': {'protected_branches': True, 'custom_branch_policies': False}}))
+" "$@"
+}
+
+if [ "$DRY" -eq 1 ]; then
+  echo "  [dry-run] PUT repos/$SLUG/environments/perimeter-apply  reviewers=[$net_id,$sec_id]"
+  echo "  [dry-run] PUT repos/$SLUG/environments/break-glass      reviewers=[$sec_id]  <-- podmień na własny zestaw"
+else
+  env_payload "$net_id" "$sec_id" | gh api --method PUT "repos/$SLUG/environments/perimeter-apply" --input -
+  # break-glass: świadomie WĄSKI i INNY zestaw — dostosuj do waszego on-call, nie zostawiaj domyślnego.
+  env_payload "$sec_id" | gh api --method PUT "repos/$SLUG/environments/break-glass" --input -
+fi
+
+# 4. Ochrona main. `validate` i `plan` jako wymagane statusy — bez nich merge nie wie, czy zmiana jest legalna.
+echo "== ochrona main =="
+protection='{
+  "required_status_checks": {"strict": true, "contexts": ["declarations", "terraform", "plan"]},
+  "enforce_admins": true,
+  "required_pull_request_reviews": {"required_approving_review_count": 1, "require_code_owner_reviews": true},
+  "restrictions": null,
+  "allow_force_pushes": false,
+  "allow_deletions": false
+}'
+if [ "$DRY" -eq 1 ]; then
+  echo "  [dry-run] PUT repos/$SLUG/branches/main/protection (status checks + CODEOWNERS + no force-push)"
+else
+  printf '%s' "$protection" | gh api --method PUT "repos/$SLUG/branches/main/protection" --input -
+fi
+
+cat <<'NEXT'
+
+Gotowe. Weryfikacja (uruchom i przeczytaj wynik, nie zakładaj):
+  gh api repos/<ORG>/<REPO>/environments --jq '.environments[].name'
+  gh api repos/<ORG>/<REPO>/branches/main/protection --jq '.required_pull_request_reviews'
+  git push origin main            # ma zostać ODRZUCONE — jeśli przeszło, ochrona nie działa
+
+Dopiero potem: pierwszy PR z bramkami bez chmury, a po nim plan na żywej organizacji.
+NEXT

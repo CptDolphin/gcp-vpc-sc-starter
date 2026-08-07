@@ -1,0 +1,119 @@
+# Wniosek o dostępy — treść do wklejenia w ticket
+
+Skopiuj sekcje **A–D** do zgłoszenia dla zespołu IAM / architekta. Sekcja **E** to odpowiedzi na pytania,
+które padną — trzymaj ją pod ręką, nie wklejaj z góry.
+
+Załączniki: diagram `docs/diagrams/D2-iam-and-wif.png` oraz katalog `iam-bootstrap/` (gotowy Terraform,
+16 zasobów, `terraform validate` przechodzi bez credentiali).
+
+---
+
+## A. Czego dotyczy
+
+Wdrażamy zarządzanie **istniejącym** perimetrem VPC Service Controls jako kodem (repozytorium
+`<ORG>/gcp-vpc-sc`). Perimetr i access policy **już istnieją** — nie prosimy o prawo ich tworzenia ani
+kasowania, wyłącznie o możliwość **modyfikowania zawartości** (dokładanie projektów i reguł ingress/egress).
+
+Cel biznesowy: dywizje mają dołączać do perimetru samoobsługowo (formularz ServiceNow → approval zespołu
+sieciowego), zamiast czekać na ręczną zmianę wykonywaną przez inżyniera.
+
+## B. O co prosimy
+
+```
+0. WIDOK READ-ONLY dla ludzi z zespołu (najtańszy punkt, odblokowuje inwentaryzację i brownfield):
+   - roles/resourcemanager.organizationViewer       [ORGANIZACJA]   konsola w ogóle pokazuje organizację
+   - roles/accesscontextmanager.policyReader        [ORGANIZACJA]   odczyt polityki, perimetru, access levels
+   - roles/browser                                  [ORGANIZACJA]   drzewo folderów/projektów (id <-> numer)
+   - roles/cloudasset.viewer                        [ORGANIZACJA]   pre-flight: czy projekt istnieje / gdzie jest
+   - roles/logging.viewer                           [ORGANIZACJA]   naruszenia dry-run = dowód przed promocją
+   - roles/serviceusage.serviceUsageViewer          [ORGANIZACJA]   czy API objęte baselinem są włączone
+   (minimum, gdyby trzeba było ciąć: organizationViewer + policyReader + browser)
+   UWAGA: granty ACM na folderze/projekcie NIE działają — tylko organizacja albo pojedyncza polityka.
+
+1. Konto serwisowe  sa-vpcsc-plan@<PROJEKT>.iam.gserviceaccount.com   (read-only, uruchamiane przez każdy PR)
+   - roles/accesscontextmanager.policyReader        [ORGANIZACJA]
+   - roles/cloudasset.viewer                        [ORGANIZACJA]
+   - roles/compute.networkViewer                    [ORGANIZACJA lub foldery dywizji]
+   - roles/dns.reader                               [ORGANIZACJA lub foldery dywizji]
+   - roles/storage.objectAdmin                      [prefiks bucketa stanu Terraform]
+
+2. Konto serwisowe  sa-vpcsc-apply@<PROJEKT>.iam.gserviceaccount.com  (jedyna tożsamość zapisująca)
+   - CUSTOM ROLA organizations/<ORG_ID>/roles/vpcScPerimeterWriter    [ORGANIZACJA]
+       accesscontextmanager.policies.get / list
+       accesscontextmanager.servicePerimeters.get / list / update
+       accesscontextmanager.accessLevels.get / list / create / update
+     (BEZ servicePerimeters.create, BEZ servicePerimeters.delete, BEZ accessLevels.delete, BEZ policies.*)
+   - roles/storage.objectAdmin                      [prefiks bucketa stanu Terraform]
+   - (opcjonalnie) roles/logging.viewer             [ORGANIZACJA]
+
+3. IAM Deny [ORGANIZACJA] dla obu kont:
+   accesscontextmanager.servicePerimeters.delete
+   accesscontextmanager.policies.delete
+
+4. Workload Identity Federation: pula + provider OIDC GitHub z attribute_condition ograniczającym do
+   repozytorium <ORG>/gcp-vpc-sc; wiązania roles/iam.workloadIdentityUser na obu kontach.
+
+5. Bucket na stan Terraform: versioning + soft-delete, BEZ retention-lock.
+
+6. WARIANT MINIMALNY, jeśli punkt 1 wymaga dłuższej decyzji — nie blokujmy się nawzajem:
+   scoped access policy na folderze-piaskownicy (--scopes=folders/<ID>) + roles/accesscontextmanager.policyEditor
+   dla sa-vpcsc-apply NA TEJ POLITYCE + roles/accesscontextmanager.policyReader na organizacji (read-only,
+   potrzebne do wylistowania polityk). Daje nam to pełny test pipeline'u bez prawa zapisu na polityce
+   produkcyjnej; utworzenie i delegację musi wykonać ktoś z uprawnieniami org-level (jednorazowo).
+
+Czego NIE prosimy:
+   - żadnych uprawnień zapisujących w projektach dywizji,
+   - prawa tworzenia ani usuwania perimetru i polityki,
+   - żadnych kluczy service accountów (dostęp wyłącznie keyless przez WIF).
+```
+
+## C. Uzasadnienie w trzech zdaniach
+
+> Perimetr i polityka już istnieją — prosimy wyłącznie o prawo modyfikowania **zawartości** perimetru
+> (`servicePerimeters.update`) plus zarządzanie poziomami dostępu. Google nie pozwala nadać uprawnień
+> Access Context Managera niżej niż organizacja, więc zamiast zawężać zasięg, zawężamy zestaw operacji:
+> rola custom bez `create`/`delete` plus IAM Deny na kasowaniu. Dostęp jest keyless (WIF), rozdzielony na
+> read-only dla pull requestów i zapisujący wyłącznie dla `main` za bramką ludzkiego zatwierdzenia.
+
+## D. Co dostajecie od nas
+
+- **Gotowy Terraform** (`iam-bootstrap/`) — applikuje go wasz zespół, nie nasz pipeline. Kod nadający
+  uprawnienia nie powinien być stosowany przez tożsamość, która z nich korzysta.
+- **Testy weryfikacyjne po apply**, w tym dwa **negatywne**: konto `plan` próbujące zmienić perimetr i konto
+  `apply` próbujące go skasować — oba mają zakończyć się błędem.
+
+---
+
+## E. Odpowiedzi na pytania, które padną
+
+**„Dlaczego rola na organizacji, a nie na naszym folderze?"**
+Uprawnienia Access Context Managera można nadać wyłącznie na organizacji albo na konkretnej polityce
+dostępu — grant na folderze lub projekcie **nie ma żadnego efektu**
+([docs](https://docs.cloud.google.com/access-context-manager/docs/access-control)). To ograniczenie Google,
+nie nasz wybór. Dlatego cała redukcja ryzyka idzie w zestaw operacji.
+
+**„Dlaczego nie `roles/accesscontextmanager.policyEditor`?"**
+Bo daje read-write na politykach **razem z prawem usunięcia perimetru**. Porównajcie sami:
+`gcloud iam roles describe roles/accesscontextmanager.policyEditor` — różnica wobec naszej roli to dokładnie
+`create` i `delete`.
+
+**„Skoro macie WIF, po co jeszcze konta serwisowe?"**
+WIF to **brama**, nie tożsamość: sam z siebie nie nadaje żadnych uprawnień. Uprawnienia ma konto serwisowe,
+a pula z warunkiem decyduje, kto może je impersonować. Alternatywa (rola nadana wprost tożsamości
+federowanej) jest możliwa, ale nie wszystkie API ją obsługują i traci się jeden punkt odcięcia dostępu.
+
+**„Czy `cloudasset.viewer` na organizacji jest konieczny?"**
+Tak, dla pre-flightu: sprawdzamy, czy projekt istnieje, czy jego numer zgadza się z ID i czy nie należy już
+do innej konfiguracji egzekwowanej (projekt może być tylko w jednej). Bez tego wniosek „przechodzi", a apply
+pada dopiero na API — po review i po zamknięciu ticketu.
+
+**„Po co `dns.reader`?"**
+Perimetr kontroluje, *kto* woła API, ale nie zmienia, *którędy* ruch wychodzi. Bez prywatnej strefy DNS
+kierującej `googleapis.com` na restricted VIP (`199.36.153.4/30`) ruch idzie publicznie — albo omija intencję
+granicy, albo po włączeniu enforce zostaje zablokowany i wygląda jak awaria aplikacji. `dns.reader` pozwala to
+**sprawdzić** przed dołączeniem; naprawia właściciel projektu, nie my.
+
+**„Czy to nie da się zrobić bez uprawnień na organizacji?"**
+Jedyna taka opcja to **scoped policy** — własna polityka ACM dla folderu dywizji, z uprawnieniami na tej
+polityce zamiast na organizacji. To jednak oznacza osobny perimetr per dywizja, czyli rezygnację z wymogu
+„jeden perimetr". Jesteśmy gotowi to rozważyć, jeśli taka jest decyzja architektury.

@@ -1,0 +1,34 @@
+# Aktualizacje pinów — akcje GitHuba są przypięte SHA-em, więc bez tego pliku zostają na zawsze na wersji z
+# dnia bootstrapu, łącznie z ich CVE. Dependabot rozumie pin SHA + komentarz z wersją: podnosi jedno i drugie.
+#
+# DLACZEGO to jest wpisane do startera, a nie „do włączenia później": pinowanie SHA bez mechanizmu aktualizacji
+# jest gorsze niż tag. Tag przynajmniej dostaje poprawki bezpieczeństwa sam; martwy pin nie dostaje nic, a
+# wygląda na kontrolę bezpieczeństwa. To jest ta sama pułapka co bramka, która nic nie sprawdza.
+
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+    # Grupujemy w jeden PR: pięć osobnych PR-ów tygodniowo na repo, w którym każdy merge dotyka granicy
+    # bezpieczeństwa, kończy się ignorowaniem wszystkich pięciu.
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+
+  # Terraform: provider google jest pinowany `~> 7.0` w versions.tf, a lock file jest w repo. Dependabot
+  # podnosi lock w osobnym PR-ze — a `terraform test` w validate.yml powie, czy renderer to przeżył.
+  - package-ecosystem: terraform
+    directories:
+      - "/terraform"
+      - "/iam-bootstrap"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 2
+    labels:
+      - dependencies

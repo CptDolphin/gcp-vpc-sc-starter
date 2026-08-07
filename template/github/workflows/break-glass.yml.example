@@ -1,0 +1,111 @@
+# .github/workflows/break-glass.yml
+# Emergency: pull one member out of the ENFORCED configuration when the perimeter is blocking legitimate
+# production traffic.
+#
+# WHY a dedicated path instead of "just open a PR": during an incident the normal path (PR → review → merge
+# → apply) is too slow, and the predictable result of a too-slow emergency path is that somebody edits the
+# perimeter by hand in the console — which is worse, because it leaves no trace in git and shows up later as
+# drift. So we give the emergency an official, audited route.
+#
+# What it deliberately does NOT do: it does not remove the member from the dry-run configuration. The
+# incident does not delete our knowledge of that project's traffic — after the fix, promotion needs the
+# same evidence as the first time.
+
+name: break-glass
+
+on:
+  workflow_dispatch:
+    inputs:
+      member:
+        description: "member file name without .yaml (e.g. example-division-prj-example-vertex-prod)"
+        required: true
+      incident:
+        description: "incident ticket (INC…) — goes into the commit and the postmortem issue"
+        required: true
+      reason:
+        description: "what is broken, in one sentence"
+        required: true
+
+permissions:
+  contents: write
+  id-token: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: vpc-sc-apply # shares the single-flight group with apply: never two writers at once
+  cancel-in-progress: false
+
+jobs:
+  break_glass:
+    name: demote a member to dry-run
+    runs-on: ubuntu-latest
+    environment: break-glass # required reviewers: two people, and they are NOT the same list as apply
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: demote the member to dry-run
+        run: |
+          pip install --quiet pyyaml
+          python3 - "${{ github.event.inputs.member }}" <<'PY'
+          import pathlib, sys, yaml
+          f = pathlib.Path(f"perimeter/members/{sys.argv[1]}.yaml")
+          m = yaml.safe_load(f.read_text())
+          if m["stage"] != "enforced":
+              sys.exit(f"{f} is already {m['stage']} — nothing to demote")
+          m["stage"] = "dry-run"
+          f.write_text(yaml.safe_dump(m, sort_keys=False, allow_unicode=True))
+          print(f"demoted {f}")
+          PY
+
+      - name: commit
+        run: |
+          git config user.name "vpc-sc-break-glass"
+          git config user.email "noreply@example.com"
+          git add perimeter/members
+          git commit -m "break-glass: demote ${{ github.event.inputs.member }} to dry-run (${{ github.event.inputs.incident }})
+
+          ${{ github.event.inputs.reason }}
+
+          Applied outside the normal review path under the break-glass procedure.
+          Postmortem issue is opened automatically by this workflow."
+          git push
+
+      - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.9
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.APPLY_SERVICE_ACCOUNT }}
+
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: "1.15.5"
+
+      - name: apply
+        run: |
+          terraform -chdir=terraform init -input=false
+          terraform -chdir=terraform apply -input=false -auto-approve -lock-timeout=10m
+
+      # An emergency without a postmortem repeats. The issue is created automatically so that the follow-up
+      # is not "somebody should write this up" but an item with a number.
+      - name: open the postmortem issue
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        with:
+          script: |
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `postmortem: break-glass on ${{ github.event.inputs.member }} (${{ github.event.inputs.incident }})`,
+              labels: ['postmortem', 'break-glass'],
+              body: [
+                '**What happened:** ${{ github.event.inputs.reason }}',
+                '',
+                'The member was demoted to the dry-run configuration and is currently **not protected**.',
+                'It stays in dry-run, so its traffic is still being recorded.',
+                '',
+                '### Before re-promoting',
+                '- [ ] which flow was blocked, and why was it missing from the rules?',
+                '- [ ] does an existing profile cover it, or do we need a new one?',
+                '- [ ] why did the observation window not catch it (too short? rare job? seasonal?)',
+                '- [ ] fresh clean window + violations report attached to the promotion PR',
+              ].join('\n'),
+            });

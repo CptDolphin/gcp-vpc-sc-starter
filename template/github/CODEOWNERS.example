@@ -1,0 +1,36 @@
+# Ownership of the perimeter repository.
+#
+# The split matters: changing WHO is inside the perimeter is a routine, additive act; changing WHAT the
+# perimeter protects, or what a shared rule template allows, affects every division at once.
+
+# Default: nothing lands without the perimeter owners.
+*                           @your-org/network-team @your-org/security-team
+
+# Baseline — the services under protection, the dry-run window, the attribute budget.
+# Both teams, always: this file is the definition of the boundary.
+/perimeter/policy.yaml      @your-org/network-team @your-org/security-team
+
+# Rule templates. A change here propagates to every division already using the profile, so it is reviewed
+# like a shared library, not like a config tweak.
+/perimeter/profiles/        @your-org/network-team @your-org/security-team
+
+# Access levels — the context conditions (corporate network, managed device). Widening an IP range here
+# quietly widens every rule that references it.
+/perimeter/access-levels/   @your-org/network-team @your-org/security-team
+
+# Which repository may request which projects. A team cannot widen its own list, because the list is not
+# in its repository — that property only holds as long as this file needs the same approval as a profile.
+/perimeter/contributors.yaml @your-org/network-team @your-org/security-team
+
+# The contribution action used by other repositories. Changing it changes what those repositories send.
+/contrib/                   @your-org/network-team @your-org/security-team
+
+# Membership. The bot opens these PRs; the networking team approves. Security is pulled in by the workflow
+# only when the file contains an `exceptions:` entry (a raw rule outside the profile catalogue).
+/perimeter/members/         @your-org/network-team
+
+# The renderer and the gates. Somebody who can edit these can neutralise every other line in this file.
+/terraform/                 @your-org/network-team @your-org/security-team
+/policy/                    @your-org/security-team
+/tools/                     @your-org/network-team @your-org/security-team
+/.github/workflows/         @your-org/network-team @your-org/security-team

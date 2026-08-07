@@ -1,0 +1,23 @@
+# Mapowanie: repozytorium zespołu → projekty, o które WOLNO mu wnioskować.
+#
+# DLACZEGO ten plik mieszka TUTAJ, a nie w repozytorium zespołu: gdyby zespół trzymał listę swoich
+# dozwolonych projektów u siebie, mógłby ją sobie rozszerzyć tym samym commitem, którym dodaje projekt.
+# Mapowanie jest jedyną rzeczą, której kanał „repo zespołu" nie może o sobie orzec — dlatego zmiana tego
+# pliku wymaga approvalu sieci i security (CODEOWNERS), tak samo jak zmiana profilu.
+#
+# Dotyczy WYŁĄCZNIE kanału `change_ref: pr:ORG/repo#123`. Wniosek z ServiceNow (`snow:`) jest weryfikowany
+# oddzwonieniem do systemu rekordu, a wpis ręczny (`manual:`) — approvalem CODEOWNERS.
+
+schema_version: 1
+
+contributors:
+  - repository: ORG/example-division-platform
+    division: example-division
+    # Projekty, o które to repozytorium może wnioskować. Lista JAWNA — brak wildcardów.
+    # Chcesz dołożyć projekt? To PR do tego pliku, z approvalem sieci — czyli ta sama bramka,
+    # która chroni profile.
+    allowed_projects:
+      - prj-example-vertex-dev
+      - prj-example-vertex-prod
+    # Kontakt do eskalacji, gdy zgłoszenie z tego repo wygląda podejrzanie.
+    owner_group: grp-example-division-cloud@example.com

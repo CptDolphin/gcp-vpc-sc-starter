@@ -1,0 +1,121 @@
+<mxfile host="app.diagrams.net" version="24.0.0">
+  <diagram name="D2-iam-and-wif" id="d2-iam-wif">
+    <mxGraphModel dx="1500" dy="950" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1700" pageHeight="1000" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+
+        <mxCell id="title" value="D2 · Access model — which identity needs which role, and why" style="text;html=1;fontSize=20;fontStyle=1;align=left;verticalAlign=middle;fontColor=#202124;" vertex="1" parent="1">
+          <mxGeometry x="40" y="20" width="1000" height="30" as="geometry"/>
+        </mxCell>
+        <mxCell id="sub" value="The perimeter and the access policy ALREADY EXIST. We are not asking for the right to create or delete them — only to modify the contents of the existing perimeter." style="text;html=1;fontSize=12;fontStyle=2;align=left;verticalAlign=middle;fontColor=#5F6368;" vertex="1" parent="1">
+          <mxGeometry x="40" y="52" width="1200" height="20" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="constraint" value="&lt;b&gt;⚠️ The constraint that shapes everything&lt;/b&gt;&lt;br&gt;Access Context Manager permissions can be granted &lt;b&gt;only at the organization level&lt;/b&gt; (or on an individual policy).&lt;br&gt;A grant made on a folder or a project has &lt;b&gt;no effect&lt;/b&gt;. So the scope cannot be narrowed — only the SET OF OPERATIONS can.&lt;br&gt;Hence: a custom role instead of policyEditor, plus IAM Deny on the destructive operations." style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=top;fillColor=#FFF8E1;strokeColor=#D6B656;fontSize=12;spacing=8;fontColor=#7F6000;" vertex="1" parent="1">
+          <mxGeometry x="40" y="90" width="1180" height="90" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="ghbox" value="GitHub — ORG/gcp-vpc-sc" style="rounded=1;whiteSpace=wrap;html=1;container=1;collapsible=0;fillColor=none;strokeColor=#666666;dashed=1;verticalAlign=top;align=left;spacingLeft=10;fontStyle=1;fontSize=13;spacingTop=4;" vertex="1" parent="1">
+          <mxGeometry x="40" y="220" width="380" height="420" as="geometry"/>
+        </mxCell>
+        <mxCell id="wfpr" value="&lt;b&gt;workflow: plan&lt;/b&gt;&lt;br&gt;runs on every pull request&lt;br&gt;&lt;i&gt;including branches nobody reviewed yet&lt;/i&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E1D5E7;strokeColor=#9673A6;fontSize=12;spacing=6;" vertex="1" parent="ghbox">
+          <mxGeometry x="30" y="50" width="320" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="wfapply" value="&lt;b&gt;workflow: apply&lt;/b&gt;&lt;br&gt;only on main + environment &lt;b&gt;perimeter-apply&lt;/b&gt;&lt;br&gt;required reviewers: networking + security&lt;br&gt;single-flight: one writer at a time" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E1D5E7;strokeColor=#9673A6;fontSize=12;spacing=6;" vertex="1" parent="ghbox">
+          <mxGeometry x="30" y="170" width="320" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="oidc" value="OIDC token&#10;(short-lived, minted per run)&#10;NO service-account keys anywhere" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F5F5;strokeColor=#666666;fontSize=11;fontStyle=2;spacing=6;" vertex="1" parent="ghbox">
+          <mxGeometry x="30" y="310" width="320" height="70" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="wifbox" value="Workload Identity Federation — the gate, not the permission" style="rounded=1;whiteSpace=wrap;html=1;container=1;collapsible=0;fillColor=none;strokeColor=#4285F4;dashed=1;verticalAlign=top;align=left;spacingLeft=10;fontStyle=1;fontSize=13;fontColor=#1A73E8;spacingTop=4;" vertex="1" parent="1">
+          <mxGeometry x="480" y="220" width="440" height="420" as="geometry"/>
+        </mxCell>
+        <mxCell id="cond1" value="&lt;b&gt;attribute_condition (plan)&lt;/b&gt;&lt;br&gt;repository == 'ORG/gcp-vpc-sc'&lt;br&gt;AND event_name == 'pull_request'" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=12;spacing=6;" vertex="1" parent="wifbox">
+          <mxGeometry x="30" y="50" width="380" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="cond2" value="&lt;b&gt;attribute_condition (apply)&lt;/b&gt;&lt;br&gt;repository == 'ORG/gcp-vpc-sc'&lt;br&gt;AND ref == 'refs/heads/main'&lt;br&gt;AND environment == 'perimeter-apply'" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=12;spacing=6;" vertex="1" parent="wifbox">
+          <mxGeometry x="30" y="170" width="380" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="wifwarn" value="&lt;b&gt;Without this condition&lt;/b&gt; (or with `true`): ANY workflow in ANY repository of your GitHub org can exchange its token for access to the perimeter of the whole GCP organization. This is the single most common real-world WIF misconfiguration." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F8CECC;strokeColor=#B85450;fontSize=11;align=left;spacing=8;" vertex="1" parent="wifbox">
+          <mxGeometry x="30" y="300" width="380" height="90" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="gcpbox" value="Google Cloud — organization scope" style="rounded=1;whiteSpace=wrap;html=1;container=1;collapsible=0;fillColor=none;strokeColor=#D79B00;verticalAlign=top;align=left;spacingLeft=10;fontStyle=1;fontSize=13;fontColor=#B26B00;spacingTop=4;" vertex="1" parent="1">
+          <mxGeometry x="980" y="220" width="660" height="700" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="saplan" value="&lt;b&gt;sa-vpcsc-plan&lt;/b&gt; — read only&lt;br&gt;• accesscontextmanager.policyReader → read the perimeter for the plan&lt;br&gt;• cloudasset.viewer → does the project exist, is it already in another perimeter&lt;br&gt;• compute.networkViewer + dns.reader → Private Google Access, restricted-VIP DNS&lt;br&gt;• storage.objectAdmin (state prefix) → Terraform takes a LOCK, read is not enough" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D5E8D4;strokeColor=#82B366;fontSize=11;align=left;spacing=8;" vertex="1" parent="gcpbox">
+          <mxGeometry x="30" y="50" width="600" height="120" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="saapply" value="&lt;b&gt;sa-vpcsc-apply&lt;/b&gt; — the only writer&lt;br&gt;&lt;b&gt;custom role vpcScPerimeterWriter&lt;/b&gt; (instead of policyEditor):&lt;br&gt;• servicePerimeters.get / list / &lt;b&gt;update&lt;/b&gt; → add a project or a rule (API: patch)&lt;br&gt;• accessLevels.get / list / create / update → context conditions&lt;br&gt;• policies.get / list → resolve the org-level policy&lt;br&gt;&lt;b&gt;deliberately excluded:&lt;/b&gt; servicePerimeters.create / delete, accessLevels.delete,&lt;br&gt;policies.create / delete / setIamPolicy&lt;br&gt;• storage.objectAdmin (state prefix) → write the state" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;fontSize=11;align=left;spacing=8;" vertex="1" parent="gcpbox">
+          <mxGeometry x="30" y="200" width="600" height="160" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="deny" value="&lt;b&gt;IAM Deny (organization)&lt;/b&gt; for both service accounts&lt;br&gt;servicePerimeters.delete · policies.delete&lt;br&gt;&lt;i&gt;WHY on top of the custom role: roles get swapped in a hurry (&quot;let's give it policyEditor for a moment&quot;).&lt;br&gt;Deny is evaluated before roles and survives that.&lt;/i&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F8CECC;strokeColor=#B85450;fontSize=11;align=left;spacing=8;" vertex="1" parent="gcpbox">
+          <mxGeometry x="30" y="390" width="600" height="100" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="perimeter" value="&lt;b&gt;EXISTING perimeter&lt;/b&gt; · accessPolicies/&lt;id&gt;/servicePerimeters/ai_core&lt;br&gt;we only modify its contents (members + rules)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF2CC;strokeColor=#D6B656;fontSize=12;spacing=8;" vertex="1" parent="gcpbox">
+          <mxGeometry x="30" y="520" width="600" height="60" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="divproj" value="Division projects — READ ONLY (pre-flight)&#10;we never provision or modify anything in them" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F5F5;strokeColor=#888888;dashed=1;fontSize=11;spacing=6;" vertex="1" parent="gcpbox">
+          <mxGeometry x="30" y="610" width="600" height="60" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="human" value="Human (break-glass)&#10;policyAdmin via PAM / JIT&#10;never standing access" style="shape=umlActor;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#4C6FA6;fontSize=11;verticalLabelPosition=bottom;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="130" y="740" width="50" height="80" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;endArrow=block;" edge="1" parent="1" source="wfpr" target="cond1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;endArrow=block;" edge="1" parent="1" source="wfapply" target="cond2">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e3" value="impersonates" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;endArrow=block;fontSize=11;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="cond1" target="saplan">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e4" value="impersonates" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;endArrow=block;fontSize=11;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="cond2" target="saapply">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e5" value="reads" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=1.6;dashed=1;endArrow=open;fontSize=11;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="saplan" target="perimeter">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1650" y="330"/>
+              <mxPoint x="1650" y="770"/>
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e6" value="servicePerimeters.update" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2.4;endArrow=block;strokeColor=#D79B00;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="saapply" target="perimeter">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1000" y="500"/>
+              <mxPoint x="1000" y="770"/>
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e7" value="blocks delete" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=1.6;dashed=1;endArrow=open;strokeColor=#B85450;fontSize=11;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="deny" target="perimeter">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e8" value="pre-flight (read only)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=1.6;dashed=1;endArrow=open;fontSize=11;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="saplan" target="divproj">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1000" y="330"/>
+              <mxPoint x="1000" y="860"/>
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e9" value="incident only" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=1.6;dashed=1;endArrow=open;strokeColor=#4C6FA6;fontSize=11;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="human" target="perimeter">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e10" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=1.4;dashed=1;endArrow=none;strokeColor=#999999;" edge="1" parent="1" source="oidc" target="wifbox">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

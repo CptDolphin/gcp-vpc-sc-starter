@@ -1,0 +1,51 @@
+# Profil: trening/batch na projekcie członka, czytający dane treningowe z projektu-źródła W TYM SAMYM
+# perimetrze, oraz pipeline CI/CD spoza perimetru, który te zadania uruchamia.
+#
+# DLACZEGO ten profil ma egress, a serving nie: trening sięga po dane, które często żyją w innym projekcie
+# (hurtownia, feature store). Dopóki oba projekty są w perimetrze, ruch jest intra-perimeter i egress NIE jest
+# potrzebny — reguła poniżej dotyczy wyłącznie przypadku, w którym źródło danych leży POZA granicą i dywizja
+# świadomie o to wystąpiła. Jeśli twoje dane są w perimetrze, zostaw `data_source_projects` pustą listą.
+
+schema_version: 1
+name: vertex-batch-training
+summary: "CI/CD outside the perimeter launches training jobs; jobs may read an approved out-of-perimeter dataset."
+risk: medium
+
+parameters:
+  - name: pipeline_identities
+    description: "CI/CD service accounts that submit training/pipeline jobs."
+  - name: access_levels
+    description: "Access levels required from the submitting CI/CD."
+  - name: training_identities
+    description: "Service accounts the training job runs as (used for the egress rule)."
+  - name: data_source_projects
+    description: "Projects OUTSIDE the perimeter the job may read from. Empty list = no egress rule rendered."
+
+ingress:
+  - title: submit-training-jobs
+    identities_from: pipeline_identities
+    access_levels_from: access_levels
+    to: member_project
+    operations:
+      - service: aiplatform.googleapis.com
+        # `*` to JEDYNA wartość, jaką API tu przyjmuje: `supportedMethods` dla tej usługi jest puste
+        # (`gcloud access-context-manager supported-services describe <usluga>`), więc wypisanie metod
+        # jawnie kończy się `Error 400: METHOD ... is not supported`. Usługa jest wymieniona w policy.yaml
+        # §services_without_method_selectors, a check_supported_services.py pilnuje tej listy wobec API.
+        methods: ["*"]
+
+egress:
+  - title: read-approved-dataset
+    identities_from: training_identities
+    # `to_projects_from` wskazuje parametr członka z listą projektów-celów. Pusta lista = reguła NIE powstaje
+    # (bezpieczna degradacja: brak egressu jest zawsze bezpieczniejszym domyślnym stanem niż szeroki egress).
+    to_projects_from: data_source_projects
+    operations:
+      - service: storage.googleapis.com
+        methods:
+          - google.storage.objects.get
+          - google.storage.objects.list
+      - service: bigquery.googleapis.com
+        methods:
+          - JobService.Query
+          - TableDataService.List

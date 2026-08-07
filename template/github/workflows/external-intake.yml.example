@@ -1,0 +1,114 @@
+# .github/workflows/external-intake.yml
+# Third entry channel: a division's own repository requests a perimeter change.
+#
+# Same principle as ServiceNow intake: the payload is DATA, not authorization. Here the proof is different —
+# instead of calling a ticketing system back, we check the request against perimeter/contributors.yaml,
+# which lives HERE and can only be changed with networking + security approval. A repository cannot widen
+# its own list of allowed projects, because that list is not in its repository.
+
+name: external-intake
+
+on:
+  repository_dispatch:
+    types: [vpc-sc-external]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: external-intake-${{ github.event.client_payload.member.project_id }}
+  cancel-in-progress: false
+
+jobs:
+  intake:
+    name: validate an external request and open a PR
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: install tooling
+        run: |
+          pip install --quiet pyyaml check-jsonschema
+          curl -sSfL -o /tmp/conftest.tar.gz \
+            https://github.com/open-policy-agent/conftest/releases/download/v0.56.0/conftest_0.56.0_Linux_x86_64.tar.gz
+          tar -xzf /tmp/conftest.tar.gz -C /tmp conftest
+          sudo mv /tmp/conftest /usr/local/bin/
+
+      # The dispatching repository is taken from the EVENT, never from the payload body. A payload can claim
+      # any source; github.event.client_payload.source_repository is written by the sender, but the App
+      # installation that delivered it is not — so we cross-check both and refuse on mismatch.
+      - name: write the member file
+        env:
+          MEMBER_JSON: ${{ toJSON(github.event.client_payload.member) }}
+          SOURCE_REPO: ${{ github.event.client_payload.source_repository }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, sys, yaml
+
+          member = json.loads(os.environ["MEMBER_JSON"])
+          source = os.environ["SOURCE_REPO"]
+          ref = member.get("change_ref", "")
+
+          # change_ref MUST point at the repository that actually sent this. Otherwise a repository could
+          # claim a reference belonging to someone else's PR and inherit their allowed-project list.
+          if not ref.startswith(f"pr:{source}#"):
+              sys.exit(f"change_ref {ref!r} nie wskazuje na repozytorium zgłaszające ({source})")
+
+          out = pathlib.Path(f"perimeter/members/{member['division']}-{member['project_id']}.yaml")
+
+          # An existing member file means this project is ALREADY in the perimeter. Overwriting it would
+          # look like onboarding while rewriting someone's entry — including a silent demotion from
+          # `enforced` back to `dry-run`, because the line below forces dry-run unconditionally. The project
+          # would lose real protection through a PR titled "onboard (external)" that breaks no gate (a new
+          # `dry-run` stage violates no promotion rule) and qualifies for auto-merge as an additive change.
+          # The OPA duplicate rule cannot catch this one: it compares two member FILES, and re-requesting
+          # the same division+project reuses the same filename, so a second file never appears.
+          if out.exists():
+              current = yaml.safe_load(out.read_text()) or {}
+              sys.exit(
+                  f"{out} juz istnieje — projekt {member['project_id']} jest czlonkiem perimetru "
+                  f"(stage: {current.get('stage', '?')}); zmiane profili albo promocje zglos PR-em "
+                  "na istniejacym pliku, nie kanalem wejsciowym")
+
+          # stage is forced here, exactly like in the ServiceNow path: a member always starts in dry-run,
+          # no matter what the sender put in the file.
+          member["stage"] = "dry-run"
+
+          out.write_text(yaml.safe_dump(member, sort_keys=False, allow_unicode=True))
+          print(f"zapisano {out}")
+          PY
+
+      - name: schema
+        run: check-jsonschema --schemafile schemas/member.schema.json perimeter/members/*.yaml
+
+      # This is where contributors.yaml does its work: is this repository allowed to ask for THIS project,
+      # and does its division match the entry?
+      - name: ownership and onboarding rules
+        run: |
+          python3 tools/collect_declarations.py > declarations.json
+          conftest test --policy policy --namespace vpcsc.onboarding declarations.json
+
+      - name: open the pull request
+        uses: peter-evans/create-pull-request@c5a7806660adbe173f04e3e038b0ccdcd758773c # v6.1.0
+        with:
+          branch: external/${{ github.event.client_payload.member.division }}-${{ github.event.client_payload.member.project_id }}
+          title: "onboard (external): ${{ github.event.client_payload.member.division }} / ${{ github.event.client_payload.member.project_id }}"
+          commit-message: "onboard: ${{ github.event.client_payload.member.project_id }} requested by ${{ github.event.client_payload.source_repository }}"
+          body: |
+            Requested from **${{ github.event.client_payload.source_repository }}**
+            (commit `${{ github.event.client_payload.source_sha }}`).
+
+            Verified before this PR was opened:
+            - `change_ref` points at the dispatching repository,
+            - that repository is allowed to request this project (`perimeter/contributors.yaml`),
+            - the declared division matches the one mapped to that repository,
+            - the member enters the **dry-run** configuration — nothing is blocked, nothing is protected yet.
+
+            Still to be checked by a reviewer: whether the requested profiles match the described use case,
+            and whether the project's network prerequisites are in place (pre-flight runs on `plan`).
+          labels: onboarding, dry-run, external

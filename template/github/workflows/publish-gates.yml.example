@@ -1,0 +1,81 @@
+# .github/workflows/publish-gates.yml
+# Publikuje BRAMKI (schemas/ + policy/) jako artefakt release'u, żeby repozytoria zespołów mogły walidować
+# swoje deklaracje u siebie — bez klonowania tego repozytorium.
+#
+# WHY this exists instead of „just use a submodule": a submodule gives the team the WHOLE repository, which
+# includes perimeter/members/ (every division's service accounts and user groups) and perimeter/access-levels/
+# (your corporate IP ranges). They need none of that to validate one file of their own. Sparse checkout does
+# not fix it either — the history still comes along, so `git show` reaches everything.
+#
+# What goes out: schemas (JSON Schema) and policy (rego). Those are RULES, not data — they say what a valid
+# declaration looks like, and reveal nothing about who is inside the perimeter.
+
+name: publish-gates
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "schemas/**"
+      - "policy/**"
+      - ".github/workflows/publish-gates.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write # tworzy release
+
+concurrency:
+  group: publish-gates
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    name: pack and publish the gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # Sanity: nie wypuszczamy paczki, która nie przechodzi własnych testów. Bramki wysłane zespołom z
+      # zepsutą regułą oznaczają, że każdy z nich zobaczy u siebie fałszywe „zielono" albo fałszywy błąd.
+      - name: install conftest
+        run: |
+          curl -sSfL -o /tmp/conftest.tar.gz \
+            https://github.com/open-policy-agent/conftest/releases/download/v0.56.0/conftest_0.56.0_Linux_x86_64.tar.gz
+          tar -xzf /tmp/conftest.tar.gz -C /tmp conftest
+          sudo mv /tmp/conftest /usr/local/bin/
+
+      - name: rego unit tests
+        run: conftest verify --policy policy
+
+      # Paczka zawiera WYŁĄCZNIE reguły i minimalny zestaw narzędzi potrzebny do ich uruchomienia.
+      # Żaden plik z perimeter/ tu nie wchodzi — to jest cała różnica wobec submodule.
+      - name: pack
+        id: pack
+        run: |
+          mkdir -p out/gates
+          cp -R schemas out/gates/
+          cp -R policy out/gates/
+          mkdir -p out/gates/tools
+          cp tools/collect_declarations.py out/gates/tools/
+          cp contrib/validate-local.sh out/gates/
+          tar -czf gates.tar.gz -C out gates
+          sha256sum gates.tar.gz | tee gates.tar.gz.sha256
+          echo "version=$(date -u +%Y.%m.%d)-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      # Release z tagiem datowanym — zespół może przypiąć konkretną wersję bramek albo brać `latest`.
+      # Pinowanie ma sens dla nich (stabilna walidacja), `latest` ma sens dla nas (od razu widzą nowe reguły).
+      - name: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.pack.outputs.version }}
+        run: |
+          gh release create "gates-$VERSION" \
+            gates.tar.gz gates.tar.gz.sha256 \
+            --title "Perimeter gates $VERSION" \
+            --notes "Bramki walidacyjne (schemas + policy) do użycia w repozytoriach zespołów.
+
+          Zawiera WYŁĄCZNIE reguły — żadnych danych o członkach perimetru, tożsamościach ani zakresach IP.
+
+          Użycie: contrib/action.yml pobiera tę paczkę automatycznie. Ręcznie:
+              gh release download gates-$VERSION --repo \${{ github.repository }} --pattern gates.tar.gz
+              tar -xzf gates.tar.gz && ./gates/validate-local.sh --member <plik.yaml> --gates ./gates"

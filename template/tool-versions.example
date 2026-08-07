@@ -1,0 +1,9 @@
+# Jedno źródło prawdy o wersjach: ten sam plik napędza lokalną powłokę (mise/asdf), pre-commit i CI.
+# Perimetr to org-plane singleton — różnica wersji Terraform między laptopem a runnerem objawiłaby się
+# jako różnica w planie na obiekcie o organizacyjnym blast-radiusie.
+terraform 1.15.5
+conftest 0.56.0
+python 3.12.7
+# Ta sama wersja co w validate.yml (setup-tflint). tflint bywa uruchamiany przez pre-commit z katalogu repo,
+# więc bez tego pinu shim menedżera wersji nie ma czego odpalić — i bramka „istnieje, nie działa".
+tflint 0.63.1

@@ -1,0 +1,123 @@
+# Access levels — warunki KONTEKSTU, które musi spełnić wywołujący spoza perimetru.
+#
+# DLACZEGO w ogóle: sama tożsamość nie wystarcza. Skradziony token SA działa z dowolnej sieci; access level
+# dokłada wymaganie „i to z naszej sieci / z zarządzanego urządzenia". Reguły ingress w profilach ZAWSZE
+# odwołują się do access levelu — reguła bez niego autoryzuje kontekst, którego nikt nie sprawdził.
+
+# NAZWY: `name` to short_name obiektu w Access Context Managerze — API wymaga, by zaczynał się LITERĄ i
+# zawierał wyłącznie znaki alfanumeryczne oraz `_`. Myślnik jest odrzucany (`corp-network` nie przejdzie), a
+# błąd wychodzi dopiero na apply. Ta sama zasada dotyczy nazwy perimetru w policy.yaml. Pilnują tego dwie
+# warstwy: `schemas/access-level.schema.json` w CI i test w selfteście.
+# Pole `title` jest wolnym tekstem — tam myślniki i spacje są w porządku.
+
+schema_version: 1
+
+access_levels:
+  - name: corp_network
+    title: "Corporate network"
+    # Zakresy podmień na własne. Trzymamy je w repo (a nie w zmiennej CI), bo to informacja jawna
+    # i chcemy widzieć w PR, gdy ktoś dokłada nowy zakres — to jest realne poszerzenie granicy.
+    ip_subnetworks:
+      - "203.0.113.0/24" # TEST-NET-3 (RFC 5737) — placeholder, podmień
+      - "198.51.100.0/24" # TEST-NET-2 (RFC 5737) — placeholder, podmień
+
+  # --- device-trust: WYMAGA PŁATNEJ LICENCJI, dlatego domyślnie WYŁĄCZONE -------------------------
+  # Silniejsze niż IP (laptop w kawiarni na VPN nadal spełnia corp_network), więc to jest docelowy warunek
+  # dostępu człowieka do konsoli — ale organizacja bez licencji BeyondCorp Enterprise dostanie przy apply
+  # `Error 400: Org owning policy must have license` (zmierzone, Issue #1904). Poziom, który się nie tworzy,
+  # wywraca też wszystko, co go referuje (`corp_network_and_device`), więc oba są odkomentowywane RAZEM,
+  # dopiero po potwierdzeniu licencji.
+  #
+  # - name: corp_managed_device
+  #   title: "Corporate managed device"
+  #   device_policy:
+  #     require_screen_lock: true
+  #     require_corp_owned: true
+  #     allowed_encryption_statuses:
+  #       - ENCRYPTED
+
+  - name: break_glass
+    title: "Break-glass (incident only)"
+    # Wąski zakres bastionu/stanowiska awaryjnego. NIE jest przypisywany do żadnego członka w normalnym
+    # trybie — używa go wyłącznie procedura break-glass, a każde użycie zostawia ślad w audit-logach.
+    ip_subnetworks:
+      - "192.0.2.10/32" # TEST-NET-1 (RFC 5737) — placeholder, podmień
+
+  # --- kompozycja: poziom zbudowany z innych poziomów ---------------------------------------------
+  # DLACZEGO: „korpo-sieć ORAZ zarządzane urządzenie" to najczęstszy realny wymóg dla dostępu człowieka do
+  # danych produkcyjnych. Zamiast duplikować warunki w dwóch miejscach, składamy istniejące poziomy.
+  # UWAGA na kolejność: poziom wskazywany w `required_access_levels` musi istnieć — renderer sortuje
+  # zależności, ale cykl (A wymaga B, B wymaga A) wykryje dopiero API.
+  # - name: corp_network_and_device
+  #   title: "Corporate network AND managed device"
+  #   combining_function: AND
+  #   required_access_levels:
+  #     - corp_network
+  #     - corp_managed_device
+
+  # Przykład kompozycji, który działa BEZ płatnej licencji: „z korpo-sieci ORAZ z regionu, w którym
+  # działamy". Słabszy niż wariant z device-trust, ale pokazuje ten sam mechanizm i da się go zastosować
+  # od pierwszego dnia. Po włączeniu licencji BeyondCorp podmień drugi składnik na corp_managed_device.
+  - name: corp_network_and_region
+    title: "Corporate network AND allowed region"
+    # UWAGA: poziom złożony WYŁĄCZNIE z `required_access_levels` jest odrzucany przez API jako
+    # `Error 400: AccessLevel definition has a trivial condition` (zmierzone, Issue #1904). Kompozycja musi
+    # nieść też własny warunek — tutaj `regions`. To ogranicza wzorzec „poskładam z gotowych klocków":
+    # zawsze potrzebny jest co najmniej jeden warunek bezpośrednio w tym poziomie.
+    combining_function: AND
+    regions:
+      - PL
+      - DE
+    required_access_levels:
+      - corp_network
+
+  # --- tożsamości: konkretne grupy zamiast „ktokolwiek z właściwej sieci" -------------------------
+  # Access level z `members` zawęża warunek do wskazanych tożsamości. Bez tego poziom mówi tylko „z tej
+  # sieci", więc każdy, kto jest w VPN, spełnia go — także konto, które nie powinno dotykać tych danych.
+  # --- zawężenie tożsamościowe: WYMAGA REALNYCH KONT, dlatego domyślnie WYŁĄCZONE ----------------
+  # ACM waliduje ISTNIENIE każdej tożsamości również w access levelu: `user:ktos@example.com` kończy
+  # się `Error 400: The email address ... is invalid or non-existent` (zmierzone, Issue #1904).
+  # Przykład nie może więc nieść działających tożsamości — odkomentuj i wpisz swoje.
+  # - name: ds_team_from_corp
+  #   title: "Data science team from the corporate network"
+  #   combining_function: AND
+  #   ip_subnetworks:
+  #     - "203.0.113.0/24" # TEST-NET-3 (RFC 5737) — podmień
+  #   members:
+  #     # UWAGA: Access Context Manager NIE OBSŁUGUJE grup w `members` — `group:...` kończy się
+  #     # `Error 400: AccessLevel definition has a 'member' field starting with 'group:'. Groups are not
+  #     # supported.` (zmierzone na żywym API, Issue #1904). Wypisuj użytkowników i konta serwisowe imiennie.
+  #     # Konsekwencja operacyjna: rotacja składu zespołu jest zmianą w tym pliku, nie w katalogu grup —
+  #     # dlatego ten poziom trzymaj wąsko i tylko tam, gdzie naprawdę potrzeba tożsamościowego zawężenia.
+  #     - "user:example.person@example.com"
+  #     - "serviceAccount:sa-notebook@prj-example.iam.gserviceaccount.com"
+
+  # --- geografia: odrzucenie ruchu z regionów, w których nie działamy ----------------------------
+  # Kody ISO 3166-1 alfa-2. To NIE jest zabezpieczenie kryptograficzne (VPN je omija), ale tanio ucina
+  # szum z regionów, w których nie mamy ani pracowników, ani infrastruktury.
+  - name: eu_only
+    title: "Requests from the EU only"
+    combining_function: AND
+    regions:
+      - DE
+      - FR
+      - NL
+
+  # --- negacja: poziom, który spełnia się, gdy warunek NIE jest prawdziwy ------------------------
+  # DLACZEGO ostrożnie: `negate: true` odwraca sens CAŁEGO warunku. Przydaje się do „wszędzie poza tym
+  # zakresem", ale bardzo łatwo o pomyłkę — poziom nazwany „block-x" może w praktyce przepuszczać wszystko
+  # poza x, co jest zupełnie inną polityką niż „blokuj x".
+  # - name: not_from_lab
+  #   title: "Anything except the lab range"
+  #   negate: true
+  #   ip_subnetworks: ["198.51.100.0/24"]
+
+  # --- custom (CEL): gdy warunki `basic` nie wystarczają ------------------------------------------
+  # Poziom `custom` używa wyrażenia CEL i WYKLUCZA się z `basic` — jedno albo drugie, nigdy oba w jednym
+  # poziomie. Sięgaj po to tylko wtedy, gdy naprawdę nie da się tego wyrazić warunkami basic; wyrażenie CEL
+  # jest nieporównywalnie trudniejsze do zaudytowania niż lista podsieci.
+  # - name: corp_device_with_os_check
+  #   title: "Managed device with a recent OS"
+  #   custom_expression: |
+  #     device.encryption_status == DeviceEncryptionStatus.ENCRYPTED &&
+  #     device.os_type == OsType.DESKTOP_MAC

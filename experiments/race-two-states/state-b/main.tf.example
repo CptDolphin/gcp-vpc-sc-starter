@@ -1,0 +1,46 @@
+# Stan B — jedna reguła ingress w konfiguracji DRY-RUN.
+#
+# Celowo BEZ backendu zdalnego: chodzi o to, żeby oba stany nie miały wspólnej blokady. Dokładnie tak
+# wygląda sytuacja dwóch repozytoriów zespołów, z których każde ma własny bucket stanu.
+
+terraform {
+  required_version = ">= 1.8, < 2.0"
+  required_providers {
+    google = {
+      source  = "hashicorp/google"
+      version = "~> 7.0"
+    }
+  }
+}
+
+provider "google" {}
+
+variable "policy_id" {
+  description = "Numer org-level access policy."
+  type        = string
+}
+
+variable "perimeter_name" {
+  description = "Nazwa TESTOWEGO perimetru (nie produkcyjnego!)."
+  type        = string
+}
+
+# Reguła w konfiguracji DRY-RUN — nie blokuje niczego, tylko zapisuje się w konfiguracji.
+resource "google_access_context_manager_service_perimeter_dry_run_ingress_policy" "race" {
+  perimeter = "accessPolicies/${var.policy_id}/servicePerimeters/${var.perimeter_name}"
+  title     = "race-test-beta"
+
+  ingress_from {
+    identities = ["serviceAccount:race-beta@example.iam.gserviceaccount.com"]
+  }
+
+  ingress_to {
+    resources = ["*"]
+    operations {
+      service_name = "storage.googleapis.com"
+      method_selectors {
+        method = "google.storage.buckets.get"
+      }
+    }
+  }
+}

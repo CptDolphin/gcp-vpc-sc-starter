@@ -1,0 +1,9 @@
+{
+  "result": [
+    {
+      "approval": "approved",
+      "assignment_group.name": "example-division",
+      "u_project_id": "prj-x-test"
+    }
+  ]
+}

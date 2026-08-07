@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+"""Mapuje naruszenia dry-run z audit-logów na członków perimetru i buduje raport dla właścicieli.
+
+DLACZEGO to jest osobne narzędzie, a nie „zajrzyj do SCC": surowy log mówi „principal X wywołał metodę Y i
+naruszył perimetr". Właściciel dywizji nie wie, czy to jego. Raport tłumaczy to na zdanie, które da się
+naprawić: „twój SA robi Z, po promocji przestanie działać, pokrywa to profil P".
+
+Wynik służy dwóm rzeczom naraz:
+  * raport w PR / komentarz do ticketu (czytelny dla człowieka),
+  * plik violations.json dla reguły OPA promotion_gate — czyli DOWÓD, że okno było czyste.
+    Brak wpisu dla członka reguła traktuje jako brak dowodu, nie jako zero.
+
+Wejście: `gcloud logging read` w formacie JSON (organizacja, okno N dni):
+
+  gcloud logging read \\
+    'protoPayload.metadata."@type"="type.googleapis.com/google.cloud.audit.VpcServiceControlAuditMetadata"
+     AND protoPayload.metadata.dryRun="true"' \\
+    --organization=<ORG_ID> --freshness=14d --format=json > raw.json
+
+Użycie:
+    python3 tools/violations_report.py --logs raw.json --declarations declarations.json \\
+        --json-out violations.json --markdown-out report.md
+"""
+import argparse
+import collections
+import json
+import pathlib
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--logs", required=True, help="JSON z gcloud logging read")
+    ap.add_argument("--declarations", required=True, help="wyjście collect_declarations.py")
+    ap.add_argument("--json-out", default="violations.json")
+    ap.add_argument("--markdown-out", default="violations.md")
+    args = ap.parse_args()
+
+    logs = json.loads(pathlib.Path(args.logs).read_text())
+    decl = json.loads(pathlib.Path(args.declarations).read_text())
+
+    # Numer projektu → nazwa pliku członka. Log niesie numery, repo operuje nazwami plików.
+    by_number = {str(m["project_number"]): name for name, m in decl["members"].items()}
+
+    counts = collections.Counter()
+    detail = collections.defaultdict(collections.Counter)
+    unmapped = collections.Counter()
+
+    for entry in logs:
+        meta = entry.get("protoPayload", {}).get("metadata", {})
+        principal = entry.get("protoPayload", {}).get("authenticationInfo", {}).get("principalEmail", "?")
+        method = entry.get("protoPayload", {}).get("methodName", "?")
+        reason = ""
+        for viol in meta.get("violationReason", []) if isinstance(meta.get("violationReason"), list) else [meta.get("violationReason")]:
+            reason = viol or ""
+
+        # Numer projektu, którego dotyczy naruszenie — bywa w kilku miejscach zależnie od usługi.
+        number = str(meta.get("resourceNames", [""])[0]).split("/")[-1] if meta.get("resourceNames") else ""
+        number = number or str(entry.get("resource", {}).get("labels", {}).get("project_id", ""))
+
+        member = by_number.get(number)
+        if member is None:
+            unmapped[f"{principal} → {method}"] += 1
+            continue
+        counts[member] += 1
+        detail[member][f"{principal} → {method} ({reason})"] += 1
+
+    # KLUCZOWE: wypisujemy 0 dla KAŻDEGO członka, nie tylko dla tych z naruszeniami. Inaczej „brak wpisu"
+    # byłoby nieodróżnialne od „raport nie objął tego członka", a na tej różnicy stoi bramka promocji.
+    result = {name: counts.get(name, 0) for name in decl["members"]}
+    pathlib.Path(args.json_out).write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
+
+    lines = ["# Naruszenia dry-run — okno obserwacji", ""]
+    for name in sorted(result):
+        member = decl["members"][name]
+        status = "czysto" if result[name] == 0 else f"**{result[name]} naruszeń**"
+        lines.append(f"## {name} ({member['project_id']}, stage: {member['stage']}) — {status}")
+        lines.append(f"właściciel: {member['owner_group']}")
+        if result[name]:
+            lines.append("")
+            lines.append("Te wywołania PRZESTANĄ działać po promocji do enforced:")
+            for what, n in detail[name].most_common(10):
+                lines.append(f"- `{what}` × {n}")
+            lines.append("")
+            lines.append("Napraw przepływ albo poproś o profil, który go pokrywa (nie o surową regułę).")
+        lines.append("")
+
+    if unmapped:
+        lines.append("## Naruszenia spoza listy członków")
+        lines.append("Dotyczą projektów, których nie ma w perimeter/members/ — zwykle znaczy to, że ktoś")
+        lines.append("woła chroniony zasób z projektu, o którego dołączenie nikt nie wystąpił.")
+        for what, n in unmapped.most_common(10):
+            lines.append(f"- `{what}` × {n}")
+
+    pathlib.Path(args.markdown_out).write_text("\n".join(lines) + "\n")
+    print(f"zapisano {args.json_out} i {args.markdown_out}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

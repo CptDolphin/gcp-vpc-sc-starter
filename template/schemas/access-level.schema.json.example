@@ -1,0 +1,132 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/vpc-sc/access-level.schema.json",
+  "title": "Access levels",
+  "description": "Warunki KONTEKSTU dla wywołań spoza perimetru. Poziom ma albo warunki `basic`, albo `custom_expression` (CEL) — nigdy oba.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "access_levels"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "access_levels": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "title"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-zA-Z][a-zA-Z0-9_]{0,49}$",
+            "description": "short_name obiektu ACM: musi zaczynać się literą i zawierać wyłącznie znaki alfanumeryczne oraz `_`. Myślnik odrzuca API — i to dopiero na apply."
+          },
+          "title": {
+            "type": "string",
+            "minLength": 3
+          },
+          "combining_function": {
+            "enum": [
+              "AND",
+              "OR"
+            ],
+            "description": "Domyślnie AND. OR zamienia listę warunków w alternatywę — słabsza polityka, łatwa do przeoczenia w review."
+          },
+          "ip_subnetworks": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "members": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^(user|group|serviceAccount):"
+            }
+          },
+          "regions": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Z]{2}$"
+            }
+          },
+          "negate": {
+            "type": "boolean",
+            "description": "Odwraca sens CAŁEGO warunku. Poziom `block-x` z negate przepuszcza wszystko POZA x — inna polityka niż `blokuj x`."
+          },
+          "required_access_levels": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[a-zA-Z][a-zA-Z0-9_]{0,49}$"
+            },
+            "description": "Kompozycja z innych poziomów (nazwy, nie pełne ścieżki — renderer je rozwija)."
+          },
+          "custom_expression": {
+            "type": "string",
+            "minLength": 10,
+            "description": "Wyrażenie CEL. Wyklucza się z warunkami basic; trudniejsze do audytu, więc tylko gdy basic nie wystarcza."
+          },
+          "device_policy": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "require_screen_lock": {
+                "type": "boolean"
+              },
+              "require_corp_owned": {
+                "type": "boolean"
+              },
+              "require_admin_approval": {
+                "type": "boolean"
+              },
+              "allowed_encryption_statuses": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "allowed_device_management_levels": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "os_constraints": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "os_type"
+                  ],
+                  "properties": {
+                    "os_type": {
+                      "type": "string"
+                    },
+                    "minimum_version": {
+                      "type": "string"
+                    },
+                    "require_verified_chrome_os": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

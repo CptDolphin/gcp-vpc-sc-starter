@@ -1,0 +1,253 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/vpc-sc/policy.schema.json",
+  "title": "Perimeter baseline",
+  "description": "Baseline perimetru — własność centralna. Schema pilnuje kształtu; to, że aiplatform nie może z tej listy wypaść, pilnuje osobno reguła OPA baseline_locked (schema nie widzi, co było wcześniej).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "organization",
+    "perimeter",
+    "restricted_services",
+    "vpc_accessible_services",
+    "onboarding",
+    "attribute_budget"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "organization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "org_id",
+        "access_policy_name"
+      ],
+      "properties": {
+        "org_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "access_policy_name": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "perimeter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "title"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-zA-Z][a-zA-Z0-9_]{0,49}$",
+          "description": "short_name perimetru: litera na początku, dalej wyłącznie alfanumeryczne i `_` (myślnik odrzuca API). Niezmienny po utworzeniu."
+        },
+        "title": {
+          "type": "string",
+          "minLength": 3
+        },
+        "manage_skeleton": {
+          "type": "boolean",
+          "description": "false = brownfield (Terraform dokłada tylko członków i reguły do istniejącego perimetru); true = zarządzamy szkieletem (przy istniejącym perimetrze wymaga importu)."
+        }
+      }
+    },
+    "restricted_services": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9.-]+\\.googleapis\\.com$"
+      },
+      "contains": {
+        "const": "aiplatform.googleapis.com"
+      },
+      "description": "Vertex AI chroniony od dnia zero — `contains` czyni z tego warunek składniowy, nie ustalenie ustne."
+    },
+    "vpc_accessible_services": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enable_restriction",
+        "same_as_restricted"
+      ],
+      "properties": {
+        "enable_restriction": {
+          "type": "boolean"
+        },
+        "same_as_restricted": {
+          "type": "boolean"
+        }
+      }
+    },
+    "onboarding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dry_run_min_days",
+        "clean_window_days"
+      ],
+      "properties": {
+        "dry_run_min_days": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "clean_window_days": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "attribute_budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "limit_per_config",
+        "warn_at_percent"
+      ],
+      "properties": {
+        "limit_per_config": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 6000
+        },
+        "warn_at_percent": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        }
+      }
+    },
+    "contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bucket",
+        "path"
+      ],
+      "description": "Publikacja wąskiego JSON-a dla repozytoriów zespołów. Bucket MUSI być inny niż bucket stanu.",
+      "properties": {
+        "bucket": {
+          "type": "string",
+          "minLength": 3
+        },
+        "path": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9/_.-]*\\.json$"
+        },
+        "publish_members": {
+          "type": "boolean"
+        },
+        "state_bucket": {
+          "type": "string",
+          "description": "Nazwa bucketa stanu — tylko do guardu w contract.tf (backendu nie da się odczytać z HCL). Musi być identyczna z bucket w terraform/versions.tf."
+        }
+      }
+    },
+    "baseline_ingress": {
+      "type": "array",
+      "description": "Reguły ingress stosowane do KAŻDEGO członka (skanery, monitoring, backup). Każda konsumuje budżet atrybutów × liczba członków, więc trzymaj je wąsko.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "title",
+          "identities",
+          "operations"
+        ],
+        "properties": {
+          "title": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{2,60}$"
+          },
+          "identities": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string"
+            }
+          },
+          "access_levels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "allow_without_access_level": {
+            "type": "boolean",
+            "description": "Świadome dopuszczenie reguły bez access levelu — TYLKO dla operacji read-only tożsamości, którą sami kontrolujemy. Wymaga approvalu Security (CODEOWNERS na policy.yaml)."
+          },
+          "operations": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "service",
+                "methods"
+              ],
+              "properties": {
+                "service": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9.-]+\\.googleapis\\.com$"
+                },
+                "methods": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "type": "string",
+                    "not": {
+                      "const": "*"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "monitoring": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "project_id",
+        "apply_service_account"
+      ],
+      "description": "Metryki log-based i alerty. Pominięcie sekcji = brak monitoringu perimetru (świadoma ślepota, nie awaria).",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "minLength": 4
+        },
+        "notification_channels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "apply_service_account": {
+          "type": "string",
+          "format": "email"
+        }
+      }
+    },
+    "services_without_method_selectors": {
+      "type": "array",
+      "description": "Uslugi, dla ktorych ACM nie publikuje listy metod (supportedMethods puste) — tylko dla nich profil moze uzyc methods: [\"*\"]. Lista jest konfrontowana z zywym API przez tools/check_supported_services.py w plan.yml.",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9-]+\\.googleapis\\.com$"
+      },
+      "uniqueItems": true
+    }
+  }
+}
