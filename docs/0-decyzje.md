@@ -222,20 +222,43 @@ fikcyjne, przestaje być czytane — a to ono odpowiada na pytanie „na jakiej 
 
 ## DEC-8 — Kontrakt zamiast dostępu do repozytorium
 
-**Decyzja.** Repozytorium perimetru publikuje **kontrakt**: wąski JSON (~4 KB) w dedykowanym buckecie, generowany
-przy każdym apply. Zawiera nazwę perimetru, `restricted_services`, parametry okna onboardingu, **nazwy** access
+**Decyzja.** Repozytorium perimetru publikuje **kontrakt**: wąski JSON (~4 KB) generowany przy każdym apply
+i wystawiany w **dwóch miejscach naraz** — jako obiekt w dedykowanym buckecie (konsumenci maszynowi spoza
+GitHuba) i jako **asset release'u `contract`** w repozytorium perimetru (repozytoria dywizji). Zawiera nazwę
+perimetru, `restricted_services`, parametry okna onboardingu, **nazwy** access
 levels, katalog profili (nazwa, ryzyko, opis, nazwy parametrów), mapowanie repo→projekty i listę członków
 ograniczoną do trójki `zespół/projekt/etap`. **Nie zawiera** ani jednej tożsamości, ani jednego zakresu IP, ani
 jednej reguły. Bramki jadą osobno, jako artefakt release'u (`schemas/` + `policy/` + skrypt walidujący) — to reguły,
 nie dane.
+
+**Dlaczego DWA miejsca, a nie sam bucket.** Sam bucket kosztował dywizję tożsamość w GCP: federację WIF, konto
+serwisowe i grant `roles/storage.objectViewer` na prefiksie — po to, żeby przeczytać 4 KB JSON-a. Przy trzydziestu
+dywizjach to trzydzieści grantów, a zdanie „zespół nie dostaje żadnych uprawnień w GCP" przestawało być faktem
+dokładnie w tym miejscu. Asset release'u pobiera się tym samym tokenem GitHuba, którym dywizja i tak pobiera
+paczkę bramek (`contents: read`) — druga droga **nie dokłada ani jednego uprawnienia po żadnej ze stron**.
+Bucket zostaje, bo konsument spoza GitHuba (job w GCP, skrypt operacyjny) nie ma jak sięgnąć po release.
+
+**Niezbywalne: obie publikacje wychodzą z JEDNEGO kroku apply.** Bajty assetu to output `contract_json`, czyli
+atrybut zasobu `google_storage_bucket_object.contract` zapisanego przez ten sam apply — nie drugie wyliczenie
+`jsonencode(...)`. Dwa rendery mogłyby się rozjechać; jeden render nie ma z czym. Krok dodatkowo porównuje md5
+pliku wgrywanego do release'u z sumą, którą **GCS policzył** z obiektu w buckecie — czyli patrzy na drugą stronę
+publikacji, nie sam na siebie. Odrzucone: publikacja w `publish-gates.yml` (inny wyzwalacz = gwarantowany
+rozjazd) i osobny job `needs: apply` (zielony apply z czerwoną publikacją zostawia rozjazd na stałe).
+
+**Kontrakt jest jedyną rzeczą w tym łańcuchu, której NIE WOLNO przypinać.** Bramki są regułami — pin daje
+powtarzalną walidację. Kontrakt jest stanem świata: przypięty pokazuje profile i access levels, których już nie
+ma, czyli daje u dywizji zielono na wejściu, które repo perimetru odrzuci. Stąd ruchomy tag `contract` po jednej
+stronie i `Cache-Control: no-store` po drugiej.
 
 **Cztery własności, których nie wolno stracić.**
 1. **Pola wypisane jawnie, pole po polu.** Nigdy `jsonencode(<coś zbiorczego>)` — jedna taka linia zamienia kontrakt
    w drugą kopię stanu. Egzekwowane testem w selfteście.
 2. **Kontrakt trafia do INNEGO bucketa niż stan.** Wspólny bucket oznacza, że jeden błąd w warunku IAM odsłania
    state, a state to pełna mapa granicy. Egzekwowane `precondition` w `contract.tf`.
-3. **Dwa rozłączne ACL:** writer = konto apply na prefiksie kontraktu; reader = grupy zespołów, read-only.
-   Konsument nie może podmienić danych, którym ufa kolejny konsument.
+3. **Dwa rozłączne ACL:** writer = konto apply na prefiksie kontraktu; reader = konsumenci maszynowi spoza
+   GitHuba, read-only. Konsument nie może podmienić danych, którym ufa kolejny konsument. Po stronie GitHuba
+   tę samą rozłączność daje sam model uprawnień: `contents: read` u dywizji, `contents: write` wyłącznie
+   w jobie apply.
 4. **Kontrakt jest informacją, nie źródłem decyzji.** Reguła sprawdzająca, czy repozytorium może wnioskować o dany
    projekt, czyta plik **z repo**, nie z kontraktu. Gdyby decyzja zależała od kontraktu, wystarczyłoby go podmienić.
 
@@ -255,3 +278,9 @@ snapshotu stanu. Rekomendacja z dokumentacji brzmi — publikuj dane do konsumpc
   maszynowo czytelnych, nie tabelki.
 - *Publikowanie kontraktu do Secret Managera.* Kontrakt nie jest sekretem; jest publiczną-wewnętrznie listą
   interfejsów, a Secret Manager dokłada rotację i limity, których nie potrzebuje.
+- *Tylko asset release'u, bez bucketa.* Kusi jako uproszczenie („skoro dywizje i tak czytają z GitHuba"), ale
+  odcina konsumenta, który GitHuba nie ma: job w GCP, skrypt operacyjny, hurtownia. Kopia w buckecie nic nie
+  kosztuje, dopóki obie powstają z jednego kroku.
+- *Osobny workflow publikujący asset po apply.* Wygląda na czystszy podział odpowiedzialności, a jest dokładnie
+  tym trybem awarii, którego unikamy: drugi wyzwalacz, drugi odczyt stanu i cicha rozbieżność dwóch kopii,
+  której konsument nie ma jak zauważyć.

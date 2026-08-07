@@ -9,8 +9,16 @@
 # jednego swojego pliku potrzebuje tylko REGUŁ (schemas + policy, z paczki) i LISTY DOSTĘPNYCH OPCJI
 # (profile, access levels — z kontraktu). Ani jedno, ani drugie nie mówi mu, kto jest w perimetrze.
 #
+# SKĄD WZIĄĆ OBA WEJŚCIA — jednym narzędziem i jednym tokenem, bez `gcloud` i bez konta w Google Cloud:
+#
+#   gh release download --repo ORG/gcp-vpc-sc --pattern gates.tar.gz --clobber && tar -xzf gates.tar.gz
+#   gh release download contract --repo ORG/gcp-vpc-sc --pattern contract.json --clobber
 #   ./validate-local.sh --member vpc-sc/prj-example-vertex-prod.yaml \
 #       --gates ./gates --contract ./contract.json
+#
+# Kontrakt jest publikowany RÓWNIEŻ do bucketa (dla konsumentów maszynowych spoza GitHuba), z tego samego
+# kroku apply co asset — więc obie kopie są tożsame i wybór drogi jest kwestią wygody, nie aktualności.
+# Dla repozytorium dywizji droga przez release jest jedyną, która nie wymaga tożsamości w GCP.
 set -euo pipefail
 
 MEMBER="" GATES="./gates" CONTRACT="./contract.json"
@@ -26,7 +34,7 @@ done
 [ -n "$MEMBER" ] || { echo "użycie: $0 --member <plik.yaml> [--gates <kat>] [--contract <plik>]" >&2; exit 2; }
 [ -f "$MEMBER" ] || { echo "nie ma pliku: $MEMBER" >&2; exit 1; }
 [ -d "$GATES/schemas" ] || { echo "brak $GATES/schemas — pobierz paczkę bramek (release gates-*)" >&2; exit 1; }
-[ -f "$CONTRACT" ] || { echo "brak kontraktu: $CONTRACT — pobierz z bucketa kontraktów" >&2; exit 1; }
+[ -f "$CONTRACT" ] || { echo "brak kontraktu: $CONTRACT — pobierz: gh release download contract --repo <ORG>/<REPO> --pattern contract.json" >&2; exit 1; }
 
 fail=0
 note() { printf '  %-6s %s\n' "$1" "$2"; }

@@ -115,7 +115,7 @@ variable "contract_prefix" {
 }
 
 variable "contract_reader_groups" {
-  description = "Grupy Google dywizji, które mogą CZYTAĆ kontrakt (read-only). Pusta lista = nikt zewnętrzny go nie widzi."
+  description = "Grupy Google konsumentów SPOZA GitHuba (joby w GCP, skrypty operacyjne), które mogą CZYTAĆ kontrakt z bucketa — read-only. Repozytoria dywizji tu NIE należą: pobierają kontrakt jako asset release'u, tokenem GitHuba. Pusta lista = poprawne, domyślne ustawienie."
   type        = list(string)
   default     = []
 

@@ -278,8 +278,11 @@ def test_contract() -> None:
     # Action zespołu nie może już wymagać submodule'a.
     action = (ROOT / "contrib/action.yml").read_text()
     check("contrib/action: brak zaleznosci od submodule", "submodules: true" not in action)
-    check("contrib/action: pobiera kontrakt i paczke bramek",
-          "gcloud storage cat" in action and "gh release download" in action)
+    # Kontrakt i bramki jada TA SAMA droga: release repozytorium perimetru. `gcloud` w tym pliku oznaczalby
+    # powrot do wymagania tozsamosci w GCP po stronie dywizji — czyli do stanu, ktory ta konstrukcja usuwa.
+    check("contrib/action: pobiera kontrakt i paczke bramek z release'ow (bez gcloud)",
+          "gh release download contract" in action and "gates.tar.gz" in action and "gcloud" not in action,
+          f"kontrakt={'gh release download contract' in action} gcloud={'gcloud' in action}")
 
     # Do czego kontrakt SLUZY po stronie zespolu: rozstrzyga „czy moge o to wnioskowac" i „czy to juz jest
     # w perimetrze" BEZ dostepu do repo perimetru. Uruchamiamy realny blok walidacji z validate-local.sh
@@ -317,6 +320,77 @@ def test_contract() -> None:
     p = sh([sys.executable, "sprawdz_kontrakt.py", "zgloszenie.yaml", "kontrakt.json"], cwd=ROOT, env=srodowisko)
     check("kontrakt PRZEPUSZCZA projekt, ktorego jeszcze nie ma (test anty-tautologiczny)",
           p.returncode == 0, p.stdout + p.stderr)
+
+
+# ------------------------------------------------------- kontrakt: dwa miejsca, jeden krok apply
+def test_kontrakt_dwie_publikacje() -> None:
+    """Kontrakt jedzie do bucketa I do release'u — ale MUSI wychodzić z jednego kroku apply.
+
+    DLACZEGO to jest test, a nie komentarz: dwie publikacje w dwóch krokach to najłatwiejszy refaktor
+    świata („wydzielmy publikację do osobnego joba, będzie czytelniej") i najcichszy tryb awarii, jaki
+    ta konstrukcja ma. Dwa kroki = dwa wyzwalacze i dwa odczyty stanu, więc prędzej czy później opublikują
+    różną treść, a konsument nie ma jak zauważyć, że czyta starszą kopię. Test parsuje workflow jako YAML
+    i patrzy na STRUKTURĘ kroków — grep po tekście przeszedłby także wtedy, gdyby obie komendy stały
+    w dwóch różnych stepach obok siebie.
+    """
+    print("\n== kontrakt: dwa miejsca, jeden krok ==")
+
+    body = (ROOT / "terraform/contract.tf").read_text()
+    # Liczymy na KODZIE, nie na całym pliku: komentarz WHY nad outputem tłumaczy, dlaczego drugiego
+    # `jsonencode(...)` tu nie ma — i sam zawiera tę nazwę. Guard liczący wystąpienia w tekście wywracałby
+    # się o własną dokumentację (ta sama lekcja co `strip_heredocs` wyżej: uczy usuwania komentarzy).
+    kod = "\n".join(l for l in body.splitlines() if not l.lstrip().startswith("#"))
+    # Output czyta ATRYBUT ZASOBU. Drugie `jsonencode(local.contract_document)` byłoby drugim renderem
+    # tych samych danych — a dwa rendery da się rozjechać. Jeden nie ma z czym.
+    check("output kontraktu czyta atrybut zasobu, nie renderuje po raz drugi",
+          "one(google_storage_bucket_object.contract[*].content)" in kod
+          and kod.count("jsonencode(local.contract_document)") == 1,
+          f"jsonencode w kodzie x{kod.count('jsonencode(local.contract_document)')}")
+    # `one()`, nie `[0]`: przy wyłączonej sekcji `contract` zasobu nie ma i `[0]` wywracałby apply,
+    # czyli sekcja opisana jako opcjonalna znowu byłaby obowiązkowa.
+    check("output kontraktu znosi wylaczona sekcje `contract` (one(), nie [0])",
+          "google_storage_bucket_object.contract[0]" not in body)
+    # Suma kontrolna do porównania pochodzi z GCS (atrybut computed), nie z naszej zmiennej — inaczej
+    # weryfikacja byłaby tautologią i zgadzałaby się nawet wtedy, gdyby do bucketa nie poszło nic.
+    check("kontrakt eksportuje md5 policzone przez GCS (nie wlasne md5 z locals)",
+          "one(google_storage_bucket_object.contract[*].md5hash)" in body and "md5(local." not in body)
+
+    apply_yml = yaml.safe_load((ROOT / ".github/workflows/apply.yml").read_text())
+    steps = apply_yml["jobs"]["apply"]["steps"]
+    kroki_apply = [s for s in steps if "terraform -chdir=terraform apply" in s.get("run", "")]
+    kroki_release = [s for s in steps if "gh release upload" in s.get("run", "")]
+
+    check("apply.yml: dokladnie jeden krok applikuje i dokladnie jeden publikuje asset",
+          len(kroki_apply) == 1 and len(kroki_release) == 1,
+          f"apply={len(kroki_apply)} release={len(kroki_release)}")
+    # SEDNO: to musi być TEN SAM obiekt kroku. Dwa sąsiednie stepy przeszłyby każdy grep po treści pliku.
+    check("apply.yml: obie publikacje kontraktu wychodza z TEGO SAMEGO kroku",
+          bool(kroki_apply) and kroki_apply == kroki_release,
+          f"nazwy: apply={[s.get('name') for s in kroki_apply]} release={[s.get('name') for s in kroki_release]}")
+
+    krok = kroki_apply[0]["run"] if kroki_apply else ""
+    # Bajty assetu pochodzą z outputu TEGO apply, nie z pliku zrenderowanego obok (trzecia kopia).
+    check("apply.yml: tresc assetu bierze sie z outputu tego apply",
+          "terraform -chdir=terraform output -json contract_json" in krok)
+    check("apply.yml: md5 assetu porownane z suma obiektu w buckecie",
+          "contract_md5" in krok and "hashlib.md5" in krok)
+    check("apply.yml: token workflowa moze tworzyc release (contents: write)",
+          "contents: write" in (ROOT / ".github/workflows/apply.yml").read_text())
+
+    # Anty-tautologia do „TEN SAM krok": test musi UMIEĆ ZOBACZYĆ rozdzielenie. Rozbijamy krok na dwa
+    # i sprawdzamy, że asercja wtedy PADA — inaczej porównanie `kroki_apply == kroki_release` mogłoby
+    # przechodzić z powodu, którego nie kontrolujemy (np. obie listy puste).
+    rozbity = json.loads(json.dumps(apply_yml))  # głęboka kopia bez zależności
+    kroki = rozbity["jobs"]["apply"]["steps"]
+    i = next(n for n, s in enumerate(kroki) if "terraform -chdir=terraform apply" in s.get("run", ""))
+    tresc = kroki[i]["run"]
+    ciecie = tresc.index("gh release view")
+    kroki[i] = {"name": "apply", "run": tresc[:ciecie]}
+    kroki.insert(i + 1, {"name": "publikacja osobno", "run": tresc[ciecie:]})
+    a = [s for s in kroki if "terraform -chdir=terraform apply" in s.get("run", "")]
+    r = [s for s in kroki if "gh release upload" in s.get("run", "")]
+    check("test LAPIE rozdzielenie apply i publikacji na dwa kroki (anty-tautologia)",
+          a != r and len(a) == 1 and len(r) == 1, f"a={len(a)} r={len(r)}")
 
 
 # --------------------------------------------------------------------- monitoring
@@ -868,6 +942,7 @@ def main() -> int:
     test_terraform()
     test_iam_bootstrap()
     test_contract()
+    test_kontrakt_dwie_publikacje()
     test_monitoring()
     test_brownfield()
     test_external_egress_and_guard()

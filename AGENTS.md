@@ -35,6 +35,7 @@ a nie HCL.
 | Zakaz `ANY_IDENTITY` / `method: "*"` / `resources: ["*"]` | `perimeter.rego` na plan-JSON | reguła przestaje cokolwiek ograniczać, a wygląda tak samo (DEC-3) |
 | Kontrakt buduje się polami, nigdy `jsonencode(<zbiorcze>)` | `contract.tf` + test w selfteście | kontrakt zamienia się w drugą kopię stanu (DEC-8) |
 | Kontrakt i stan w **różnych** bucketach | `precondition` w `contract.tf` | jeden błąd w IAM odsłania pełną mapę granicy (DEC-8) |
+| Obie publikacje kontraktu (bucket + asset release'u) wychodzą z **jednego kroku apply** | `test_kontrakt_dwie_publikacje` w selfteście (parsuje kroki `apply.yml`) | dwa kroki = dwa wyzwalacze i dwa odczyty stanu, więc dwie kopie cicho się rozjadą, a konsument nie ma jak zauważyć, że czyta starszą (DEC-8) |
 | Zakaz komendy commitującej całą konfigurację dry-run | guard w `validate.yml` | promocja WSZYSTKICH członków jednym wywołaniem, bez czego cofnąć (`docs/3` §A) |
 | Akcje przypięte 40-znakowym SHA | guard w `validate.yml` + Dependabot | kto kontroluje tag, kontroluje pipeline mający prawo zmieniać granicę organizacji |
 
@@ -86,7 +87,7 @@ python3 selftest/selftest.py          # rozpakowuje starter do katalogu tymczaso
 ```
 
 Wymaga na PATH: `terraform` (1.15.5), `conftest`, `tflint`, `python3` z `pyyaml`; opcjonalnie `actionlint`
-i `check-jsonschema` (ich brak daje SKIP z nazwą, nigdy ciche zielone). Oczekiwany wynik: **129/129**.
+i `check-jsonschema` (ich brak daje SKIP z nazwą, nigdy ciche zielone). Oczekiwany wynik: **138/138**.
 
 Sam skan samodzielności (bez terraforma i conftesta, sam Python) da się uruchomić na dowolnej ścieżce —
 przydaje się tam, gdzie materiał jest publikowany razem z innymi katalogami:

@@ -19,7 +19,7 @@ Osiem decyzji, na których to stoi — wraz z odrzuconymi wariantami — jest w
 ./install.sh /sciezka/do/nowego/repo          # rozpakuj wszystko
 ./install.sh /sciezka --dry-run               # tylko pokaż mapowanie nazw
 ./install.sh /sciezka --only validate.yml     # jeden plik — wdrożenie etapami
-python3 selftest/selftest.py                  # dowód, że to działa (129 testów)
+python3 selftest/selftest.py                  # dowód, że to działa (138 testów)
 ```
 
 Po rozpakowaniu podmień placeholdery (`<ORG_ID>`, `<ACCESS_POLICY_NUMBER>`, `<STATE_BUCKET>`,
@@ -41,7 +41,7 @@ i przeczytaj [`docs/1-wdrozenie.md`](docs/1-wdrozenie.md) — kolejność krokó
 | `tools/` | budżet atrybutów · pre-flight · weryfikacja ticketu · raport naruszeń · render członka · **zgodność baseline z żywą listą usług VPC-SC** | każdy zamyka konkretny tryb awarii (opisany w nagłówku pliku) |
 | `.github/workflows/` (10) | intake · external-intake · validate · plan · apply · drift · violations-report · expiry-sweep · break-glass · **publish-gates** | apply jest jedynym mutatorem: WIF keyless, environment z reviewerami, single-flight |
 | `contrib/` + `perimeter/contributors.yaml` | trzeci kanał wejścia: repo zespołu waliduje u siebie i prosi o PR | zespół dostaje prawo „otwórz PR", a nie `servicePerimeters.update` na organizacji (DEC-7) |
-| `terraform/contract.tf` + `publish-gates.yml` | publikuje wąski JSON (~4 KB) i paczkę bramek dla repozytoriów zespołów | submodule oddawał `members/` wszystkich dywizji i zakresy IP, żeby zwalidować jeden plik; provider nie ma `data` source dla perimetra (DEC-8) |
+| `terraform/contract.tf` + `publish-gates.yml` | publikuje wąski JSON (~4 KB) **w dwóch miejscach z jednego kroku apply** (bucket + asset release'u) i paczkę bramek | submodule oddawał `members/` wszystkich dywizji i zakresy IP, żeby zwalidować jeden plik; sam bucket kosztował dywizję tożsamość w GCP i grant IAM po to, by przeczytać 4 KB (DEC-8) |
 | `.tflint.hcl` + job `tflint` | statyczna analiza HCL: martwe zmienne, brak pinów providerów, literówki w atrybutach Google | `validate` przechodzi na konfiguracji z martwym knobem i niepinowanym providerem — jedno i drugie boli na obiekcie org-plane |
 | `tests/` + `docs/5-servicenow-intake.md` | fixture'y kanału ServiceNow (3 z 5 negatywne) + specyfikacja formularza i mapowania pól | kanał wejścia musi dać się przetestować **bez** działającej instancji ServiceNow — inaczej pierwszy test odbywa się na produkcji |
 | `.github/dependabot.yml` | aktualizacje pinów SHA akcji i lock providera | pin SHA bez mechanizmu aktualizacji to stara wersja z odznaką bezpieczeństwa |
@@ -89,7 +89,7 @@ sprzątanie. Uruchom, zanim ktoś podejmie decyzję na podstawie opinii — kosz
 ## Dowód, że działa
 
 `python3 selftest/selftest.py` rozpakowuje starter do katalogu tymczasowego i uruchamia na nim realne bramki —
-**129/129** przy ostatnim przebiegu: `terraform fmt`/`validate`/**`test`** (14 przypadków renderera),
+**138/138** przy ostatnim przebiegu: `terraform fmt`/`validate`/**`test`** (14 przypadków renderera),
 `conftest verify` (45 testów reguł), **`tflint`** na obu stackach, narzędzia na realnych deklaracjach
 (w tym cztery fixture'y kanału ticketowego), `actionlint` na dziesięciu workflow, guardy na treść stacku IAM,
 kontraktu, nazwy obiektów ACM i pinowanie akcji.
