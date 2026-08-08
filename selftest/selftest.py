@@ -835,19 +835,29 @@ def test_lint_and_pinning() -> None:
 
     # `have()` nie wystarcza: `tflint` bywa shimem menedżera wersji, który istnieje na PATH i pada przy
     # uruchomieniu (brak przypiętej wersji). Wtedy FAIL mówiłby o konfiguracji tflinta, nie o kodzie startera.
+    # `have()` nie wystarcza: `tflint` bywa shimem menedżera wersji, który istnieje na PATH i pada przy
+    # uruchomieniu (brak przypiętej wersji). Wtedy FAIL mówiłby o konfiguracji tflinta, nie o kodzie startera.
     runnable = have("tflint") and sh(["tflint", "--version"]).returncode == 0
     if not runnable:
-        print("  SKIP  tflint nieuruchamialny lokalnie (CI instaluje go w validate.yml)")
+        print("  SKIP  tflint nieobecny albo nieuruchamialny — zainstaluj i przypnij wersje")
         return
+
+    # BEZ `--init` plugin `google` nie jest pobrany, `tflint` konczy sie bledem „plugin not found", a kod
+    # nizej drukowal na to SKIP i szedl dalej. Efekt: linter byl instalowany w CI, opisany w komentarzu
+    # workflow jako nosny — i NIGDY nie uruchamiany. Dwie asercje istnialy w kodzie i nie wykonaly sie ani
+    # razu. To jest dokladnie ta klasa bledu, ktora ten starter tropi gdzie indziej: bramka, ktora nie ma
+    # jak sie wykonac, nie jest bramka. `--init` jest wiec CZESCIA testu, z wlasna asercja.
+    init = sh(["tflint", "--init", f"--config={ROOT}/.tflint.hcl"], cwd=ROOT)
+    check("tflint --init pobiera plugin google (bez niego linter milczy zamiast sprawdzac)",
+          init.returncode == 0, (init.stdout + init.stderr)[-500:])
+    if init.returncode != 0:
+        return
+
     for stack in ["terraform", "iam-bootstrap"]:
         p = sh(["tflint", f"--chdir={stack}", f"--config={ROOT}/.tflint.hcl",
                 "--minimum-failure-severity=notice"], cwd=ROOT)
-        # Odróżniamy „linter znalazł problem w starterze" od „linter nie ma jak się uruchomić w tym
-        # środowisku" (shim menedżera wersji bez przypiętej wersji, brak pluginu). Drugie to nie wada kodu,
-        # a zgłoszone jako FAIL wysyłałoby czytelnika naprawiać terraform zamiast swojego PATH.
-        if "No version is set for shim" in p.stderr or "plugin" in p.stderr and "not found" in p.stderr:
-            print(f"  SKIP  tflint: {stack} — brak srodowiska (uruchom `tflint --init`, przypnij wersje)")
-            continue
+        # Po udanym `--init` „plugin not found" nie jest juz stanem srodowiska, tylko realna awaria bramki —
+        # dlatego NIE ma tu sciezki cichego pominiecia. Kazdy inny wynik to werdykt lintera o starterze.
         check(f"tflint czysty: {stack}", p.returncode == 0, (p.stdout + p.stderr)[-600:])
 
 

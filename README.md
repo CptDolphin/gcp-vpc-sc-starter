@@ -19,7 +19,7 @@ Osiem decyzji, na których to stoi — wraz z odrzuconymi wariantami — jest w
 ./install.sh /sciezka/do/nowego/repo          # rozpakuj wszystko
 ./install.sh /sciezka --dry-run               # tylko pokaż mapowanie nazw
 ./install.sh /sciezka --only validate.yml     # jeden plik — wdrożenie etapami
-python3 selftest/selftest.py                  # dowód, że to działa (178 testów)
+python3 selftest/selftest.py                  # dowód, że to działa (179 testów)
 ```
 
 Po rozpakowaniu podmień placeholdery (`<ORG_ID>`, `<ACCESS_POLICY_NUMBER>`, `<STATE_BUCKET>`,
@@ -100,7 +100,7 @@ sprzątanie. Uruchom, zanim ktoś podejmie decyzję na podstawie opinii — kosz
 ## Dowód, że działa
 
 `python3 selftest/selftest.py` rozpakowuje starter do katalogu tymczasowego i uruchamia na nim realne bramki —
-**150/150** przy ostatnim przebiegu: `terraform fmt`/`validate`/**`test`** (14 przypadków renderera),
+**179/179** przy ostatnim przebiegu: `terraform fmt`/`validate`/**`test`** (14 przypadków renderera),
 `conftest verify` (47 testów reguł), **`tflint`** na obu stackach, narzędzia na realnych deklaracjach
 (w tym cztery fixture'y kanału ticketowego), `actionlint` na dziesięciu workflow **i na workflow przykładu
 dywizji**, realny `validate-local.sh` uruchomiony na `examples/division-repo/vpc-sc/request.yaml`, guardy
