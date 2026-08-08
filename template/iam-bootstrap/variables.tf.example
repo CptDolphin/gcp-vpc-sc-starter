@@ -60,9 +60,24 @@ variable "state_prefix" {
   type        = string
   default     = "vpc-sc/perimeter"
 
+  # DWA TRYBY AWARII PREFIKSU — komentarz WSPÓLNY dla `state_prefix` i `contract_prefix`. Oba robią dokładnie
+  # jedno: wklejają się do tego samego wyrażenia IAM `resource.name.startsWith(".../objects/<prefiks>")`.
+  # Psują się w PRZECIWNE strony, więc jeden warunek musi łapać oba naraz:
+  #
+  #   1. Wiodący `/` → `objects//vpc-sc/...`, co nie pasuje do żadnego obiektu. Warunek przestaje cokolwiek
+  #      DOPUSZCZAĆ: apply jest zielony, a konsument dostaje 403 i nie wie dlaczego. Awaria GŁOŚNA — boli
+  #      od razu, ktoś ją w końcu zgłosi.
+  #   2. Pusty (lub sam whitespace) → wyrażenie degeneruje się do `.../objects/`, czyli pasuje do KAŻDEGO
+  #      obiektu w buckecie. Grant nie znika — po CICHU ROZSZERZA się na cały bucket. Nic nie pada, nikt nie
+  #      zgłasza, a zawężenie do prefiksu (jedyny powód, dla którego ten warunek w ogóle istnieje) przestaje
+  #      działać. To ten tryb jest groźniejszy, dokładnie dlatego, że nie boli.
+  #
+  # DLACZEGO KOPIA WARUNKU, A NIE JEDNA FUNKCJA: Terraform nie ma funkcji użytkownika — blok `function` to
+  # OpenTofu (sprawdzone na 1.15.5: „Blocks of type function are not expected here"), a `validation` nie
+  # sięga po `locals`. Wspólny jest więc ten komentarz, a zgodności obu bliźniaków pilnuje selftest
+  # (`test_iam_bootstrap`) — planem i odczytem gotowego warunku, nie porównaniem tekstu. Brak takiego
+  # spinacza jest tym, co pozwoliło `contract_prefix` przez cały czas nie mieć ŻADNEJ walidacji (#1912).
   validation {
-    # Wiodący `/` daje prefiks `//vpc-sc/...`, który nie pasuje do żadnego obiektu — warunek IAM przestaje
-    # cokolwiek dopuszczać, a backend dostaje 403 przy pierwszym zapisie stanu.
     condition     = !startswith(var.state_prefix, "/") && length(trimspace(var.state_prefix)) > 0
     error_message = "state_prefix nie może być pusty ani zaczynać się od /."
   }
@@ -112,6 +127,17 @@ variable "contract_prefix" {
   description = "Prefiks obiektów kontraktu. Warunek IAM zawęża oba ACL do tego prefiksu, nie do całego bucketa."
   type        = string
   default     = "vpc-sc/"
+
+  validation {
+    # Warunek identyczny jak przy `state_prefix` — oba tryby awarii opisane TAM, przy pierwszym z bliźniaków.
+    # RÓŻNICA JEST W CENIE trybu cichego (pusty prefiks). Bucket stanu należy do tego jednego stacku, a
+    # `contracts_bucket` z założenia dzielimy z konsumentami spoza niego. Pusty prefiks daje tu grupom
+    # z `contract_reader_groups` odczyt WSZYSTKIEGO w tym buckecie, a `sa-vpcsc-apply` (objectAdmin) — zapis
+    # wszędzie w nim, także na obiektach, których ten stack nie publikuje i o których nic nie wie. Kontrakt
+    # miał być jedyną rzeczą wystawioną na zewnątrz; bez tego warunku staje się nią cały bucket.
+    condition     = !startswith(var.contract_prefix, "/") && length(trimspace(var.contract_prefix)) > 0
+    error_message = "contract_prefix nie może być pusty ani zaczynać się od /."
+  }
 }
 
 variable "contract_reader_groups" {

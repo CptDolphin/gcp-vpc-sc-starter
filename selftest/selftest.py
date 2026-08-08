@@ -316,6 +316,66 @@ def test_iam_bootstrap() -> None:
         check(f"iam-bootstrap: contract_reader_groups ODRZUCA {zly}",
               plan_grup([zly]).returncode != 0, "principal spoza grup przeszedl walidacje")
 
+    # --- prefiksy obiektow: state_prefix i contract_prefix -------------------------------------------
+    # DLACZEGO OBA NARAZ, TYM SAMYM KODEM: to bliźniaki. Jedyne, co robią, to wklejenie się do tego samego
+    # wyrażenia IAM `resource.name.startsWith(".../objects/<prefiks>")`. Mimo to rozjechały się — `state_prefix`
+    # miał walidację od początku, `contract_prefix` nie miał ŻADNEJ (#1912). Terraform nie ma funkcji
+    # użytkownika (blok `function` to OpenTofu), więc warunku nie da się wyciągnąć do jednego miejsca w HCL
+    # i jedynym spinaczem obu jest TEN guard. Pętla po nazwach, nie dwa osobne testy: test dopisany wyłącznie
+    # dla jednej zmiennej odtworzyłby dokładnie tę asymetrię, która ten defekt wpuściła.
+    #
+    # DWA TRYBY AWARII, PRZECIWNE — i dlatego sprawdzamy oba:
+    #   * wiodący `/`  -> warunek nie pasuje do NICZEGO. Pada GŁOŚNO (403 u konsumenta), więc ktoś to zgłosi;
+    #   * pusty string -> warunek degeneruje się do `.../objects/`, czyli pasuje do KAŻDEGO obiektu w buckecie.
+    #     Grant nie znika — po CICHU ROZSZERZA się na cały bucket. Nic nie pada, więc nikt nie zgłasza.
+    #     Ten tryb jest groźniejszy i to on jest powodem, dla którego guard niżej mierzy TREŚĆ warunku,
+    #     a nie sam kod wyjścia: „plan przeszedł" nie odróżnia zawężenia od jego braku.
+    #
+    # `plan`, nie `console` — ta sama lekcja co przy contract_reader_groups: `terraform console` kończy się
+    # kodem 0 MIMO odrzuconej walidacji, więc test na jego kodzie wyjścia byłby bramką-atrapą.
+    dobre_prefiksy = {"state_prefix": "vpc-sc/perimeter", "contract_prefix": "vpc-sc/"}
+
+    def plan_prefiksy(wartosci, out=None):
+        cmd = ["terraform", f"-chdir={d}", "plan", "-no-color", "-input=false", "-lock=false"]
+        cmd += [f"-out={out}"] if out else []
+        return sh(cmd + baza + [f"-var={k}={v}" for k, v in wartosci.items()])
+
+    for zmienna, dobra in dobre_prefiksy.items():
+        p = plan_prefiksy({**dobre_prefiksy, zmienna: "/" + dobra})
+        check(f"iam-bootstrap: {zmienna} ODRZUCA wiodacy / (warunek IAM nie pasowalby do zadnego obiektu)",
+              p.returncode != 0, f"rc={p.returncode} — plan przeszedl mimo prefiksu '/{dobra}'")
+        p = plan_prefiksy({**dobre_prefiksy, zmienna: ""})
+        check(f"iam-bootstrap: {zmienna} ODRZUCA pusty string (grant rozszerzylby sie na CALY bucket)",
+              p.returncode != 0, f"rc={p.returncode} — plan przeszedl mimo pustego prefiksu")
+
+    # ANTY-TAUTOLOGIA + POMIAR EFEKTU jednym przebiegiem. Same odrzucenia nie dowodzą niczego: walidacja
+    # odrzucająca wszystko przeszłaby je w komplecie. Wartości poprawne muszą PRZEJŚĆ, a zrenderowany warunek
+    # — ten, który realnie wylądowałby w IAM — musi NIEŚĆ prefiks. Czytamy go z `terraform show -json`, bo
+    # guard tekstowy („czy w variables.tf stoi blok validation") przeszedłby także wtedy, gdyby warunek
+    # pilnował czegoś zupełnie innego niż zawężenie zasięgu.
+    p = plan_prefiksy(dobre_prefiksy, out="zz_prefiksy.tfplan")
+    check("iam-bootstrap: poprawne prefiksy PRZECHODZA plan (test anty-tautologiczny)",
+          p.returncode == 0, (p.stdout[-400:] + p.stderr[-700:]))
+    warunki = {}
+    if p.returncode == 0:
+        s = sh(["terraform", f"-chdir={d}", "show", "-json", "zz_prefiksy.tfplan"])
+        for r in json.loads(s.stdout)["planned_values"]["root_module"].get("resources", []):
+            if r["type"] == "google_storage_bucket_iam_member":
+                for c in r["values"].get("condition") or []:
+                    warunki.setdefault(r["name"], []).append(c["expression"])
+    (d / "zz_prefiksy.tfplan").unlink(missing_ok=True)
+
+    # `state_list` NIE jest tu wymieniony celowo: to grant `legacyBucketReader` na LISTOWANIE bucketa,
+    # który warunku mieć NIE MOŻE, bo zasobem tego wywołania jest bucket, a nie obiekt (WHY w main.tf).
+    for zasob, zmienna in (("state", "state_prefix"),
+                           ("contract_writer", "contract_prefix"),
+                           ("contract_reader_plan", "contract_prefix")):
+        koncowka = f'/objects/{dobre_prefiksy[zmienna]}")'
+        wyrazenia = warunki.get(zasob, [])
+        check(f"iam-bootstrap: warunek IAM `{zasob}` niesie prefiks z {zmienna} (nie konczy sie na /objects/)",
+              bool(wyrazenia) and all(w.endswith(koncowka) for w in wyrazenia),
+              f"expressions={wyrazenia!r}, oczekiwana koncowka={koncowka!r}")
+
 
 # --------------------------------------------------------------------- kontrakt
 def test_contract() -> None:
