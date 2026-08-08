@@ -167,10 +167,25 @@ członek dostaje warianty dry-run, a członek ze `stage: enforced` **dodatkowo**
 realny diff; usunięcie pliku to czysty destroy jednego zasobu; równoległe wnioski nie kolidują w tym samym bloku
 HCL. Miarą sukcesu tej decyzji jest to, że `plan` w PR pokazuje wyłącznie zasoby danego członka.
 
-**Dlaczego single-flight.** API modyfikuje politykę jako całość (read-modify-write), więc dwa równoległe apply
-ryzykują nadpisanie się nawzajem. Przy granicy bezpieczeństwa „zwykle działa" nie jest gwarancją. Rozstrzygający
-eksperyment jest w [`experiments/race-two-states/`](../experiments/race-two-states/README.md) — uruchom go, zanim
-ktoś podejmie tę decyzję na podstawie opinii.
+**Dlaczego single-flight — uzasadnienie SKORYGOWANE pomiarem (2026-08-07).** Pierwotnie stało tu, że dwa
+równoległe apply „nadpisują się nawzajem, a w logach widać dwa poprawne `update`". **To jest nieprawda —
+zdanie zostało obalone pomiarem i nie należy go powtarzać w rozmowie o architekturze.**
+
+Access Context Manager ma **optymistyczną kontrolę współbieżności na eTagach**. Przy nałożeniu w czasie
+przegrany apply pada GŁOŚNO — `Error 400: The eTag provided '…' does not match the eTag` — a reguła zwycięzcy
+zostaje. Przy przebiegu bez nałożenia oba kończą się `rc=0` i obie reguły są obecne. **Nic nie znika po cichu.**
+
+Single-flight zostaje słuszny, ale argumentem jest **niezawodność, nie cicha utrata danych**: bez niego
+~80-100% równoległych apply kończy się błędem, czyli platforma, w której co drugi merge losowo pada. Różnica
+jest praktyczna, a nie akademicka — **przy eTagu retry pomaga**, przy cichej utracie by nie pomógł. Gdyby
+utrata była cicha, samo `concurrency` też by nie wystarczyło: trzeba by weryfikować stan po każdym apply.
+
+Skąd korekta: eksperyment [`experiments/race-two-states/`](../experiments/race-two-states/README.md) był
+**zepsuty w sposób, który zawsze potwierdzał tezę** — używał fikcyjnych kont, które ACM odrzuca, więc oba
+applye padały, a werdykt nie odróżniał „apply padł" od „reguła zniknęła". Po podmianie na realne tożsamości:
+5/5 przebiegów = konflikt eTagu, zero cichych utrat. Eksperyment jest dziś sparametryzowany tożsamościami
+i rozróżnia trzy wyniki — uruchom go, zanim ktoś podejmie tę decyzję na podstawie czyjejkolwiek opinii,
+łącznie z tą zapisaną wyżej.
 
 **Dlaczego `ignore_changes` jest obowiązkowe.** Bez tego szkielet i zasoby per-członek biją się o te same listy:
 każdy apply usuwa to, co dodał poprzedni — flapping granicy bezpieczeństwa. Konsekwencja do zapamiętania: dopisanie

@@ -1089,6 +1089,82 @@ def test_tools() -> None:
           p.stderr[-300:] + json.dumps(viol))
 
 
+# --------------------------------------------------- eksperyment wyscigu (klasyfikacja wynikow)
+# Atrapy `terraform` i `gcloud` pozwalaja wysterowac KAZDA z czterech kategorii werdyktu bez chmury.
+# To nie jest test dla ozdoby: bledna klasyfikacja jednego przypadku ("apply padl" policzone jako "regula
+# zniknela") sprawila, ze eksperyment przez tydzien produkowal wniosek odwrotny do prawdy — i ten wniosek
+# poszedl do uzasadnienia decyzji architektonicznej (DEC-6, #1904).
+TERRAFORM_ATRAPA = """#!/usr/bin/env bash
+case "$*" in
+  *" apply "*)
+    case "$*" in
+      *state-a*) rc="${STUB_RC_A:-0}" ;;
+      *)         rc="${STUB_RC_B:-0}" ;;
+    esac
+    [ "$rc" != "0" ] && echo "${STUB_ERR:-blad}"
+    exit "$rc" ;;
+esac
+exit 0
+"""
+
+GCLOUD_PERIMETR_ATRAPA = """#!/usr/bin/env bash
+python3 -c "
+import json
+n = int('${STUB_RULES:-2}')
+print(json.dumps({'spec': {'ingressPolicies': [{'title': 'race-test-%d' % i} for i in range(n)]}}))
+"
+"""
+
+
+def test_eksperyment_wyscigu() -> None:
+    print("\n== eksperyment wyscigu ==")
+    exp = STARTER / "experiments/race-two-states"
+    bin_dir = ROOT / "stub-bin-exp"
+    bin_dir.mkdir(exist_ok=True)
+    for nazwa, tresc in (("terraform", TERRAFORM_ATRAPA), ("gcloud", GCLOUD_PERIMETR_ATRAPA)):
+        (bin_dir / nazwa).write_text(tresc)
+        (bin_dir / nazwa).chmod(0o755)
+
+    baza = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}",
+                TF_VAR_policy_id="123456789012", TF_VAR_perimeter_name="test_race",
+                IDENTITY_A="serviceAccount:sa-example-a@prj-example.iam.gserviceaccount.com",
+                IDENTITY_B="serviceAccount:sa-example-b@prj-example.iam.gserviceaccount.com")
+
+    def przebieg(**nadpisania):
+        return sh(["bash", str(exp / "run.sh"), "1"], cwd=str(exp), env=dict(baza, **nadpisania))
+
+    # 1. Oba apply OK, obie reguly — przebieg po prostu nie trafil w okno wyscigu.
+    p = przebieg(STUB_RC_A="0", STUB_RC_B="0", STUB_RULES="2")
+    check("wyscig: oba OK + 2 reguly = bez nalozenia (rc 0)",
+          p.returncode == 0 and "bez nałożenia w czasie" in p.stdout, p.stdout[-500:] + p.stderr[-300:])
+
+    # 2. JEDYNY przypadek potwierdzajacy teze o cichym nadpisaniu — i jedyny konczacy sie bledem.
+    p = przebieg(STUB_RC_A="0", STUB_RC_B="0", STUB_RULES="1")
+    check("wyscig: oba OK + 1 regula = CICHA UTRATA (rc != 0)",
+          p.returncode != 0 and "CICHA UTRATA" in p.stdout, p.stdout[-500:] + p.stderr[-300:])
+
+    # 3. Realne zachowanie ACM: przegrany pada na eTagu. Nic nie ginie, wiec NIE jest to utrata.
+    p = przebieg(STUB_RC_A="0", STUB_RC_B="1", STUB_RULES="1",
+                 STUB_ERR="Error 400: The eTag provided 'abc' does not match the eTag 'def'")
+    check("wyscig: blad eTag = konflikt GLOSNY, nie utrata (rc 0)",
+          p.returncode == 0 and "konflikt GŁOŚNY" in p.stdout and "CICHA UTRATA" not in p.stdout,
+          p.stdout[-500:] + p.stderr[-300:])
+
+    # 4. REGRESJA, ktora zepsula pierwotny eksperyment: apply padl z powodu NIEZWIAZANEGO ze wspolbieznoscia
+    #    (tam — nieistniejaca tozsamosc). Stara logika liczyla to jako utrate reguly i potwierdzala teze.
+    p = przebieg(STUB_RC_A="0", STUB_RC_B="1", STUB_RULES="1",
+                 STUB_ERR="Error 403: Permission 'accesscontextmanager.policies.update' denied")
+    check("wyscig: inny blad = NIEROZSTRZYGNIETE, nie utrata reguly",
+          "NIEROZSTRZYGNIĘTE" in p.stdout and "CICHA UTRATA" not in p.stdout,
+          p.stdout[-500:] + p.stderr[-300:])
+
+    # 5. Tozsamosci sa PARAMETREM i sa obowiazkowe — brak = twarde zatrzymanie przed dotknieciem czegokolwiek.
+    bez_tozsamosci = {k: v for k, v in baza.items() if k != "IDENTITY_A"}
+    p = sh(["bash", str(exp / "run.sh"), "1"], cwd=str(exp), env=bez_tozsamosci)
+    check("wyscig: brak IDENTITY_A zatrzymuje eksperyment",
+          p.returncode != 0 and "IDENTITY_A" in p.stderr + p.stdout, p.stdout[-300:] + p.stderr[-300:])
+
+
 # --------------------------------------------------------------------- pre-flight
 # Atrapa `gcloud`: udaje ZDROWY projekt (istnieje, numer sie zgadza, PGA i DNS w porzadku), zeby jedyna
 # zmienna w tescie byla odpowiedz o TOZSAMOSC. Lista kont istniejacych przychodzi zmienna srodowiskowa.
@@ -1278,6 +1354,7 @@ def main() -> int:
     test_rego()
     test_tools()
     test_preflight()
+    test_eksperyment_wyscigu()
     test_workflows()
     test_schemas()
 

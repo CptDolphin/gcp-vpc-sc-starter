@@ -9,9 +9,11 @@ jednego konta serwisowego, ani jednej federacji tożsamości. Deklarujesz u sieb
 a repo perimetru otwiera z tego PR i stosuje zmianę jednym, wspólnym apply.
 
 DLACZEGO tak, a nie „damy wam dostęp": Access Context Manager przepisuje całą politykę organizacji przy każdej
-zmianie. Dwa repozytoria aplikujące równolegle nadpisują sobie reguły — w logach widać dwa poprawne `update`,
-a reguła znika. Do tego każde takie repozytorium musiałoby dostać prawo zmiany granicy **całej firmy**, bo
-uprawnień ACM nie da się zawęzić do folderu.
+zmianie i pilnuje jej **eTagiem**. Dwa repozytoria aplikujące równolegle nie gubią reguł po cichu — przegrany
+apply pada głośno na `Error 400: The eTag provided … does not match` (zmierzone: ~80-100% nałożonych w czasie
+przebiegów). To nie jest pocieszające: znaczy, że przy dwóch mutatorach co drugi merge losowo się wywraca
+i wymaga ponowienia, a rosnąca liczba dywizji tylko podnosi częstość kolizji. Do tego każde takie repozytorium
+musiałoby dostać prawo zmiany granicy **całej firmy**, bo uprawnień ACM nie da się zawęzić do folderu.
 
 ## Krok 1 — jeden dostęp, i to na GitHubie
 

@@ -4,8 +4,10 @@
 # Two things make it safe, and both are load-bearing:
 #   * environment `perimeter-apply` with required reviewers — a merged PR still does not apply until a human
 #     approves the run. This gate lives in GitHub, independent of CODEOWNERS.
-#   * single-flight concurrency — Access Context Manager modifies the org-level policy as a whole
-#     (read-modify-write), so two parallel applies can silently overwrite each other.
+#   * single-flight concurrency — Access Context Manager modifies the org-level policy as a whole and guards
+#     it with an eTag, so two parallel applies do not corrupt anything silently: the loser fails with
+#     `Error 400: The eTag provided ... does not match`. The reason to serialize is RELIABILITY — without it
+#     roughly every overlapping run fails and has to be retried by hand (measured, see DEC-6).
 
 name: apply
 
