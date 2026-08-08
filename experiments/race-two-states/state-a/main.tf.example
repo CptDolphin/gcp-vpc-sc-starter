@@ -25,13 +25,27 @@ variable "perimeter_name" {
   type        = string
 }
 
+# Tożsamość jest PARAMETREM, nie stałą — i musi wskazywać konto, które REALNIE ISTNIEJE w organizacji.
+# ACM waliduje istnienie tożsamości i odrzuca całą zmianę (`invalid or non-existent`). Wpisane tu na sztywno
+# konto przykładowe sprawiało, że OBA applye padały z tego samego powodu, a eksperyment raportował „reguły
+# giną" — czyli zawsze potwierdzał tezę, niezależnie od zachowania API (Issue #1904).
+variable "identity" {
+  description = "ISTNIEJĄCE konto serwisowe w formacie ACM, np. serviceAccount:sa-x@prj-y.iam.gserviceaccount.com"
+  type        = string
+
+  validation {
+    condition     = can(regex("^serviceAccount:[^@\\s]+@[^@\\s]+\\.gserviceaccount\\.com$", var.identity))
+    error_message = "identity musi mieć postać serviceAccount:<konto>@<projekt>.iam.gserviceaccount.com"
+  }
+}
+
 # Reguła w konfiguracji DRY-RUN — nie blokuje niczego, tylko zapisuje się w konfiguracji.
 resource "google_access_context_manager_service_perimeter_dry_run_ingress_policy" "race" {
   perimeter = "accessPolicies/${var.policy_id}/servicePerimeters/${var.perimeter_name}"
   title     = "race-test-alpha"
 
   ingress_from {
-    identities = ["serviceAccount:race-alpha@example.iam.gserviceaccount.com"]
+    identities = [var.identity]
   }
 
   ingress_to {

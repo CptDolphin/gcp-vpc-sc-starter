@@ -117,6 +117,72 @@ test_exception_without_justification_denied if {
 	count(deny) > 0 with input as bad
 }
 
+# --- projekty płaszczyzny sterowania (anty-samo-zablokowanie) ---------------------------------------
+#
+# Bramka na jedyny tryb awarii, którego `git revert` nie cofa: projekt z bucketem stanu wciągnięty do
+# perimetru odcina konto apply od jego własnego stanu. Testów jest tu więcej niż przy innych regułach,
+# bo koszt cichej dziury jest tu najwyższy — naprawa wymaga człowieka z uprawnieniami org-level.
+
+control_plane_input(lista) := json.patch(healthy_input, [{
+	"op": "add",
+	"path": "/policy/control_plane_projects",
+	"value": lista,
+}])
+
+test_control_plane_project_denied if {
+	count(deny) > 0 with input as control_plane_input(["prj-example-vertex-dev"])
+}
+
+# Lista przyjmuje ID albo numer. Gdyby dopasowanie szło tylko po ID, bramkę omijałoby się wpisaniem numeru —
+# czyli formatem, który policy.yaml wprost dopuszcza.
+test_control_plane_project_by_number_denied if {
+	count(deny) > 0 with input as control_plane_input(["111111111111"])
+}
+
+# ANTY-TAUTOLOGIA: niepusta lista wskazująca INNY projekt musi przepuścić zwykłego członka. Bez tego testu
+# reguła odrzucająca wszystko przechodziłaby test negatywny i wyglądała na działającą.
+test_control_plane_other_project_passes if {
+	count(deny) == 0 with input as control_plane_input(["prj-example-tfstate-admin"])
+}
+
+# Furtka: jawny wyjątek z uzasadnieniem przepuszcza wpis — po to, żeby nikt nie musiał WYŁĄCZAĆ bramki
+# (usunięcie projektu z listy rozbraja ją dla wszystkich członków naraz).
+test_control_plane_exception_passes if {
+	ok := json.patch(control_plane_input(["prj-example-vertex-dev"]), [{
+		"op": "add",
+		"path": "/members/example-prj-example-vertex-dev/control_plane_exception",
+		"value": {"justification": "stan Terraform przeniesiony do bucketa poza perimetrem, apply czyta go spoza granicy"},
+	}])
+	count(deny) == 0 with input as ok
+}
+
+# Uzasadnienie „ok" zamienia furtkę w skrót klawiszowy przed nieodwracalną awarią.
+test_control_plane_exception_too_short_denied if {
+	bad := json.patch(control_plane_input(["prj-example-vertex-dev"]), [{
+		"op": "add",
+		"path": "/members/example-prj-example-vertex-dev/control_plane_exception",
+		"value": {"justification": "ok"},
+	}])
+	count(deny) > 0 with input as bad
+}
+
+# Wyjątek „na zapas" na projekcie spoza listy: gdyby był dozwolony, dopisanie go do wszystkich plików
+# członków rozbroiłoby bramkę zawczasu, a późniejsze rozszerzenie listy nic by nie dało.
+test_control_plane_exception_without_listing_denied if {
+	bad := json.patch(control_plane_input([]), [{
+		"op": "add",
+		"path": "/members/example-prj-example-vertex-dev/control_plane_exception",
+		"value": {"justification": "wyjatek wpisany zawczasu, zanim projekt trafil na liste sterowania"},
+	}])
+	count(deny) > 0 with input as bad
+}
+
+# Numer bez cudzysłowów to w YAML-u liczba, a project_number jest stringiem — bramka wyglądałaby na
+# uzbrojoną i nie łapała niczego. Ten test pilnuje, żeby cichy no-op był głośnym błędem.
+test_control_plane_number_not_string_denied if {
+	count(deny) > 0 with input as control_plane_input([111111111111])
+}
+
 # --- kanały wejścia ---------------------------------------------------------------------------------
 
 # Repo zespołu zgłaszające SWÓJ projekt — przechodzi.

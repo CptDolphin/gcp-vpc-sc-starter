@@ -85,6 +85,21 @@
         }
       }
     },
+    "control_plane_exception": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "justification"
+      ],
+      "description": "Jawna furtka dla projektu z policy.yaml §control_plane_projects — czyli takiego, w którym leży bucket stanu, kontraktów albo monitoring. Istnieje po to, żeby nikt nie musiał WYŁĄCZAĆ bramki, gdy wciągnięcie projektu jest naprawdę zamierzone. Pole jest widoczne w diffie pliku członka i idzie przez CODEOWNERS; alternatywa — usunięcie projektu z listy w policy.yaml — wygląda w diffie jak sprzątanie i rozbraja bramkę dla WSZYSTKICH członków naraz.",
+      "properties": {
+        "justification": {
+          "type": "string",
+          "minLength": 20,
+          "description": "Co się zmieniło, że to jest bezpieczne: gdzie leży teraz stan Terraform i skąd woła konto apply. Uzasadnienie bez tej treści jest podpisem, nie oceną — a to jest jedyny tryb awarii, którego `git revert` nie cofa."
+        }
+      }
+    },
     "exceptions": {
       "type": "array",
       "description": "Reguły spoza katalogu profili. Każda wymaga approvalu Security — obecność niepustej listy przełącza PR na ścieżkę z człowiekiem.",

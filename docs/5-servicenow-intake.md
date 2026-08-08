@@ -189,7 +189,21 @@ poprawne.
 Konsekwencja praktyczna: pozycja katalogu powinna mieć **prerekwizyt** — projekt utworzony przez fabrykę
 projektów (warstwa landing zone, jeśli organizacja ją ma) z włączonym PGA i DNS na restricted VIP.
 Sprawdza to `tools/preflight_check.sh` i jest to element checklisty recenzenta w opisie PR-a. Gdyby
-jeden ticket miał robić oba kroki, to jest integracja **dwóch** automatów, a nie
-jeden ticket robił oba kroki, to jest integracja **dwóch** automatów (fabryka projektów + ten kanał), a nie
+jeden ticket miał robić oba kroki, to jest integracja **dwóch** automatów (fabryka projektów + ten kanał), a nie
 rozszerzenie tego workflow — i wymaga osobnej decyzji, bo tworzenie projektu to inny blast-radius niż dodanie
 go do granicy.
+
+Recenzent uruchamia go z tożsamościami z wniosku — powtarzalne `--identity`, wartości przepisane 1:1 z pliku
+członka:
+
+```bash
+tools/preflight_check.sh --project prj-example-vertex-dev --number 123456789012 \
+  --identity serviceAccount:sa-example-serving@prj-example-vertex-dev.iam.gserviceaccount.com
+```
+
+**Dlaczego to nie jest duplikat bramki OPA.** `perimeter.rego` sprawdza **kształt** adresu na plan-JSON i robi
+to na każdym PR, bez żadnych poświadczeń — łapie literówkę w domenie. Adres poprawny składniowo, wskazujący na
+**nieistniejące** konto, przechodzi tam bez zająknięcia, a ACM odrzuca go dopiero przy apply komunikatem
+`invalid or non-existent` i wywraca **całą** zmianę, nie jedną regułę. Istnienie da się sprawdzić wyłącznie
+pytaniem do API, więc siedzi tam, gdzie są poświadczenia: w pre-flighcie. `user:`/`group:` pre-flight
+raportuje jako **niezweryfikowane** — to Directory API Workspace, inna domena administracyjna.

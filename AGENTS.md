@@ -27,12 +27,18 @@ a nie HCL.
 | `aiplatform.googleapis.com` w `restricted_services` | `precondition` w `perimeter.tf` + reguła OPA w `onboarding.rego` | perimeter wygląda na włączony i nie chroni tego, dla czego powstał (DEC-1) |
 | `use_explicit_dry_run_spec = true` **zawsze** | `perimeter.tf` | bez tego nie istnieje członek „tylko w dry-run", czyli nie da się etapować onboardingu (DEC-4) |
 | `lifecycle.ignore_changes` na listach szkieletu | `perimeter.tf` | szkielet i zasoby per-członek biją się o te same listy: każdy apply kasuje to, co dodał poprzedni (DEC-6) |
+| Reguły ingress mają `depends_on` na `access_level` | `rules.tf` + asercja selftestu czytająca `terraform graph` | access level jest referowany po NAZWIE, więc bez tej pozycji graf nie ma krawędzi i `destroy` kasuje poziom, gdy reguła jeszcze go używa: `you must first remove the reference`. Wychodzi dopiero przy offboardingu członka, czyli w momencie, w którym nikt nie chce debugować granicy |
 | Nowy członek zawsze `stage: dry-run` | `render_member.py` + reguła OPA | wejście od razu do konfiguracji egzekwowanej odcina cudzą produkcję po merge'u (DEC-4) |
+| `stage`, `dry_run_since`, `review_by`, `change_ref` wpisuje **strona perimetru**, nigdy wnioskodawca | `render_member.py`, `external-intake.yml`, uzupełnianie w `validate-local.sh` + `test_przyklad_repo_dywizji` | `dry_run_since` z datą wsteczną sprawia, że bramka promocji liczy okno obserwacji jako dawno minione — 14 dni pomiaru, dla których istnieje DEC-4, znika. Pole opisujące czas pomiaru nie może pochodzić od mierzonego |
 | Kanał wejściowy **nie nadpisuje** istniejącego pliku członka | `out.exists()` w `render_member.py` i `external-intake.yml` | powtórne zgłoszenie zapisałoby `stage: dry-run` na członku `enforced` — projekt traci ochronę PR-em wyglądającym na onboarding. Reguła OPA tego nie łapie: porównuje dwa PLIKI, a tu plik jest ten sam |
-| Apply jest single-flight | `concurrency` w `apply.yml`, bez `cancel-in-progress` | dwa równoległe apply nadpisują się na polityce org-level (DEC-6) |
+| Apply jest single-flight | `concurrency` w `apply.yml`, bez `cancel-in-progress` | przegrany apply pada na `Error 400: eTag … does not match` — **nic nie ginie po cichu**, ale ~80-100% nałożonych w czasie przebiegów wymaga ponowienia z ręki. Argumentem jest NIEZAWODNOŚĆ, nie cicha utrata reguł (DEC-6, skorygowane pomiarem 2026-08-07) |
+| Projekt z `policy.yaml` §`control_plane_projects` **nie wchodzi** do perimetru | reguła OPA w `onboarding.rego` (furtka: `control_plane_exception` w pliku członka) | **jedyne złamanie, którego `git revert` NIE COFA.** Bucket stanu leży w projekcie administracyjnym perimetru; w konfiguracji egzekwowanej konto apply traci dostęp do własnego stanu, bo woła z GitHub Actions — spoza granicy. Apply rewertu też potrzebuje stanu, więc pętli nie da się przerwać pipeline'em: wychodzi z niej człowiek z uprawnieniami org-level, ręcznie na żywej polityce |
+| Sekcja `control_plane_projects` **istnieje** (może być pusta) | `required` w `schemas/policy.schema.json` + asercja w selfteście | brak sekcji i pusta lista dają ten sam skutek — bez `required` bramkę rozbraja się „sprzątaniem" nieużywanego pola, a różnica między „zdecydowaliśmy, że nie ma takich projektów" a „nikt o tym nie pomyślał" znika z diffu |
 | Zakaz `ANY_IDENTITY` / `method: "*"` / `resources: ["*"]` | `perimeter.rego` na plan-JSON | reguła przestaje cokolwiek ograniczać, a wygląda tak samo (DEC-3) |
+| Każda tożsamość ma poprawny **kształt** (prefiks typu + domena) | `perimeter.rego` na plan-JSON; **istnienie** konta osobno, w `preflight_check.sh --identity` | ACM waliduje tożsamości po swojej stronie i odrzuca **całą** zmianę (`invalid or non-existent`), więc literówka w adresie wywraca apply po review, na obiekcie org-plane — i wygląda jak problem z uprawnieniami. Wzorzec domeny jest świadomie luźny: bramka odrzucająca konto domyślne (`developer.`, `appspot.`) blokowałaby poprawny onboarding |
 | Kontrakt buduje się polami, nigdy `jsonencode(<zbiorcze>)` | `contract.tf` + test w selfteście | kontrakt zamienia się w drugą kopię stanu (DEC-8) |
 | Kontrakt i stan w **różnych** bucketach | `precondition` w `contract.tf` | jeden błąd w IAM odsłania pełną mapę granicy (DEC-8) |
+| Obie publikacje kontraktu (bucket + asset release'u) wychodzą z **jednego kroku apply** | `test_kontrakt_dwie_publikacje` w selfteście (parsuje kroki `apply.yml`) | dwa kroki = dwa wyzwalacze i dwa odczyty stanu, więc dwie kopie cicho się rozjadą, a konsument nie ma jak zauważyć, że czyta starszą (DEC-8) |
 | Zakaz komendy commitującej całą konfigurację dry-run | guard w `validate.yml` | promocja WSZYSTKICH członków jednym wywołaniem, bez czego cofnąć (`docs/3` §A) |
 | Akcje przypięte 40-znakowym SHA | guard w `validate.yml` + Dependabot | kto kontroluje tag, kontroluje pipeline mający prawo zmieniać granicę organizacji |
 
@@ -84,7 +90,11 @@ python3 selftest/selftest.py          # rozpakowuje starter do katalogu tymczaso
 ```
 
 Wymaga na PATH: `terraform` (1.15.5), `conftest`, `tflint`, `python3` z `pyyaml`; opcjonalnie `actionlint`
-i `check-jsonschema` (ich brak daje SKIP z nazwą, nigdy ciche zielone). Oczekiwany wynik: **114/114**.
+i `check-jsonschema` (ich brak daje SKIP z nazwą, nigdy ciche zielone). Oczekiwany wynik: **179/179**.
+
+Bez `tflint` na PATH przebieg kończy się na **176/176** i wypisuje SKIP z nazwą — trzy asercje
+(`--init` plus lint obu stacków) po prostu się nie wykonują. Liczba niższa niż 179 nie jest błędem
+startera, tylko informacją, czego w tym środowisku nie sprawdzono.
 
 Sam skan samodzielności (bez terraforma i conftesta, sam Python) da się uruchomić na dowolnej ścieżce —
 przydaje się tam, gdzie materiał jest publikowany razem z innymi katalogami:

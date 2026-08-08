@@ -146,6 +146,17 @@ def bootstrap() -> None:
     check("template/ nie zawiera plikow-kropek", not dotfiles, str(dotfiles))
     check("template/ nie zawiera zywych *.tf", not live_tf, str(live_tf))
 
+    # `examples/` to material dla repozytorium DYWIZJI, a install.sh rozpakowuje repozytorium PERIMETRU.
+    # Gdyby przyklad tam trafil, `examples/division-repo/github/workflows/vpc-sc-request.yml` zmapowalby sie
+    # na `.github/workflows/` i stalby sie ZYWYM workflowem wysylajacym dispatch do samego siebie. Zbior
+    # `expected` wyzej zlapalby to jako "nadmiarowe", ale bez nazwy powodu — a to jest decyzja, nie literowka.
+    check("examples/ NIE laduje w docelowym repo (material dla repo DYWIZJI, nie perimetru)",
+          not [f for f in got if f.startswith("examples/") or f.endswith("vpc-sc-request.yml")],
+          str(sorted(f for f in got if f.startswith("examples/"))))
+    # Ten sam niezmiennik co dla template/: dopoki przyklad lezy tutaj, ma byc martwym tekstem.
+    przyklad_kropki = [str(f) for f in (STARTER / "examples").rglob(".*")]
+    check("examples/ nie zawiera plikow-kropek (github/ bez kropki)", not przyklad_kropki, str(przyklad_kropki))
+
 
 # --------------------------------------------------------------------- terraform
 def test_terraform() -> None:
@@ -183,6 +194,23 @@ def test_terraform() -> None:
     p = sh(["terraform", f"-chdir={tf}", "console"], input="length(local.ingress_rules_enforced)\n")
     check("swieze repo nie ma zadnej reguly egzekwowanej",
           p.returncode == 0 and p.stdout.strip().splitlines()[-1].strip() == "0", p.stdout + p.stderr[-300:])
+
+    # KOLEJNOSC DESTROY: regula ingress referuje access level po NAZWIE (string z YAML), wiec Terraform sam
+    # nie zbuduje krawedzi i moze skasowac poziom przed regula — API odrzuca `you must first remove the
+    # reference` (zmierzone na zywym ACM 2026-08-07, #1904). Mierzymy GRAF, ktory Terraform faktycznie
+    # zbudowal, a nie obecnosc slowa `depends_on` w pliku: bez tego test potwierdzalby wlasny tekst.
+    # Kontrola anty-tautologiczna: przed poprawka to samo zapytanie zwracalo 0 krawedzi.
+    p = sh(["terraform", f"-chdir={tf}", "graph"])
+    krawedzie = {
+        (a, b)
+        for a, b in re.findall(r'"([^"]+)"\s*->\s*"([^"]+)"', p.stdout)
+    }
+    poziom = "google_access_context_manager_access_level.level"
+    for wariant in ("dry_run_ingress_policy", "ingress_policy"):
+        regula = f"google_access_context_manager_service_perimeter_{wariant}.rule"
+        check(f"graf: {wariant} zalezy od access levelu (kolejnosc destroy)",
+              p.returncode == 0 and (regula, poziom) in krawedzie,
+              f"brak krawedzi {regula} -> {poziom}; stderr={p.stderr[-300:]}")
 
     # Sekcje opcjonalne MUSZA byc opcjonalne NAPRAWDE. `count` na zasobie nie wystarcza: blok `locals` liczy
     # sie zawsze, wiec odwolanie do nieistniejacej sekcji wywraca `validate` — czyli funkcja opisana jako
@@ -234,6 +262,137 @@ def test_iam_bootstrap() -> None:
     check("iam-bootstrap: deny uzywa principal://.../serviceAccounts/",
           "principal://iam.googleapis.com/projects/-/serviceAccounts/" in body)
 
+    # --- kontrakt zmiennej contract_reader_groups ----------------------------------------------------
+    # DLACZEGO ten guard istnieje: zmienna ma `default = []`, więc `for_each` nie tworzy ANI JEDNEJ
+    # instancji i ani fmt, ani validate, ani plan nigdy nie dotykają jej wartości. Trzy miejsca opisujące
+    # jej format — walidacja w variables.tf, `member` w main.tf i przykład w terraform.tfvars.sample —
+    # rozjechały się dokładnie dlatego, że nic ich ze sobą nie porównywało: walidacja WYMAGAŁA prefiksu
+    # `group:`, main.tf ten sam prefiks DOKLEJAŁ, a przykład go NIE MIAŁ. Każda niepusta wartość była
+    # zepsuta w jedną albo w drugą stronę (`group:group:...` w IAM albo błąd walidacji przy odkomentowaniu
+    # przykładu), a selftest przez cały ten czas świecił na zielono.
+    #
+    # Guard mierzy EFEKT — to, co realnie wyszłoby do IAM — a nie tekst plików. Dzięki temu przeżyje
+    # ŚWIADOME odwrócenie kontraktu (prefiks może mieszkać po stronie zmiennej albo po stronie main.tf)
+    # i mimo to odrzuci obie kombinacje sprzeczne: podwójny prefiks ORAZ goły adres jako principala.
+    #
+    # SYGNAŁEM JEST `plan`, NIE `console`: zmierzone na tym stacku — `terraform console` kończy się kodem 0
+    # MIMO odrzuconej walidacji (wypisuje błąd i liczy dalej). Test oparty na jego kodzie wyjścia
+    # przepuszczałby wszystko, czyli byłby dokładnie tą bramką-atrapą, której brak wpuścił tu sprzeczność.
+    # `plan` działa bez poświadczeń GCP, bo stan jest pusty i wszystkie zasoby są `create` — provider nie
+    # woła API.
+    sample = (d / "terraform.tfvars.sample").read_text()
+    m = re.search(r"^#\s*contract_reader_groups\s*=\s*\[(.*?)\]", sample, re.M)
+    przyklady = re.findall(r'"([^"]+)"', m.group(1)) if m else []
+    check("iam-bootstrap: tfvars.sample pokazuje przyklad contract_reader_groups",
+          bool(przyklady), "brak zakomentowanego przykladu — nie ma czego porownac z walidacja")
+
+    baza = ["-var=org_id=123456789012", "-var=identity_project_id=prj-example-identity",
+            "-var=github_repository=example-org/gcp-vpc-sc", "-var=state_bucket=bkt-example-tf-state",
+            "-var=contracts_bucket=bkt-example-contracts"]
+
+    def plan_grup(wartosci, out=None):
+        cmd = ["terraform", f"-chdir={d}", "plan", "-no-color", "-input=false", "-lock=false"]
+        cmd += [f"-out={out}"] if out else []
+        return sh(cmd + baza + [f"-var=contract_reader_groups={json.dumps(wartosci)}"])
+
+    if przyklady:
+        # 1. Przykład z sample'a MUSI przejść walidację. To pilnuje trzeciego miejsca: dokumentacja, którą
+        #    czytelnik odkomentowuje, nie może padać na bramce z pliku obok.
+        p = plan_grup(przyklady, out="zz_selftest.tfplan")
+        check("iam-bootstrap: przyklad z tfvars.sample przechodzi walidacje contract_reader_groups",
+              p.returncode == 0, (p.stdout[-400:] + p.stderr[-700:]))
+
+        # 2. Renderowany principal musi nieść prefiks `group:` DOKŁADNIE RAZ. Oczekiwanie liczymy z tego
+        #    samego przykładu, więc guard nie przyklepuje jednej ze stron sporu — sprawdza ich ZGODNOŚĆ.
+        member = ""
+        if p.returncode == 0:
+            s = sh(["terraform", f"-chdir={d}", "show", "-json", "zz_selftest.tfplan"])
+            zasoby = json.loads(s.stdout)["planned_values"]["root_module"].get("resources", [])
+            member = next((r["values"]["member"] for r in zasoby
+                           if r["type"] == "google_storage_bucket_iam_member"
+                           and r["name"] == "contract_reader"), "")
+        oczekiwany = "group:" + przyklady[0].removeprefix("group:")
+        check("iam-bootstrap: walidacja i main.tf zgodne co do prefiksu group: (dokladnie jeden)",
+              member == oczekiwany,
+              f"member={member!r}, oczekiwano={oczekiwany!r} — walidacja i renderowanie rozjechaly sie")
+        (d / "zz_selftest.tfplan").unlink(missing_ok=True)
+
+        # 3. Forma PRZECIWNA do przykładu musi być odrzucona. Gdyby przechodziły obie, ten sam kontrakt
+        #    renderowałby się raz dobrze, a raz z podwójnym prefiksem — zależnie od tego, skąd kto skopiował
+        #    wartość. Jeden dopuszczalny format, nie dwa.
+        wzor = przyklady[0]
+        przeciwna = wzor.removeprefix("group:") if wzor.startswith("group:") else "group:" + wzor
+        p = plan_grup([przeciwna])
+        check("iam-bootstrap: przeciwna forma wpisu contract_reader_groups jest ODRZUCANA",
+              p.returncode != 0, f"rc={p.returncode} dla {przeciwna!r} — walidacja przepuszcza oba formaty")
+
+    # 4. Intencja bezpieczeństwa, niezależna od tego, po której stronie mieszka prefiks: kontrakt niesie
+    #    nazwy projektów, dywizji i profili, więc principal otwarty na świat albo przypięty do konkretnego
+    #    człowieka nie ma prawa tędy wejść.
+    for zly in ["allUsers", "allAuthenticatedUsers", "user:ktos@example.com", "domain:example.com"]:
+        check(f"iam-bootstrap: contract_reader_groups ODRZUCA {zly}",
+              plan_grup([zly]).returncode != 0, "principal spoza grup przeszedl walidacje")
+
+    # --- prefiksy obiektow: state_prefix i contract_prefix -------------------------------------------
+    # DLACZEGO OBA NARAZ, TYM SAMYM KODEM: to bliźniaki. Jedyne, co robią, to wklejenie się do tego samego
+    # wyrażenia IAM `resource.name.startsWith(".../objects/<prefiks>")`. Mimo to rozjechały się — `state_prefix`
+    # miał walidację od początku, `contract_prefix` nie miał ŻADNEJ (#1912). Terraform nie ma funkcji
+    # użytkownika (blok `function` to OpenTofu), więc warunku nie da się wyciągnąć do jednego miejsca w HCL
+    # i jedynym spinaczem obu jest TEN guard. Pętla po nazwach, nie dwa osobne testy: test dopisany wyłącznie
+    # dla jednej zmiennej odtworzyłby dokładnie tę asymetrię, która ten defekt wpuściła.
+    #
+    # DWA TRYBY AWARII, PRZECIWNE — i dlatego sprawdzamy oba:
+    #   * wiodący `/`  -> warunek nie pasuje do NICZEGO. Pada GŁOŚNO (403 u konsumenta), więc ktoś to zgłosi;
+    #   * pusty string -> warunek degeneruje się do `.../objects/`, czyli pasuje do KAŻDEGO obiektu w buckecie.
+    #     Grant nie znika — po CICHU ROZSZERZA się na cały bucket. Nic nie pada, więc nikt nie zgłasza.
+    #     Ten tryb jest groźniejszy i to on jest powodem, dla którego guard niżej mierzy TREŚĆ warunku,
+    #     a nie sam kod wyjścia: „plan przeszedł" nie odróżnia zawężenia od jego braku.
+    #
+    # `plan`, nie `console` — ta sama lekcja co przy contract_reader_groups: `terraform console` kończy się
+    # kodem 0 MIMO odrzuconej walidacji, więc test na jego kodzie wyjścia byłby bramką-atrapą.
+    dobre_prefiksy = {"state_prefix": "vpc-sc/perimeter", "contract_prefix": "vpc-sc/"}
+
+    def plan_prefiksy(wartosci, out=None):
+        cmd = ["terraform", f"-chdir={d}", "plan", "-no-color", "-input=false", "-lock=false"]
+        cmd += [f"-out={out}"] if out else []
+        return sh(cmd + baza + [f"-var={k}={v}" for k, v in wartosci.items()])
+
+    for zmienna, dobra in dobre_prefiksy.items():
+        p = plan_prefiksy({**dobre_prefiksy, zmienna: "/" + dobra})
+        check(f"iam-bootstrap: {zmienna} ODRZUCA wiodacy / (warunek IAM nie pasowalby do zadnego obiektu)",
+              p.returncode != 0, f"rc={p.returncode} — plan przeszedl mimo prefiksu '/{dobra}'")
+        p = plan_prefiksy({**dobre_prefiksy, zmienna: ""})
+        check(f"iam-bootstrap: {zmienna} ODRZUCA pusty string (grant rozszerzylby sie na CALY bucket)",
+              p.returncode != 0, f"rc={p.returncode} — plan przeszedl mimo pustego prefiksu")
+
+    # ANTY-TAUTOLOGIA + POMIAR EFEKTU jednym przebiegiem. Same odrzucenia nie dowodzą niczego: walidacja
+    # odrzucająca wszystko przeszłaby je w komplecie. Wartości poprawne muszą PRZEJŚĆ, a zrenderowany warunek
+    # — ten, który realnie wylądowałby w IAM — musi NIEŚĆ prefiks. Czytamy go z `terraform show -json`, bo
+    # guard tekstowy („czy w variables.tf stoi blok validation") przeszedłby także wtedy, gdyby warunek
+    # pilnował czegoś zupełnie innego niż zawężenie zasięgu.
+    p = plan_prefiksy(dobre_prefiksy, out="zz_prefiksy.tfplan")
+    check("iam-bootstrap: poprawne prefiksy PRZECHODZA plan (test anty-tautologiczny)",
+          p.returncode == 0, (p.stdout[-400:] + p.stderr[-700:]))
+    warunki = {}
+    if p.returncode == 0:
+        s = sh(["terraform", f"-chdir={d}", "show", "-json", "zz_prefiksy.tfplan"])
+        for r in json.loads(s.stdout)["planned_values"]["root_module"].get("resources", []):
+            if r["type"] == "google_storage_bucket_iam_member":
+                for c in r["values"].get("condition") or []:
+                    warunki.setdefault(r["name"], []).append(c["expression"])
+    (d / "zz_prefiksy.tfplan").unlink(missing_ok=True)
+
+    # `state_list` NIE jest tu wymieniony celowo: to grant `legacyBucketReader` na LISTOWANIE bucketa,
+    # który warunku mieć NIE MOŻE, bo zasobem tego wywołania jest bucket, a nie obiekt (WHY w main.tf).
+    for zasob, zmienna in (("state", "state_prefix"),
+                           ("contract_writer", "contract_prefix"),
+                           ("contract_reader_plan", "contract_prefix")):
+        koncowka = f'/objects/{dobre_prefiksy[zmienna]}")'
+        wyrazenia = warunki.get(zasob, [])
+        check(f"iam-bootstrap: warunek IAM `{zasob}` niesie prefiks z {zmienna} (nie konczy sie na /objects/)",
+              bool(wyrazenia) and all(w.endswith(koncowka) for w in wyrazenia),
+              f"expressions={wyrazenia!r}, oczekiwana koncowka={koncowka!r}")
+
 
 # --------------------------------------------------------------------- kontrakt
 def test_contract() -> None:
@@ -278,8 +437,11 @@ def test_contract() -> None:
     # Action zespołu nie może już wymagać submodule'a.
     action = (ROOT / "contrib/action.yml").read_text()
     check("contrib/action: brak zaleznosci od submodule", "submodules: true" not in action)
-    check("contrib/action: pobiera kontrakt i paczke bramek",
-          "gcloud storage cat" in action and "gh release download" in action)
+    # Kontrakt i bramki jada TA SAMA droga: release repozytorium perimetru. `gcloud` w tym pliku oznaczalby
+    # powrot do wymagania tozsamosci w GCP po stronie dywizji — czyli do stanu, ktory ta konstrukcja usuwa.
+    check("contrib/action: pobiera kontrakt i paczke bramek z release'ow (bez gcloud)",
+          "gh release download contract" in action and "gates.tar.gz" in action and "gcloud" not in action,
+          f"kontrakt={'gh release download contract' in action} gcloud={'gcloud' in action}")
 
     # Do czego kontrakt SLUZY po stronie zespolu: rozstrzyga „czy moge o to wnioskowac" i „czy to juz jest
     # w perimetrze" BEZ dostepu do repo perimetru. Uruchamiamy realny blok walidacji z validate-local.sh
@@ -317,6 +479,194 @@ def test_contract() -> None:
     p = sh([sys.executable, "sprawdz_kontrakt.py", "zgloszenie.yaml", "kontrakt.json"], cwd=ROOT, env=srodowisko)
     check("kontrakt PRZEPUSZCZA projekt, ktorego jeszcze nie ma (test anty-tautologiczny)",
           p.returncode == 0, p.stdout + p.stderr)
+
+
+# ------------------------------------------------------- kontrakt: dwa miejsca, jeden krok apply
+def test_kontrakt_dwie_publikacje() -> None:
+    """Kontrakt jedzie do bucketa I do release'u — ale MUSI wychodzić z jednego kroku apply.
+
+    DLACZEGO to jest test, a nie komentarz: dwie publikacje w dwóch krokach to najłatwiejszy refaktor
+    świata („wydzielmy publikację do osobnego joba, będzie czytelniej") i najcichszy tryb awarii, jaki
+    ta konstrukcja ma. Dwa kroki = dwa wyzwalacze i dwa odczyty stanu, więc prędzej czy później opublikują
+    różną treść, a konsument nie ma jak zauważyć, że czyta starszą kopię. Test parsuje workflow jako YAML
+    i patrzy na STRUKTURĘ kroków — grep po tekście przeszedłby także wtedy, gdyby obie komendy stały
+    w dwóch różnych stepach obok siebie.
+    """
+    print("\n== kontrakt: dwa miejsca, jeden krok ==")
+
+    body = (ROOT / "terraform/contract.tf").read_text()
+    # Liczymy na KODZIE, nie na całym pliku: komentarz WHY nad outputem tłumaczy, dlaczego drugiego
+    # `jsonencode(...)` tu nie ma — i sam zawiera tę nazwę. Guard liczący wystąpienia w tekście wywracałby
+    # się o własną dokumentację (ta sama lekcja co `strip_heredocs` wyżej: uczy usuwania komentarzy).
+    kod = "\n".join(l for l in body.splitlines() if not l.lstrip().startswith("#"))
+    # Output czyta ATRYBUT ZASOBU. Drugie `jsonencode(local.contract_document)` byłoby drugim renderem
+    # tych samych danych — a dwa rendery da się rozjechać. Jeden nie ma z czym.
+    check("output kontraktu czyta atrybut zasobu, nie renderuje po raz drugi",
+          "one(google_storage_bucket_object.contract[*].content)" in kod
+          and kod.count("jsonencode(local.contract_document)") == 1,
+          f"jsonencode w kodzie x{kod.count('jsonencode(local.contract_document)')}")
+    # `one()`, nie `[0]`: przy wyłączonej sekcji `contract` zasobu nie ma i `[0]` wywracałby apply,
+    # czyli sekcja opisana jako opcjonalna znowu byłaby obowiązkowa.
+    check("output kontraktu znosi wylaczona sekcje `contract` (one(), nie [0])",
+          "google_storage_bucket_object.contract[0]" not in body)
+    # Suma kontrolna do porównania pochodzi z GCS (atrybut computed), nie z naszej zmiennej — inaczej
+    # weryfikacja byłaby tautologią i zgadzałaby się nawet wtedy, gdyby do bucketa nie poszło nic.
+    check("kontrakt eksportuje md5 policzone przez GCS (nie wlasne md5 z locals)",
+          "one(google_storage_bucket_object.contract[*].md5hash)" in body and "md5(local." not in body)
+
+    apply_yml = yaml.safe_load((ROOT / ".github/workflows/apply.yml").read_text())
+    steps = apply_yml["jobs"]["apply"]["steps"]
+    kroki_apply = [s for s in steps if "terraform -chdir=terraform apply" in s.get("run", "")]
+    kroki_release = [s for s in steps if "gh release upload" in s.get("run", "")]
+
+    check("apply.yml: dokladnie jeden krok applikuje i dokladnie jeden publikuje asset",
+          len(kroki_apply) == 1 and len(kroki_release) == 1,
+          f"apply={len(kroki_apply)} release={len(kroki_release)}")
+    # SEDNO: to musi być TEN SAM obiekt kroku. Dwa sąsiednie stepy przeszłyby każdy grep po treści pliku.
+    check("apply.yml: obie publikacje kontraktu wychodza z TEGO SAMEGO kroku",
+          bool(kroki_apply) and kroki_apply == kroki_release,
+          f"nazwy: apply={[s.get('name') for s in kroki_apply]} release={[s.get('name') for s in kroki_release]}")
+
+    krok = kroki_apply[0]["run"] if kroki_apply else ""
+    # Bajty assetu pochodzą z outputu TEGO apply, nie z pliku zrenderowanego obok (trzecia kopia).
+    check("apply.yml: tresc assetu bierze sie z outputu tego apply",
+          "terraform -chdir=terraform output -json contract_json" in krok)
+    check("apply.yml: md5 assetu porownane z suma obiektu w buckecie",
+          "contract_md5" in krok and "hashlib.md5" in krok)
+    check("apply.yml: token workflowa moze tworzyc release (contents: write)",
+          "contents: write" in (ROOT / ".github/workflows/apply.yml").read_text())
+
+    # Anty-tautologia do „TEN SAM krok": test musi UMIEĆ ZOBACZYĆ rozdzielenie. Rozbijamy krok na dwa
+    # i sprawdzamy, że asercja wtedy PADA — inaczej porównanie `kroki_apply == kroki_release` mogłoby
+    # przechodzić z powodu, którego nie kontrolujemy (np. obie listy puste).
+    rozbity = json.loads(json.dumps(apply_yml))  # głęboka kopia bez zależności
+    kroki = rozbity["jobs"]["apply"]["steps"]
+    i = next(n for n, s in enumerate(kroki) if "terraform -chdir=terraform apply" in s.get("run", ""))
+    tresc = kroki[i]["run"]
+    ciecie = tresc.index("gh release view")
+    kroki[i] = {"name": "apply", "run": tresc[:ciecie]}
+    kroki.insert(i + 1, {"name": "publikacja osobno", "run": tresc[ciecie:]})
+    a = [s for s in kroki if "terraform -chdir=terraform apply" in s.get("run", "")]
+    r = [s for s in kroki if "gh release upload" in s.get("run", "")]
+    check("test LAPIE rozdzielenie apply i publikacji na dwa kroki (anty-tautologia)",
+          a != r and len(a) == 1 and len(r) == 1, f"a={len(a)} r={len(r)}")
+
+
+# ------------------------------------------------------------ przyklad repozytorium dywizji
+def buduj_kontrakt(root: pathlib.Path) -> dict:
+    """Odtwarza kontrakt z plików rozpakowanego repo — te same pola, które publikuje `contract.tf`.
+
+    DLACZEGO z plików, a nie ręcznie wpisany słownik: kontrakt wpisany w test zamarza w chwili napisania,
+    więc dzień po dodaniu profilu przykład dywizji nadal „przechodzi" wobec katalogu, którego już nie ma.
+    Czytając te same YAML-e co renderer, testujemy przykład wobec AKTUALNEJ zawartości startera.
+    """
+    policy = yaml.safe_load((root / "perimeter/policy.yaml").read_text())
+    profile = [yaml.safe_load(f.read_text()) for f in sorted((root / "perimeter/profiles").glob("*.yaml"))]
+    poziomy = []
+    for f in sorted((root / "perimeter/access-levels").glob("*.yaml")):
+        poziomy += [al["name"] for al in yaml.safe_load(f.read_text())["access_levels"]]
+    contributors = yaml.safe_load((root / "perimeter/contributors.yaml").read_text())["contributors"]
+    return {
+        "schema_version": 1,
+        "perimeter_name": "accessPolicies/000000000000/servicePerimeters/test",
+        "restricted_services": policy["restricted_services"],
+        "onboarding": policy["onboarding"],
+        "access_levels": sorted(poziomy),
+        "profiles": [{"name": p["name"], "risk": p.get("risk", "unknown"), "summary": p.get("summary", ""),
+                      "parameters": [x["name"] for x in p.get("parameters", [])],
+                      "has_egress": bool(p.get("egress"))} for p in profile],
+        "contributors": [{"repository": c["repository"], "division": c["division"],
+                          "allowed_projects": c["allowed_projects"]} for c in contributors],
+        "members_published": True,
+        "members": [],
+    }
+
+
+def test_przyklad_repo_dywizji() -> None:
+    """`examples/division-repo/` ma być DZIAŁAJĄCYM przykładem, nie ilustracją.
+
+    Dlatego nie sprawdzamy tu obecności plików ani fraz w dokumentacji, tylko URUCHAMIAMY na przykładzie
+    ten sam `validate-local.sh`, który pobiera u siebie zespół dywizji. Przykład, który „wygląda dobrze",
+    a nie przechodzi własnej bramki, jest gorszy od jego braku: uczy kształtu, który zostanie odrzucony.
+    """
+    print("\n== przyklad repozytorium dywizji ==")
+    przyklad = STARTER / "examples/division-repo"
+    request = przyklad / "vpc-sc/request.yaml"
+    check("examples/division-repo ma trzy pliki (request, workflow, README)",
+          request.exists() and (przyklad / "github/workflows/vpc-sc-request.yml").exists()
+          and (przyklad / "README.md").exists())
+    if not request.exists():
+        return
+
+    dekl = yaml.safe_load(request.read_text())
+    # NIEZMIENNIK PEDAGOGICZNY: wniosek jest WĘŻSZY niż plik członka. Cztery pola należą do perimetru —
+    # `stage` decyduje o etapie (jedno pole omijałoby dwustopniowy onboarding), a `dry_run_since` wyznacza
+    # okno obserwacji (data wsteczna od wnioskodawcy kasuje pomiar, dla którego to okno istnieje).
+    obce = [k for k in ("stage", "dry_run_since", "review_by", "change_ref") if k in dekl]
+    check("request.yaml NIE zawiera pol nalezacych do perimetru", not obce, f"znalezione: {obce}")
+    check("request.yaml zawiera komplet pol, ktorych wlascicielem jest dywizja",
+          {"schema_version", "division", "project_id", "project_number", "owner_group", "approved_by",
+           "profiles"} <= set(dekl), f"jest: {sorted(dekl)}")
+
+    # Workflow nie może wysyłać zgłoszenia z otwartego PR-a: dispatch ma konsekwencje po drugiej stronie
+    # granicy, więc wychodzi dopiero po merge'u. Sprawdzamy STRUKTURĘ (warunek joba), nie tekst.
+    wf = yaml.safe_load((przyklad / "github/workflows/vpc-sc-request.yml").read_text())
+    zgloszenie = wf["jobs"]["zgloszenie"]
+    check("workflow wysyla zgloszenie DOPIERO po merge",
+          "merged == true" in str(zgloszenie.get("if", "")), str(zgloszenie.get("if")))
+    uzywa_akcji = [s for s in zgloszenie["steps"] if "contrib@" in str(s.get("uses", ""))]
+    check("workflow wola akcje contrib (a nie kopiuje jej logiki)", len(uzywa_akcji) == 1)
+    check("job walidacji NIE wola akcji wysylajacej dispatch",
+          not [s for s in wf["jobs"]["walidacja"]["steps"] if "contrib@" in str(s.get("uses", ""))])
+
+    # Ten workflow ma zostac SKOPIOWANY do cudzego repozytorium — skladnia musi byc poprawna tutaj, bo
+    # tam pierwszym testem bylby czerwony przebieg u kogos innego. `test_workflows` lintuje wylacznie
+    # workflowy ROZPAKOWANEGO repo, wiec przyklad wymaga osobnego wywolania.
+    if have("actionlint"):
+        p = sh(["actionlint", str(przyklad / "github/workflows/vpc-sc-request.yml")])
+        check("actionlint na workflow przykladu", p.returncode == 0, p.stdout[-800:])
+    else:
+        print("  SKIP  actionlint niedostepny lokalnie (workflow przykladu nie zostal zlintowany)")
+
+    # Nazwa repozytorium dywizji istnieje WYŁĄCZNIE po stronie perimetru — w `contributors.yaml`. Nie ma
+    # jej w żadnym pliku przykładu i to nie jest przeoczenie: repozytorium nie deklaruje, czym jest ani
+    # o co wolno mu prosić. Dlatego stoi tutaj jako stała, a nie jest wyciągana z materiału dywizji.
+    REPO_PRZYKLADU = "ORG/example-division-vertex"
+
+    # Mapowanie repo→projekty MUSI istnieć po stronie perimetru — bez niego przykład jest niekompletny
+    # i pierwszy realny wniosek odbije się o „repozytorium nie ma wpisu w contributors".
+    wpisy = yaml.safe_load((ROOT / "perimeter/contributors.yaml").read_text())["contributors"]
+    wpis = next((c for c in wpisy if c["repository"] == REPO_PRZYKLADU), None)
+    check("contributors.yaml mapuje repo dywizji na projekt i dywizje z przykladu",
+          wpis is not None and dekl["project_id"] in wpis["allowed_projects"]
+          and wpis["division"] == dekl["division"],
+          f"wpis: {wpis}")
+    if wpis is None:
+        return
+    repo_przykladu = REPO_PRZYKLADU
+
+    if not (have("check-jsonschema") and have("conftest")):
+        print("  SKIP  brak check-jsonschema albo conftest — pomijam uruchomienie validate-local.sh")
+        return
+
+    # E2E: realny skrypt, realne bramki, realny plik przykładu. `--gates ROOT`, bo rozpakowane repo ma
+    # `schemas/` i `policy/` dokładnie tam, gdzie paczka bramek trzyma je u zespołu.
+    (ROOT / "kontrakt-przykladu.json").write_text(json.dumps(buduj_kontrakt(ROOT)))
+    srodowisko = dict(os.environ, GITHUB_REPOSITORY=repo_przykladu)
+    p = sh(["bash", str(ROOT / "contrib/validate-local.sh"), "--member", str(request),
+            "--gates", str(ROOT), "--contract", "kontrakt-przykladu.json"], cwd=ROOT, env=srodowisko)
+    check("validate-local.sh PRZEPUSZCZA przykladowy request.yaml (bez stage i dat)",
+          p.returncode == 0, (p.stdout + p.stderr)[-900:])
+
+    # NEGATYW: ten sam plik zgłoszony z repozytorium, które nie ma tego projektu na liście. Bramka, która
+    # przepuszcza wszystko, przeszłaby test wyżej i nie chroniłaby niczego — to jest jedyny dowód, że
+    # `contributors.yaml` cokolwiek rozstrzyga.
+    srodowisko["GITHUB_REPOSITORY"] = "ORG/example-division-obca"
+    p = sh(["bash", str(ROOT / "contrib/validate-local.sh"), "--member", str(request),
+            "--gates", str(ROOT), "--contract", "kontrakt-przykladu.json"], cwd=ROOT, env=srodowisko)
+    check("validate-local.sh ODRZUCA ten sam wniosek z CUDZEGO repozytorium",
+          p.returncode != 0 and "contributors" in (p.stdout + p.stderr),
+          (p.stdout + p.stderr)[-900:])
 
 
 # --------------------------------------------------------------------- monitoring
@@ -485,19 +835,29 @@ def test_lint_and_pinning() -> None:
 
     # `have()` nie wystarcza: `tflint` bywa shimem menedżera wersji, który istnieje na PATH i pada przy
     # uruchomieniu (brak przypiętej wersji). Wtedy FAIL mówiłby o konfiguracji tflinta, nie o kodzie startera.
+    # `have()` nie wystarcza: `tflint` bywa shimem menedżera wersji, który istnieje na PATH i pada przy
+    # uruchomieniu (brak przypiętej wersji). Wtedy FAIL mówiłby o konfiguracji tflinta, nie o kodzie startera.
     runnable = have("tflint") and sh(["tflint", "--version"]).returncode == 0
     if not runnable:
-        print("  SKIP  tflint nieuruchamialny lokalnie (CI instaluje go w validate.yml)")
+        print("  SKIP  tflint nieobecny albo nieuruchamialny — zainstaluj i przypnij wersje")
         return
+
+    # BEZ `--init` plugin `google` nie jest pobrany, `tflint` konczy sie bledem „plugin not found", a kod
+    # nizej drukowal na to SKIP i szedl dalej. Efekt: linter byl instalowany w CI, opisany w komentarzu
+    # workflow jako nosny — i NIGDY nie uruchamiany. Dwie asercje istnialy w kodzie i nie wykonaly sie ani
+    # razu. To jest dokladnie ta klasa bledu, ktora ten starter tropi gdzie indziej: bramka, ktora nie ma
+    # jak sie wykonac, nie jest bramka. `--init` jest wiec CZESCIA testu, z wlasna asercja.
+    init = sh(["tflint", "--init", f"--config={ROOT}/.tflint.hcl"], cwd=ROOT)
+    check("tflint --init pobiera plugin google (bez niego linter milczy zamiast sprawdzac)",
+          init.returncode == 0, (init.stdout + init.stderr)[-500:])
+    if init.returncode != 0:
+        return
+
     for stack in ["terraform", "iam-bootstrap"]:
         p = sh(["tflint", f"--chdir={stack}", f"--config={ROOT}/.tflint.hcl",
                 "--minimum-failure-severity=notice"], cwd=ROOT)
-        # Odróżniamy „linter znalazł problem w starterze" od „linter nie ma jak się uruchomić w tym
-        # środowisku" (shim menedżera wersji bez przypiętej wersji, brak pluginu). Drugie to nie wada kodu,
-        # a zgłoszone jako FAIL wysyłałoby czytelnika naprawiać terraform zamiast swojego PATH.
-        if "No version is set for shim" in p.stderr or "plugin" in p.stderr and "not found" in p.stderr:
-            print(f"  SKIP  tflint: {stack} — brak srodowiska (uruchom `tflint --init`, przypnij wersje)")
-            continue
+        # Po udanym `--init` „plugin not found" nie jest juz stanem srodowiska, tylko realna awaria bramki —
+        # dlatego NIE ma tu sciezki cichego pominiecia. Kazdy inny wynik to werdykt lintera o starterze.
         check(f"tflint czysty: {stack}", p.returncode == 0, (p.stdout + p.stderr)[-600:])
 
 
@@ -571,6 +931,73 @@ def test_rego() -> None:
     (ROOT / "bad-baseline.json").write_text(json.dumps(doc2))
     p = sh(["conftest", "test", "--policy", "policy", "--namespace", "vpcsc.onboarding", "bad-baseline.json"], cwd=ROOT)
     check("baseline bez aiplatform jest ODRZUCANY", p.returncode != 0, p.stdout[-800:])
+
+    # --- anty-samo-zablokowanie: projekty płaszczyzny sterowania -------------------------------------
+    # Jedyny tryb awarii tego repozytorium, którego `git revert` NIE COFA: projekt z bucketem stanu wciągnięty
+    # do perimetru odcina konto apply od jego własnego stanu (apply woła spoza granicy), a apply rewertu też
+    # potrzebuje stanu. Dlatego bramka ma tu więcej testów niż inne — cicha dziura kosztuje interwencję
+    # człowieka z uprawnieniami org-level, a nie kolejny commit.
+    czlonek = json.loads(decl.stdout)["members"][name]
+
+    def onboarding_na(doc: dict, plik: str):
+        (ROOT / plik).write_text(json.dumps(doc))
+        return sh(["conftest", "test", "--policy", "policy", "--namespace", "vpcsc.onboarding", plik], cwd=ROOT)
+
+    doc = json.loads(decl.stdout)
+    doc["policy"]["control_plane_projects"] = [czlonek["project_id"]]
+    p = onboarding_na(doc, "bad-control-plane.json")
+    check("czlonek na liscie control_plane_projects jest ODRZUCANY", p.returncode != 0, p.stdout[-800:])
+    # Komunikat MUSI tłumaczyć konsekwencję: samo „odrzucone" nie mówi czytelnikowi, czym ryzykuje ani
+    # dlaczego nie wystarczy zmergować i cofnąć.
+    check("komunikat bramki tlumaczy konsekwencje (stan, brak rewertu, org-level)",
+          all(s in p.stdout for s in ("bucketa stanu", "NIE cofa", "org-level")), p.stdout[-600:])
+
+    # ANTY-TAUTOLOGIA: niepusta lista wskazująca INNY projekt musi przepuścić zwykłego członka. Bez tego
+    # testu reguła odrzucająca wszystko przechodziłaby test negatywny i wyglądała na działającą.
+    doc = json.loads(decl.stdout)
+    doc["policy"]["control_plane_projects"] = ["prj-example-tfstate-admin"]
+    p = onboarding_na(doc, "ok-control-plane.json")
+    check("zwykly projekt PRZECHODZI mimo niepustej listy (test anty-tautologiczny)",
+          p.returncode == 0, p.stdout[-600:])
+
+    # Lista przyjmuje project_id ALBO numer — bramka, którą omija się wyborem formatu, nie jest bramką.
+    doc = json.loads(decl.stdout)
+    doc["policy"]["control_plane_projects"] = [czlonek["project_number"]]
+    p = onboarding_na(doc, "bad-control-plane-numer.json")
+    check("dopasowanie po NUMERZE projektu tez ODRZUCA", p.returncode != 0, p.stdout[-600:])
+
+    # Numer wpisany w YAML-u bez cudzysłowów jest liczbą, a `project_number` jest zawsze stringiem —
+    # porównanie nigdy by nie trafiło. Bramka wyglądałaby na uzbrojoną i nie łapała niczego.
+    doc = json.loads(decl.stdout)
+    doc["policy"]["control_plane_projects"] = [int(czlonek["project_number"])]
+    p = onboarding_na(doc, "bad-control-plane-typ.json")
+    check("numer NIE-string jest ODRZUCANY (inaczej bramka jest cichym no-opem)",
+          p.returncode != 0, p.stdout[-600:])
+
+    # Furtka istnieje po to, żeby nikt nie musiał WYŁĄCZAĆ bramki: usunięcie projektu z listy rozbraja ją
+    # dla wszystkich członków naraz i wygląda w diffie jak sprzątanie.
+    doc = json.loads(decl.stdout)
+    doc["policy"]["control_plane_projects"] = [czlonek["project_id"]]
+    doc["members"][name]["control_plane_exception"] = {
+        "justification": "stan Terraform przeniesiony poza perimetr, apply czyta go spoza granicy"}
+    p = onboarding_na(doc, "ok-control-plane-wyjatek.json")
+    check("jawny control_plane_exception PRZEPUSZCZA wpis (furtka zamiast wylaczania bramki)",
+          p.returncode == 0, p.stdout[-600:])
+
+    # Wyjątek „na zapas" na projekcie spoza listy rozbrajałby bramkę zawczasu: dopisany do wszystkich plików
+    # członków sprawia, że późniejsze rozszerzenie control_plane_projects nie odpala ani razu.
+    doc = json.loads(decl.stdout)
+    doc["members"][name]["control_plane_exception"] = {
+        "justification": "wyjatek wpisany zanim projekt trafil na liste plaszczyzny sterowania"}
+    p = onboarding_na(doc, "bad-control-plane-zapas.json")
+    check("wyjatek 'na zapas' (projekt spoza listy) jest ODRZUCANY", p.returncode != 0, p.stdout[-600:])
+
+    # Sekcja musi ZOSTAĆ w policy.yaml: brak sekcji i pusta lista dają ten sam skutek, więc różnicę wymusza
+    # `required` w schemacie. check-jsonschema jest jednak opcjonalny i lokalnie się SKIPuje — ta asercja
+    # używa samego YAML-a, więc nie ma jak się nie wykonać (ta sama lekcja co w test_acm_naming).
+    polityka = yaml.safe_load((ROOT / "perimeter/policy.yaml").read_text())
+    check("policy.yaml deklaruje sekcje control_plane_projects (nie da sie jej po cichu usunac)",
+          isinstance(polityka.get("control_plane_projects"), list), str(sorted(polityka.keys())))
 
     # NEGATYW na plan-JSON: reguła z ANY_IDENTITY i z method="*" musi paść.
     bad_plan = {
@@ -672,6 +1099,132 @@ def test_tools() -> None:
           p.stderr[-300:] + json.dumps(viol))
 
 
+# --------------------------------------------------- eksperyment wyscigu (klasyfikacja wynikow)
+# Atrapy `terraform` i `gcloud` pozwalaja wysterowac KAZDA z czterech kategorii werdyktu bez chmury.
+# To nie jest test dla ozdoby: bledna klasyfikacja jednego przypadku ("apply padl" policzone jako "regula
+# zniknela") sprawila, ze eksperyment przez tydzien produkowal wniosek odwrotny do prawdy — i ten wniosek
+# poszedl do uzasadnienia decyzji architektonicznej (DEC-6, #1904).
+TERRAFORM_ATRAPA = """#!/usr/bin/env bash
+case "$*" in
+  *" apply "*)
+    case "$*" in
+      *state-a*) rc="${STUB_RC_A:-0}" ;;
+      *)         rc="${STUB_RC_B:-0}" ;;
+    esac
+    [ "$rc" != "0" ] && echo "${STUB_ERR:-blad}"
+    exit "$rc" ;;
+esac
+exit 0
+"""
+
+GCLOUD_PERIMETR_ATRAPA = """#!/usr/bin/env bash
+python3 -c "
+import json
+n = int('${STUB_RULES:-2}')
+print(json.dumps({'spec': {'ingressPolicies': [{'title': 'race-test-%d' % i} for i in range(n)]}}))
+"
+"""
+
+
+def test_eksperyment_wyscigu() -> None:
+    print("\n== eksperyment wyscigu ==")
+    exp = STARTER / "experiments/race-two-states"
+    bin_dir = ROOT / "stub-bin-exp"
+    bin_dir.mkdir(exist_ok=True)
+    for nazwa, tresc in (("terraform", TERRAFORM_ATRAPA), ("gcloud", GCLOUD_PERIMETR_ATRAPA)):
+        (bin_dir / nazwa).write_text(tresc)
+        (bin_dir / nazwa).chmod(0o755)
+
+    baza = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}",
+                TF_VAR_policy_id="123456789012", TF_VAR_perimeter_name="test_race",
+                IDENTITY_A="serviceAccount:sa-example-a@prj-example.iam.gserviceaccount.com",
+                IDENTITY_B="serviceAccount:sa-example-b@prj-example.iam.gserviceaccount.com")
+
+    def przebieg(**nadpisania):
+        return sh(["bash", str(exp / "run.sh"), "1"], cwd=str(exp), env=dict(baza, **nadpisania))
+
+    # 1. Oba apply OK, obie reguly — przebieg po prostu nie trafil w okno wyscigu.
+    p = przebieg(STUB_RC_A="0", STUB_RC_B="0", STUB_RULES="2")
+    check("wyscig: oba OK + 2 reguly = bez nalozenia (rc 0)",
+          p.returncode == 0 and "bez nałożenia w czasie" in p.stdout, p.stdout[-500:] + p.stderr[-300:])
+
+    # 2. JEDYNY przypadek potwierdzajacy teze o cichym nadpisaniu — i jedyny konczacy sie bledem.
+    p = przebieg(STUB_RC_A="0", STUB_RC_B="0", STUB_RULES="1")
+    check("wyscig: oba OK + 1 regula = CICHA UTRATA (rc != 0)",
+          p.returncode != 0 and "CICHA UTRATA" in p.stdout, p.stdout[-500:] + p.stderr[-300:])
+
+    # 3. Realne zachowanie ACM: przegrany pada na eTagu. Nic nie ginie, wiec NIE jest to utrata.
+    p = przebieg(STUB_RC_A="0", STUB_RC_B="1", STUB_RULES="1",
+                 STUB_ERR="Error 400: The eTag provided 'abc' does not match the eTag 'def'")
+    check("wyscig: blad eTag = konflikt GLOSNY, nie utrata (rc 0)",
+          p.returncode == 0 and "konflikt GŁOŚNY" in p.stdout and "CICHA UTRATA" not in p.stdout,
+          p.stdout[-500:] + p.stderr[-300:])
+
+    # 4. REGRESJA, ktora zepsula pierwotny eksperyment: apply padl z powodu NIEZWIAZANEGO ze wspolbieznoscia
+    #    (tam — nieistniejaca tozsamosc). Stara logika liczyla to jako utrate reguly i potwierdzala teze.
+    p = przebieg(STUB_RC_A="0", STUB_RC_B="1", STUB_RULES="1",
+                 STUB_ERR="Error 403: Permission 'accesscontextmanager.policies.update' denied")
+    check("wyscig: inny blad = NIEROZSTRZYGNIETE, nie utrata reguly",
+          "NIEROZSTRZYGNIĘTE" in p.stdout and "CICHA UTRATA" not in p.stdout,
+          p.stdout[-500:] + p.stderr[-300:])
+
+    # 5. Tozsamosci sa PARAMETREM i sa obowiazkowe — brak = twarde zatrzymanie przed dotknieciem czegokolwiek.
+    bez_tozsamosci = {k: v for k, v in baza.items() if k != "IDENTITY_A"}
+    p = sh(["bash", str(exp / "run.sh"), "1"], cwd=str(exp), env=bez_tozsamosci)
+    check("wyscig: brak IDENTITY_A zatrzymuje eksperyment",
+          p.returncode != 0 and "IDENTITY_A" in p.stderr + p.stdout, p.stdout[-300:] + p.stderr[-300:])
+
+
+# --------------------------------------------------------------------- pre-flight
+# Atrapa `gcloud`: udaje ZDROWY projekt (istnieje, numer sie zgadza, PGA i DNS w porzadku), zeby jedyna
+# zmienna w tescie byla odpowiedz o TOZSAMOSC. Lista kont istniejacych przychodzi zmienna srodowiskowa.
+GCLOUD_ATRAPA = """#!/usr/bin/env bash
+case "$*" in
+  "projects describe "*) echo "123456789012" ;;
+  *"service-accounts describe "*)
+    for arg in "$@"; do case " $STUB_SA_OK " in *" $arg "*) exit 0 ;; esac; done
+    exit 1 ;;
+  *"perimeters list"*) echo "[]" ;;
+  *"managed-zones list"*) printf 'googleapis.com.\\nnotebooks.googleusercontent.com.\\n' ;;
+  *) : ;;
+esac
+exit 0
+"""
+
+
+def test_preflight() -> None:
+    print("\n== pre-flight ==")
+    bin_dir = ROOT / "stub-bin"
+    bin_dir.mkdir(exist_ok=True)
+    (bin_dir / "gcloud").write_text(GCLOUD_ATRAPA)
+    (bin_dir / "gcloud").chmod(0o755)
+    env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}",
+               STUB_SA_OK="sa-example@prj-example.iam.gserviceaccount.com")
+    baza = ["bash", "tools/preflight_check.sh", "--project", "prj-example", "--number", "123456789012"]
+
+    p = sh(baza, cwd=ROOT, env=env)
+    check("preflight: zdrowy projekt bez tozsamosci przechodzi", p.returncode == 0, p.stdout + p.stderr)
+
+    p = sh(baza + ["--identity", "serviceAccount:sa-example@prj-example.iam.gserviceaccount.com"], cwd=ROOT, env=env)
+    check("preflight: ISTNIEJACE konto serwisowe przechodzi", p.returncode == 0, p.stdout + p.stderr)
+
+    # NEGATYW — to jest ten defekt: adres poprawny skladniowo, konta nie ma. Bramka OPA na ksztalcie tego
+    # nie zlapie, a ACM odrzuca CALA zmiane dopiero przy apply (`invalid or non-existent`, #1904).
+    p = sh(baza + ["--identity", "serviceAccount:literowka@prj-example.iam.gserviceaccount.com"], cwd=ROOT, env=env)
+    check("preflight: NIEISTNIEJACE konto serwisowe wywraca pre-flight",
+          p.returncode != 0 and "NIE ISTNIEJE" in p.stdout, p.stdout + p.stderr)
+
+    p = sh(baza + ["--identity", "sa-example@prj-example.iam.gserviceaccount.com"], cwd=ROOT, env=env)
+    check("preflight: tozsamosc bez prefiksu typu ODRZUCONA",
+          p.returncode != 0 and "prefiksu" in p.stdout, p.stdout + p.stderr)
+
+    # user:/group: NIE moga byc raportowane jako sprawdzone — istnienia nie da sie potwierdzic z GCP.
+    p = sh(baza + ["--identity", "user:example.person@example.com"], cwd=ROOT, env=env)
+    check("preflight: user:/group: jawnie NIEZWERYFIKOWANE, nie 'OK'",
+          p.returncode == 0 and "Workspace Directory API" in p.stdout and "UWAGA" in p.stdout,
+          p.stdout + p.stderr)
+
+
 # --------------------------------------------------------------------- workflows
 def test_workflows() -> None:
     print("\n== workflows ==")
@@ -734,6 +1287,23 @@ def test_schemas() -> None:
         p = sh(["check-jsonschema", "--schemafile", schema, *files], cwd=ROOT)
         check(f"schema {pathlib.Path(schema).stem} akceptuje przyklady", p.returncode == 0, p.stdout[-500:])
 
+    # Furtka `control_plane_exception` musi przejść PRZEZ SCHEMĘ, bo validate.yml sprawdza schematy ZANIM
+    # uruchomi reguły OPA (`additionalProperties: false` odrzuciłoby ją wcześniej). Gdyby jej tam brakło,
+    # jedyną drogą przy realnej potrzebie byłoby usunięcie projektu z control_plane_projects — czyli
+    # rozbrojenie bramki dla wszystkich członków naraz.
+    czlonek = yaml.safe_load((ROOT / "perimeter/members/example-division-prj-example-vertex-dev.yaml").read_text())
+    czlonek["control_plane_exception"] = {
+        "justification": "stan Terraform przeniesiony poza perimetr, apply czyta go spoza granicy"}
+    (ROOT / "czlonek-wyjatek.yaml").write_text(yaml.safe_dump(czlonek, sort_keys=False, allow_unicode=True))
+    p = sh(["check-jsonschema", "--schemafile", "schemas/member.schema.json", "czlonek-wyjatek.yaml"], cwd=ROOT)
+    check("schema czlonka AKCEPTUJE control_plane_exception", p.returncode == 0, p.stdout[-400:])
+
+    # NEGATYW do powyższego: bez progu długości furtka degeneruje się do „ok" i przestaje być decyzją.
+    czlonek["control_plane_exception"] = {"justification": "ok"}
+    (ROOT / "czlonek-wyjatek-krotki.yaml").write_text(yaml.safe_dump(czlonek, sort_keys=False, allow_unicode=True))
+    p = sh(["check-jsonschema", "--schemafile", "schemas/member.schema.json", "czlonek-wyjatek-krotki.yaml"], cwd=ROOT)
+    check("schema czlonka ODRZUCA wyjatek bez uzasadnienia (min. 20 znakow)", p.returncode != 0, p.stdout[-400:])
+
 
 # ----------------------------------------------------------------- samodzielnosc materialu
 def test_samodzielnosc() -> None:
@@ -784,6 +1354,8 @@ def main() -> int:
     test_terraform()
     test_iam_bootstrap()
     test_contract()
+    test_kontrakt_dwie_publikacje()
+    test_przyklad_repo_dywizji()
     test_monitoring()
     test_brownfield()
     test_external_egress_and_guard()
@@ -791,6 +1363,8 @@ def main() -> int:
     test_lint_and_pinning()
     test_rego()
     test_tools()
+    test_preflight()
+    test_eksperyment_wyscigu()
     test_workflows()
     test_schemas()
 

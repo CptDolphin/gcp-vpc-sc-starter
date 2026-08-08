@@ -50,6 +50,40 @@ vpc_accessible_services:
   enable_restriction: true
   same_as_restricted: true
 
+# Projekty PŁASZCZYZNY STEROWANIA — te, w których leży maszyneria zarządzająca tym perimetrem.
+# Bramka OPA (onboarding.rego) odrzuca każdy plik członka wskazujący projekt z tej listy.
+#
+# DLACZEGO ta lista istnieje: to JEDYNY tryb awarii tego repozytorium, którego `git revert` NIE COFA.
+# Bucket stanu Terraform leży w projekcie administracyjnym perimetru. Gdy ten projekt trafi do konfiguracji
+# EGZEKWOWANEJ, a `storage.googleapis.com` jest w restricted_services, konto apply traci dostęp do WŁASNEGO
+# stanu — pipeline woła z GitHub Actions, czyli SPOZA granicy. Rewert wniosku nie pomaga, bo apply rewertu
+# też potrzebuje stanu. Z tej pętli wychodzi wyłącznie człowiek z uprawnieniami org-level, ręcznie na żywej
+# polityce (docs/3-runbook-promocja-i-break-glass.md). Każdą inną złą zmianę cofa `git revert` + apply.
+#
+# CO TU WPISAĆ — project_id albo numer projektu, numer ZAWSZE w cudzysłowach (patrz niżej):
+#   * projekt bucketa STANU Terraform (contract.state_bucket, backend w terraform/versions.tf),
+#   * projekt bucketa KONTRAKTÓW (contract.bucket),
+#   * projekt MONITORINGU perimetru (monitoring.project_id),
+#   * każdy kolejny projekt, bez którego pipeline nie umie się wykonać ANI naprawić.
+#
+# Numer w cudzysłowach, bo YAML bez nich daje liczbę, a `project_number` w pliku członka jest zawsze
+# stringiem — porównanie nigdy by nie trafiło i bramka wyglądałaby na uzbrojoną, nie łapiąc niczego.
+# Sam typ pilnują dwie warstwy: schema (`type: string`) i osobna reguła OPA, bo cichy no-op guardu jest
+# gorszy od jego braku.
+#
+# Pusta lista jest DOPUSZCZALNA i znaczy „w tej organizacji nie ma takich projektów". Sekcja jest za to
+# w schemacie WYMAGANA: brak sekcji i pusta lista dają ten sam skutek, więc różnicę między „zdecydowaliśmy"
+# a „nikt o tym nie pomyślał" musi wymusić schema, a nie pamięć autora.
+#
+# Gdy wciągnięcie takiego projektu jest naprawdę zamierzone (np. stan przeniesiony poza perimetr), NIE
+# usuwaj go z tej listy — użyj pola `control_plane_exception` w pliku członka. Usunięcie z listy wygląda
+# w diffie jak sprzątanie; jawny wyjątek z uzasadnieniem wygląda na to, czym jest.
+control_plane_projects: []
+# Przykład wypełnionej listy:
+# control_plane_projects:
+#   - prj-example-vpcsc-admin
+#   - "123456789012"
+
 # Usługi, dla których Access Context Manager NIE PUBLIKUJE listy wspieranych metod — sprawdź komendą
 # `gcloud access-context-manager supported-services describe <usluga>`: pole `supportedMethods` jest puste.
 # Dla nich `methods: ["*"]` w profilu jest JEDYNĄ wartością, jaką API przyjmuje; wypisanie metod jawnie

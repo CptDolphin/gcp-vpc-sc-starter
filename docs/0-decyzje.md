@@ -167,10 +167,25 @@ członek dostaje warianty dry-run, a członek ze `stage: enforced` **dodatkowo**
 realny diff; usunięcie pliku to czysty destroy jednego zasobu; równoległe wnioski nie kolidują w tym samym bloku
 HCL. Miarą sukcesu tej decyzji jest to, że `plan` w PR pokazuje wyłącznie zasoby danego członka.
 
-**Dlaczego single-flight.** API modyfikuje politykę jako całość (read-modify-write), więc dwa równoległe apply
-ryzykują nadpisanie się nawzajem. Przy granicy bezpieczeństwa „zwykle działa" nie jest gwarancją. Rozstrzygający
-eksperyment jest w [`experiments/race-two-states/`](../experiments/race-two-states/README.md) — uruchom go, zanim
-ktoś podejmie tę decyzję na podstawie opinii.
+**Dlaczego single-flight — uzasadnienie SKORYGOWANE pomiarem (2026-08-07).** Pierwotnie stało tu, że dwa
+równoległe apply „nadpisują się nawzajem, a w logach widać dwa poprawne `update`". **To jest nieprawda —
+zdanie zostało obalone pomiarem i nie należy go powtarzać w rozmowie o architekturze.**
+
+Access Context Manager ma **optymistyczną kontrolę współbieżności na eTagach**. Przy nałożeniu w czasie
+przegrany apply pada GŁOŚNO — `Error 400: The eTag provided '…' does not match the eTag` — a reguła zwycięzcy
+zostaje. Przy przebiegu bez nałożenia oba kończą się `rc=0` i obie reguły są obecne. **Nic nie znika po cichu.**
+
+Single-flight zostaje słuszny, ale argumentem jest **niezawodność, nie cicha utrata danych**: bez niego
+~80-100% równoległych apply kończy się błędem, czyli platforma, w której co drugi merge losowo pada. Różnica
+jest praktyczna, a nie akademicka — **przy eTagu retry pomaga**, przy cichej utracie by nie pomógł. Gdyby
+utrata była cicha, samo `concurrency` też by nie wystarczyło: trzeba by weryfikować stan po każdym apply.
+
+Skąd korekta: eksperyment [`experiments/race-two-states/`](../experiments/race-two-states/README.md) był
+**zepsuty w sposób, który zawsze potwierdzał tezę** — używał fikcyjnych kont, które ACM odrzuca, więc oba
+applye padały, a werdykt nie odróżniał „apply padł" od „reguła zniknęła". Po podmianie na realne tożsamości:
+5/5 przebiegów = konflikt eTagu, zero cichych utrat. Eksperyment jest dziś sparametryzowany tożsamościami
+i rozróżnia trzy wyniki — uruchom go, zanim ktoś podejmie tę decyzję na podstawie czyjejkolwiek opinii,
+łącznie z tą zapisaną wyżej.
 
 **Dlaczego `ignore_changes` jest obowiązkowe.** Bez tego szkielet i zasoby per-członek biją się o te same listy:
 każdy apply usuwa to, co dodał poprzedni — flapping granicy bezpieczeństwa. Konsekwencja do zapamiętania: dopisanie
@@ -222,20 +237,43 @@ fikcyjne, przestaje być czytane — a to ono odpowiada na pytanie „na jakiej 
 
 ## DEC-8 — Kontrakt zamiast dostępu do repozytorium
 
-**Decyzja.** Repozytorium perimetru publikuje **kontrakt**: wąski JSON (~4 KB) w dedykowanym buckecie, generowany
-przy każdym apply. Zawiera nazwę perimetru, `restricted_services`, parametry okna onboardingu, **nazwy** access
+**Decyzja.** Repozytorium perimetru publikuje **kontrakt**: wąski JSON (~4 KB) generowany przy każdym apply
+i wystawiany w **dwóch miejscach naraz** — jako obiekt w dedykowanym buckecie (konsumenci maszynowi spoza
+GitHuba) i jako **asset release'u `contract`** w repozytorium perimetru (repozytoria dywizji). Zawiera nazwę
+perimetru, `restricted_services`, parametry okna onboardingu, **nazwy** access
 levels, katalog profili (nazwa, ryzyko, opis, nazwy parametrów), mapowanie repo→projekty i listę członków
 ograniczoną do trójki `zespół/projekt/etap`. **Nie zawiera** ani jednej tożsamości, ani jednego zakresu IP, ani
 jednej reguły. Bramki jadą osobno, jako artefakt release'u (`schemas/` + `policy/` + skrypt walidujący) — to reguły,
 nie dane.
+
+**Dlaczego DWA miejsca, a nie sam bucket.** Sam bucket kosztował dywizję tożsamość w GCP: federację WIF, konto
+serwisowe i grant `roles/storage.objectViewer` na prefiksie — po to, żeby przeczytać 4 KB JSON-a. Przy trzydziestu
+dywizjach to trzydzieści grantów, a zdanie „zespół nie dostaje żadnych uprawnień w GCP" przestawało być faktem
+dokładnie w tym miejscu. Asset release'u pobiera się tym samym tokenem GitHuba, którym dywizja i tak pobiera
+paczkę bramek (`contents: read`) — druga droga **nie dokłada ani jednego uprawnienia po żadnej ze stron**.
+Bucket zostaje, bo konsument spoza GitHuba (job w GCP, skrypt operacyjny) nie ma jak sięgnąć po release.
+
+**Niezbywalne: obie publikacje wychodzą z JEDNEGO kroku apply.** Bajty assetu to output `contract_json`, czyli
+atrybut zasobu `google_storage_bucket_object.contract` zapisanego przez ten sam apply — nie drugie wyliczenie
+`jsonencode(...)`. Dwa rendery mogłyby się rozjechać; jeden render nie ma z czym. Krok dodatkowo porównuje md5
+pliku wgrywanego do release'u z sumą, którą **GCS policzył** z obiektu w buckecie — czyli patrzy na drugą stronę
+publikacji, nie sam na siebie. Odrzucone: publikacja w `publish-gates.yml` (inny wyzwalacz = gwarantowany
+rozjazd) i osobny job `needs: apply` (zielony apply z czerwoną publikacją zostawia rozjazd na stałe).
+
+**Kontrakt jest jedyną rzeczą w tym łańcuchu, której NIE WOLNO przypinać.** Bramki są regułami — pin daje
+powtarzalną walidację. Kontrakt jest stanem świata: przypięty pokazuje profile i access levels, których już nie
+ma, czyli daje u dywizji zielono na wejściu, które repo perimetru odrzuci. Stąd ruchomy tag `contract` po jednej
+stronie i `Cache-Control: no-store` po drugiej.
 
 **Cztery własności, których nie wolno stracić.**
 1. **Pola wypisane jawnie, pole po polu.** Nigdy `jsonencode(<coś zbiorczego>)` — jedna taka linia zamienia kontrakt
    w drugą kopię stanu. Egzekwowane testem w selfteście.
 2. **Kontrakt trafia do INNEGO bucketa niż stan.** Wspólny bucket oznacza, że jeden błąd w warunku IAM odsłania
    state, a state to pełna mapa granicy. Egzekwowane `precondition` w `contract.tf`.
-3. **Dwa rozłączne ACL:** writer = konto apply na prefiksie kontraktu; reader = grupy zespołów, read-only.
-   Konsument nie może podmienić danych, którym ufa kolejny konsument.
+3. **Dwa rozłączne ACL:** writer = konto apply na prefiksie kontraktu; reader = konsumenci maszynowi spoza
+   GitHuba, read-only. Konsument nie może podmienić danych, którym ufa kolejny konsument. Po stronie GitHuba
+   tę samą rozłączność daje sam model uprawnień: `contents: read` u dywizji, `contents: write` wyłącznie
+   w jobie apply.
 4. **Kontrakt jest informacją, nie źródłem decyzji.** Reguła sprawdzająca, czy repozytorium może wnioskować o dany
    projekt, czyta plik **z repo**, nie z kontraktu. Gdyby decyzja zależała od kontraktu, wystarczyłoby go podmienić.
 
@@ -255,3 +293,9 @@ snapshotu stanu. Rekomendacja z dokumentacji brzmi — publikuj dane do konsumpc
   maszynowo czytelnych, nie tabelki.
 - *Publikowanie kontraktu do Secret Managera.* Kontrakt nie jest sekretem; jest publiczną-wewnętrznie listą
   interfejsów, a Secret Manager dokłada rotację i limity, których nie potrzebuje.
+- *Tylko asset release'u, bez bucketa.* Kusi jako uproszczenie („skoro dywizje i tak czytają z GitHuba"), ale
+  odcina konsumenta, który GitHuba nie ma: job w GCP, skrypt operacyjny, hurtownia. Kopia w buckecie nic nie
+  kosztuje, dopóki obie powstają z jednego kroku.
+- *Osobny workflow publikujący asset po apply.* Wygląda na czystszy podział odpowiedzialności, a jest dokładnie
+  tym trybem awarii, którego unikamy: drugi wyzwalacz, drugi odczyt stanu i cicha rozbieżność dwóch kopii,
+  której konsument nie ma jak zauważyć.

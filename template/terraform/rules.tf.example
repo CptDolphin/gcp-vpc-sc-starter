@@ -35,6 +35,12 @@ resource "google_access_context_manager_service_perimeter_dry_run_ingress_policy
       }
     }
   }
+
+  # Reguła bierze access level po NAZWIE (string z YAML), a nie przez adres zasobu, więc Terraform nie widzi
+  # tu żadnej zależności i przy `destroy` może skasować poziom PRZED regułą, która go referuje. API odrzuca
+  # to wprost: `you must first remove the reference`. Zmierzone na żywym ACM 2026-08-07 (#1904) — trafia
+  # każdy offboarding członka, którego reguła używa access levelu.
+  depends_on = [google_access_context_manager_access_level.level]
 }
 
 resource "google_access_context_manager_service_perimeter_ingress_policy" "rule" {
@@ -74,7 +80,12 @@ resource "google_access_context_manager_service_perimeter_ingress_policy" "rule"
 
   # Reguła egzekwowana musi zależeć od członkostwa egzekwowanego: reguła bez projektu w konfiguracji nie
   # ma czego autoryzować, a odwrotna kolejność (projekt bez reguł) odcina ruch na czas między zasobami.
-  depends_on = [google_access_context_manager_service_perimeter_resource.member]
+  # Access level — patrz komentarz przy wariancie dry-run: nazwa ze stringa nie tworzy krawędzi w grafie,
+  # więc bez tej pozycji `destroy` kasuje poziom, gdy reguła jeszcze go referuje.
+  depends_on = [
+    google_access_context_manager_service_perimeter_resource.member,
+    google_access_context_manager_access_level.level,
+  ]
 }
 
 resource "google_access_context_manager_service_perimeter_dry_run_egress_policy" "rule" {

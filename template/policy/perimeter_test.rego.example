@@ -30,6 +30,39 @@ test_empty_identities_denied if {
 	count(deny) > 0 with input as plan_with([bad])
 }
 
+# Literówki, które ACM odrzuca dopiero przy apply (`invalid or non-existent`) — każda przechodziła przez
+# wszystkie bramki startera do 2026-08-07 (Issue #1904).
+test_malformed_identity_denied if {
+	every zly in [
+		"serviceAccount:a@b.iam.gserviceaccounts.com", # domena przez „s"
+		"serviceAccount:a@b.iam.gserviceaccount", # ucięta domena
+		"serviceAccount:a-bez-domeny", # sam login
+		"a@b.iam.gserviceaccount.com", # brak prefiksu typu
+		"serviceAccount:", # pusty adres
+		"user:ktos", # user bez domeny
+	] {
+		bad := json.patch(good_rule, [{"op": "replace", "path": "/values/ingress_from/0/identities", "value": [zly]}])
+		count(deny) > 0 with input as plan_with([bad])
+	}
+}
+
+# Kształty POPRAWNE muszą przejść. Bramka odrzucająca konto domyślne albo federację blokuje onboarding,
+# a to jest droższe niż literówka wykryta przy apply — stąd świadomie luźny wzorzec domeny.
+test_valid_identity_shapes_pass if {
+	every dobry in [
+		"serviceAccount:sa-example@prj-example.iam.gserviceaccount.com", # konto użytkownika
+		"serviceAccount:123456789012-compute@developer.gserviceaccount.com", # domyślne konto Compute
+		"serviceAccount:prj-example@appspot.gserviceaccount.com", # domyślne konto App Engine
+		"serviceAccount:service-123456789012@gcp-sa-aiplatform.iam.gserviceaccount.com", # konto Google
+		"user:example.person@example.com",
+		"group:grp-example-ds@example.com",
+		"principalSet://iam.googleapis.com/projects/123456789012/locations/global/workloadIdentityPools/example/*",
+	] {
+		ok := json.patch(good_rule, [{"op": "replace", "path": "/values/ingress_from/0/identities", "value": [dobry]}])
+		count(deny) == 0 with input as plan_with([ok])
+	}
+}
+
 # `*` w metodach zamienia „wywołaj predict" w „rób z tym API co chcesz".
 test_wildcard_method_denied if {
 	bad := json.patch(good_rule, [{"op": "replace", "path": "/values/ingress_to/0/operations/0/method_selectors/0/method", "value": "*"}])

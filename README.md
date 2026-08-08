@@ -19,7 +19,7 @@ Osiem decyzji, na których to stoi — wraz z odrzuconymi wariantami — jest w
 ./install.sh /sciezka/do/nowego/repo          # rozpakuj wszystko
 ./install.sh /sciezka --dry-run               # tylko pokaż mapowanie nazw
 ./install.sh /sciezka --only validate.yml     # jeden plik — wdrożenie etapami
-python3 selftest/selftest.py                  # dowód, że to działa (114 testów)
+python3 selftest/selftest.py                  # dowód, że to działa (179 testów)
 ```
 
 Po rozpakowaniu podmień placeholdery (`<ORG_ID>`, `<ACCESS_POLICY_NUMBER>`, `<STATE_BUCKET>`,
@@ -37,10 +37,11 @@ i przeczytaj [`docs/1-wdrozenie.md`](docs/1-wdrozenie.md) — kolejność krokó
 | `policy/*.rego` | bramki: brak `ANY_*`, brak `method: "*"`, ingress bez access-levelu, promocja bez okna | reguła oceniana na **planie**, nie na deklaracji — plan jest tym, co zmieni granicę |
 | `terraform/tests/*.tftest.hcl` | natywne testy renderera (14 przypadków, bez credentiali) | `locals.tf` to jedyne miejsce z logiką — reszta to deklaracje, więc tu jest jedyne, co może się cicho zepsuć |
 | `policy.yaml` §`baseline_ingress` | reguły dla **każdego** członka: skanery, backup, monitoring | jako profil per-member pierwsza dywizja, która zapomni go wybrać, wypada ze skanowania w momencie promocji |
+| `policy.yaml` §`control_plane_projects` | lista projektów, w których leży maszyneria perimetru (stan Terraform, kontrakty, monitoring); bramka OPA odrzuca członka wskazującego którykolwiek z nich | **jedyny tryb awarii tego repo, którego `git revert` nie cofa**: projekt z bucketem stanu w konfiguracji egzekwowanej odcina konto apply od własnego stanu (apply woła spoza granicy), a apply rewertu też potrzebuje stanu — wyjście tylko przez człowieka z uprawnieniami org-level. Furtka `control_plane_exception` w pliku członka zamiast wyłączania bramki |
 | `tools/` | budżet atrybutów · pre-flight · weryfikacja ticketu · raport naruszeń · render członka · **zgodność baseline z żywą listą usług VPC-SC** | każdy zamyka konkretny tryb awarii (opisany w nagłówku pliku) |
 | `.github/workflows/` (10) | intake · external-intake · validate · plan · apply · drift · violations-report · expiry-sweep · break-glass · **publish-gates** | apply jest jedynym mutatorem: WIF keyless, environment z reviewerami, single-flight |
 | `contrib/` + `perimeter/contributors.yaml` | trzeci kanał wejścia: repo zespołu waliduje u siebie i prosi o PR | zespół dostaje prawo „otwórz PR", a nie `servicePerimeters.update` na organizacji (DEC-7) |
-| `terraform/contract.tf` + `publish-gates.yml` | publikuje wąski JSON (~4 KB) i paczkę bramek dla repozytoriów zespołów | submodule oddawał `members/` wszystkich dywizji i zakresy IP, żeby zwalidować jeden plik; provider nie ma `data` source dla perimetra (DEC-8) |
+| `terraform/contract.tf` + `publish-gates.yml` | publikuje wąski JSON (~4 KB) **w dwóch miejscach z jednego kroku apply** (bucket + asset release'u) i paczkę bramek | submodule oddawał `members/` wszystkich dywizji i zakresy IP, żeby zwalidować jeden plik; sam bucket kosztował dywizję tożsamość w GCP i grant IAM po to, by przeczytać 4 KB (DEC-8) |
 | `.tflint.hcl` + job `tflint` | statyczna analiza HCL: martwe zmienne, brak pinów providerów, literówki w atrybutach Google | `validate` przechodzi na konfiguracji z martwym knobem i niepinowanym providerem — jedno i drugie boli na obiekcie org-plane |
 | `tests/` + `docs/5-servicenow-intake.md` | fixture'y kanału ServiceNow (3 z 5 negatywne) + specyfikacja formularza i mapowania pól | kanał wejścia musi dać się przetestować **bez** działającej instancji ServiceNow — inaczej pierwszy test odbywa się na produkcji |
 | `.github/dependabot.yml` | aktualizacje pinów SHA akcji i lock providera | pin SHA bez mechanizmu aktualizacji to stara wersja z odznaką bezpieczeństwa |
@@ -75,6 +76,17 @@ i przeczytaj [`docs/1-wdrozenie.md`](docs/1-wdrozenie.md) — kolejność krokó
 - [`contrib/README.md`](template/contrib/README.md.example) (po rozpakowaniu: `contrib/README.md`) — instrukcja
   dla **innych repozytoriów**: co dostają w kontrakcie, jak walidują u siebie, czego nie mogą
 
+## Przykład drugiej strony granicy
+
+[`examples/division-repo/`](examples/division-repo/README.md) — **kompletne repozytorium dywizji** do
+skopiowania: jeden `vpc-sc/request.yaml`, workflow (walidacja na PR, zgłoszenie dopiero po merge) i README,
+który mówi wprost **czego zespół NIE dostaje** — konta serwisowego, stanu Terraform, wglądu w `members/`
+innych dywizji ani w zakresy IP z `access-levels/`. Jedno prawo: otworzyć PR.
+
+Ten katalog **nie jest rozpakowywany** przez `install.sh`: to materiał dla repozytorium dywizji, a `install.sh`
+buduje repozytorium perimetru — workflow przykładu stałby się tam żywym jobem wysyłającym zgłoszenie do
+samego siebie (uzasadnienie w nagłówku `install.sh`, guard w selfteście).
+
 ## Eksperymenty
 
 [`experiments/konflikty-ukladow/`](experiments/konflikty-ukladow/README.md) — ile PR-ów z dziesięciu przechodzi
@@ -88,15 +100,20 @@ sprzątanie. Uruchom, zanim ktoś podejmie decyzję na podstawie opinii — kosz
 ## Dowód, że działa
 
 `python3 selftest/selftest.py` rozpakowuje starter do katalogu tymczasowego i uruchamia na nim realne bramki —
-**114/114** przy ostatnim przebiegu: `terraform fmt`/`validate`/**`test`** (14 przypadków renderera),
-`conftest verify` (35 testów reguł), **`tflint`** na obu stackach, narzędzia na realnych deklaracjach
-(w tym cztery fixture'y kanału ticketowego), `actionlint` na dziesięciu workflow, guardy na treść stacku IAM,
-kontraktu, nazwy obiektów ACM i pinowanie akcji.
+**179/179** przy ostatnim przebiegu: `terraform fmt`/`validate`/**`test`** (14 przypadków renderera),
+`conftest verify` (47 testów reguł), **`tflint`** na obu stackach, narzędzia na realnych deklaracjach
+(w tym cztery fixture'y kanału ticketowego), `actionlint` na dziesięciu workflow **i na workflow przykładu
+dywizji**, realny `validate-local.sh` uruchomiony na `examples/division-repo/vpc-sc/request.yaml`, guardy
+na treść stacku IAM, kontraktu, nazwy obiektów ACM i pinowanie akcji.
 
 Testy są w połowie **negatywne** i to jest sedno: sprawdzają, że bramka **PADA** na złym wejściu — promocja
 przed oknem obserwacji, baseline bez `aiplatform`, plan z `ANY_IDENTITY`/`method: "*"`, ticket bez
-zatwierdzenia, podmiana projektu w payloadzie, przekroczony budżet atrybutów. Bramka, która nigdy nie
-odrzuca, przechodzi każdy test pozytywny i nie chroni niczego.
+zatwierdzenia, podmiana projektu w payloadzie, przekroczony budżet atrybutów, projekt płaszczyzny sterowania
+wciągany do perimetru. Bramka, która nigdy nie odrzuca, przechodzi każdy test pozytywny i nie chroni niczego.
+
+Każdy negatyw ma **parę anty-tautologiczną**: obok „członek z listy `control_plane_projects` jest odrzucany"
+stoi „zwykły projekt przechodzi przy **niepustej** liście". Bez tej drugiej asercji reguła odrzucająca
+wszystko wyglądałaby na działającą.
 
 Czego selftest **nie** sprawdza: mechaniki GitHuba (environments, OIDC, required reviewers) ani realnego API
 Google — pierwszą warstwę pokrywa `actionlint`, drugą dopiero pierwszy apply na środowisku docelowym.

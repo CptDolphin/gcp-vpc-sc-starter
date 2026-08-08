@@ -1,0 +1,67 @@
+# JEDYNY plik, który pisze zespół dywizji. Wszystko poniżej to rzeczy, które zespół WIE o sobie:
+# jaki ma projekt, kto jest jego właścicielem i czego potrzebuje. Ani jedno pole nie opisuje tego,
+# JAK granica ma być zbudowana — od tego są profile po stronie perimetru.
+#
+# Nazwa pliku i katalog są konwencją tego repozytorium, nie wymogiem perimetru — workflow przekazuje
+# ścieżkę jawnie (`member-file`). Jeden plik na projekt: diff w PR pokazuje wtedy dokładnie tyle,
+# ile zmienia wniosek, a dwa równoległe wnioski z tej samej dywizji nie konfliktują.
+
+schema_version: 1
+
+# Musi zgadzać się z dywizją przypisaną do TEGO repozytorium w `perimeter/contributors.yaml`.
+# Rozjazd = odrzucenie: zgłaszanie w cudzym imieniu jest wykluczane po tamtej stronie, nie po tej.
+division: example-division
+
+# Projekt, który ma wejść do perimetru. Musi być na liście `allowed_projects` tego repozytorium
+# (`perimeter/contributors.yaml`). Tej listy NIE trzymamy u siebie — patrz README §„Czego nie dostajesz".
+project_id: prj-example-vertex-prod
+
+# Access Context Manager adresuje projekty NUMEREM, nie ID. String, nie liczba: numery projektów
+# przekraczają bezpieczny zakres integerów w części parserów YAML/JSON i cicho tracą ostatnią cyfrę.
+# Literówka tutaj dodałaby do perimetru CUDZY projekt — pre-flight po tamtej stronie sprawdza,
+# że numer odpowiada temu `project_id`.
+project_number: "123456789012"
+
+# Grupa właścicielska. Do niej idzie pytanie, gdy zgłoszenie z tego repo wygląda podejrzanie,
+# i do niej trafia raport naruszeń z okna obserwacji.
+owner_group: grp-example-division-cloud@example.com
+
+# Kto po TWOJEJ stronie zdecydował, że ten projekt ma wejść do perimetru. To nie jest approval
+# sieci ani security — te dwa dzieją się w PR-ze po tamtej stronie i nie ma ich jak zadeklarować u siebie.
+approved_by: lead-example-division@example.com
+
+# CZTERECH PÓL NIE MA TU CELOWO — i to jest najważniejsza rzecz w tym pliku.
+#
+#   stage           — etap onboardingu (`dry-run` / `enforced`). Ustawia go KOD po stronie perimetru
+#                     i zawsze na `dry-run`. Gdyby wnioskodawca mógł podać `enforced`, ominąłby całą
+#                     dwustopniowość onboardingu jednym polem: projekt trafiłby od razu do konfiguracji
+#                     egzekwowanej i stracił ruch w minutę po merge'u, zanim ktokolwiek zmierzył jego
+#                     przepływy. Promocja jest osobnym PR-em z człowiekiem, po czystym oknie obserwacji.
+#   dry_run_since   — data wejścia do okna obserwacji. Też ustawia ją druga strona, i to nie z uprzejmości:
+#                     data wsteczna („2020-01-01") sprawia, że bramka promocji liczy okno jako dawno
+#                     minione, więc 14 dni pomiaru, dla których cały ten mechanizm istnieje, znika.
+#                     Pole opisujące czas pomiaru nie może pochodzić od mierzonego.
+#   review_by       — data wygaśnięcia wpisu; wylicza ją perimeter z tej samej daty co wyżej.
+#   change_ref      — referencja do zmiany (`pr:ORG/repo#123`). Wpisuje ją ACTION na podstawie zdarzenia,
+#                     nie ten plik: samodzielnie zadeklarowana referencja niczego nie dowodzi, a repo
+#                     perimetru i tak konfrontuje ją z repozytorium, które realnie wysłało zgłoszenie.
+#
+# Wniosek jest więc WĘŻSZY niż plik członka w repo perimetru. To celowe: pola, których nie kontrolujesz,
+# wpisywane „żeby przeszło", są dokładnie tymi, których nikt potem nie czyta.
+
+# Nie wymyślasz reguł ingress/egress — wybierasz PROFIL z katalogu i wypełniasz jego parametry.
+# Lista dostępnych profili i wymaganych przez nie parametrów jest w kontrakcie:
+#     gh release download contract --repo ORG/gcp-vpc-sc --pattern contract.json --clobber
+#     jq '.profiles' contract.json
+# Nie ma profilu na twój przypadek? To rozmowa z zespołem sieciowym — trzeci taki sam wyjątek staje się
+# profilem, a nie czwartym wyjątkiem.
+profiles:
+  - name: vertex-online-serving
+    params:
+      # Kto wywołuje predykcję. Tożsamości wypisane imiennie — nie ma tu wariantu „każdy z projektu".
+      caller_identities:
+        - "serviceAccount:sa-scoring@prj-example-app-prod.iam.gserviceaccount.com"
+      # NAZWA access levelu, nie jego treść. Zakresy IP i polityki urządzeń zostają w repo perimetru;
+      # ty wskazujesz warunek kontekstu, nie znasz jego definicji (`jq '.access_levels' contract.json`).
+      access_levels:
+        - corp_network

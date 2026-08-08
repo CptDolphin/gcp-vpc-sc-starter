@@ -4,8 +4,10 @@
 # Two things make it safe, and both are load-bearing:
 #   * environment `perimeter-apply` with required reviewers — a merged PR still does not apply until a human
 #     approves the run. This gate lives in GitHub, independent of CODEOWNERS.
-#   * single-flight concurrency — Access Context Manager modifies the org-level policy as a whole
-#     (read-modify-write), so two parallel applies can silently overwrite each other.
+#   * single-flight concurrency — Access Context Manager modifies the org-level policy as a whole and guards
+#     it with an eTag, so two parallel applies do not corrupt anything silently: the loser fails with
+#     `Error 400: The eTag provided ... does not match`. The reason to serialize is RELIABILITY — without it
+#     roughly every overlapping run fails and has to be retried by hand (measured, see DEC-6).
 
 name: apply
 
@@ -18,7 +20,10 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  # `write`, nie `read`: ten job publikuje kontrakt także jako asset release'u (krok „apply + publikacja").
+  # Zakres jest nadal wąski — token workflowa działa wyłącznie na TYM repozytorium; perimetr zmienia się
+  # przez WIF, nie przez ten token.
+  contents: write
   id-token: write
 
 # cancel-in-progress MUST stay false: cancelling an apply mid-flight leaves the policy half-written.
@@ -65,15 +70,80 @@ jobs:
       - name: policy gates on the plan
         run: conftest test --policy policy --namespace vpcsc.perimeter terraform/plan.json
 
-      - name: apply
-        run: terraform -chdir=terraform apply -input=false -auto-approve tfplan.binary
+      # JEDEN KROK, DWIE PUBLIKACJE — i to jest sedno tej konstrukcji, nie oszczędność linijek.
+      #
+      # Kontrakt trafia w dwa miejsca: do bucketa (robi to sam `terraform apply`, zasób
+      # `google_storage_bucket_object.contract`) oraz jako asset release'u `contract` w tym repozytorium.
+      # Ta druga droga istnieje po to, żeby repozytorium dywizji NIE potrzebowało tożsamości w GCP —
+      # pobiera kontrakt tym samym tokenem GitHuba, którym pobiera paczkę bramek.
+      #
+      # DLACZEGO to jest JEDEN step, a nie drugi job albo osobny workflow: dwie publikacje w dwóch krokach
+      # mają dwa wyzwalacze i dwa wejścia, więc prędzej czy później opublikują DWIE RÓŻNE treści — a konsument
+      # nie ma jak zauważyć, że czyta starszą. Tutaj bajty assetu to output `contract_json`, czyli atrybut
+      # zasobu ZAPISANEGO PRZEZ TEN APPLY: nie ma drugiego renderu, więc nie ma czego rozjechać.
+      # Odrzucone warianty:
+      #   * publikacja w `publish-gates.yml` — ten workflow odpala się na zmianę `schemas/`+`policy/`, czyli
+      #     w innych momentach niż apply; rozjazd byłby wtedy gwarantowany, nie możliwy;
+      #   * osobny job `needs: apply` — jeden stan świata, ale dwa uruchomienia i dwa odczyty stanu; zielony
+      #     apply z czerwoną publikacją zostawia rozjazd na stałe i wygląda w historii na „prawie sukces".
+      - name: apply + publikacja kontraktu (jeden krok - patrz komentarz)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          terraform -chdir=terraform apply -input=false -auto-approve tfplan.binary
+
+          # Treść bierzemy z OUTPUTU tego apply. Lokalny plik zrenderowany obok byłby TRZECIĄ kopią.
+          terraform -chdir=terraform output -json contract_json > contract.tfout.json
+          terraform -chdir=terraform output -json contract_md5 > contract.md5.json
+
+          python3 - <<'PY'
+          import base64, hashlib, json, pathlib
+
+          tresc = json.loads(pathlib.Path("contract.tfout.json").read_text())
+          w_buckecie = json.loads(pathlib.Path("contract.md5.json").read_text())
+
+          # Sekcja `contract` jest opcjonalna — brak zasobu to null, nie awaria.
+          if tresc is None:
+              print("policy.yaml nie ma sekcji `contract` - nie ma czego publikowac")
+              raise SystemExit(0)
+
+          pathlib.Path("contract.json").write_text(tresc)
+
+          # Porownanie z suma POLICZONA PRZEZ GCS z obiektu, ktory realnie wyladowal w buckecie. Wlasna suma
+          # z tej samej zmiennej bylaby tautologia: zgadzalaby sie takze wtedy, gdyby do bucketa nie poszlo nic.
+          do_release = base64.b64encode(hashlib.md5(tresc.encode()).digest()).decode()
+          if do_release != w_buckecie:
+              raise SystemExit(
+                  f"::error::kontrakt w buckecie ({w_buckecie}) != kontrakt do release'u ({do_release})")
+          print(f"md5 zgodne po obu stronach: {do_release}")
+          PY
+
+          if [ ! -f contract.json ]; then
+            echo "Kontrakt wyłączony w policy.yaml — publikacja assetu pominięta." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # Tag `contract` jest RUCHOMY i to jest zamierzone: konsument potrzebuje AKTUALNEGO kontraktu.
+          # Przypięty stary kontrakt oznacza walidację wobec profili, których już nie ma — ten sam powód,
+          # dla którego obiekt w buckecie ma `Cache-Control: no-store`. Paczka bramek jest odwrotnie:
+          # to REGUŁY, więc tam pinowanie wersji ma sens (`publish-gates.yml`).
+          gh release view contract >/dev/null 2>&1 \
+            || gh release create contract --title "Kontrakt perimetru (zawsze aktualny)" \
+                 --notes "Asset contract.json podmieniany przy KAZDYM apply, razem z obiektem w buckecie kontraktow - obie publikacje wychodza z jednego kroku. Pobranie: gh release download contract --pattern contract.json. NIE przypinaj wersji: kontrakt opisuje STAN, nie reguly."
+          gh release upload contract contract.json --clobber
+
+          echo "Kontrakt opublikowany: bucket + asset release'u \`contract\`." >> "$GITHUB_STEP_SUMMARY"
 
       # Done means measured. The outputs say who is really enforced now — paste-able into the ticket.
       - name: report what is live
         run: |
+          # `contract_json` wycięty z podsumowania: to ~4 KB w JEDNEJ linii, które wypchnęłoby stąd listę
+          # członków — a fakt jego publikacji potwierdza (albo wywraca) krok wyżej, nie ten raport.
           {
             echo "### Perimeter after apply"
             echo '```json'
-            terraform -chdir=terraform output -json | head -60
+            terraform -chdir=terraform output -json \
+              | python3 -c 'import json,sys; d=json.load(sys.stdin); d.pop("contract_json", None); print(json.dumps(d, indent=2))' \
+              | head -60
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

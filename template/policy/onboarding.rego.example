@@ -85,6 +85,101 @@ deny contains msg if {
 	)
 }
 
+# --- projekty płaszczyzny sterowania (anty-samo-zablokowanie) ---------------------------------------
+#
+# To jest bramka na JEDYNY tryb awarii tego repozytorium, którego `git revert` NIE COFA — i dlatego jest
+# bramką maszynową, a nie pozycją w checkliście review.
+#
+# Mechanika: bucket stanu Terraform leży w projekcie administracyjnym perimetru. Gdy ten projekt trafi do
+# konfiguracji EGZEKWOWANEJ przy `storage.googleapis.com` w restricted_services, konto apply traci dostęp do
+# WŁASNEGO stanu — woła z GitHub Actions, czyli spoza granicy. Rewert wniosku nie pomaga, bo apply rewertu
+# też potrzebuje stanu. Wyjście: człowiek z uprawnieniami org-level, ręcznie na żywej polityce.
+#
+# DLACZEGO odrzucamy na KAŻDYM etapie, a nie dopiero przy `enforced`: w dry-run wpis faktycznie niczego nie
+# blokuje, ale promocja to jednowyrazowy diff (`stage: dry-run` → `enforced`) po 14 dniach obserwacji,
+# wyglądający na rutynę. Bramka odpalająca dopiero przy promocji pozwoliłaby uzbroić pułapkę teraz
+# i rozbroiłaby się dokładnie w tym PR-ze, którego nikt nie czyta uważnie.
+#
+# DLACZEGO nie warunkujemy tego obecnością storage.googleapis.com w restricted_services: lista usług rośnie
+# osobnym PR-em i nikt wtedy nie wraca do plików członków. Bramka bezwarunkowa jest tańsza niż zależność
+# między dwoma plikami, o której trzeba pamiętać w odpowiedniej kolejności.
+deny contains msg if {
+	some name, m in input.members
+	on_control_plane_list(m)
+	not control_plane_exception_declared(m)
+	msg := sprintf(
+		"members/%s: projekt %s jest na liście control_plane_projects (policy.yaml) — po promocji do enforced konto apply straci dostęp do bucketa stanu, bo woła spoza perimetru. Rewert tego NIE cofa (apply rewertu też potrzebuje stanu), naprawa wymaga człowieka z uprawnieniami org-level. Jeśli to świadome, dodaj control_plane_exception z uzasadnieniem",
+		[name, m.project_id],
+	)
+}
+
+# Furtka musi kosztować zdanie tłumaczące, dlaczego tym razem jest bezpiecznie. Bez progu długości pole
+# degeneruje się do „ok" — a wtedy jedyna bramka przed nieodwracalną awarią przepuszcza na skrót klawiszowy.
+deny contains msg if {
+	some name, m in input.members
+	control_plane_exception_declared(m)
+	not control_plane_exception_justified(m)
+	msg := sprintf(
+		"members/%s: control_plane_exception wymaga uzasadnienia (min. 20 znaków) — napisz, gdzie leży teraz stan Terraform i skąd woła konto apply",
+		[name],
+	)
+}
+
+# Wyjątek na członku, którego NIE MA na liście, nic nie robi — i właśnie to jest problem. Gdyby wolno go było
+# trzymać „na zapas", ktoś mógłby dopisać go do wszystkich plików członków, a późniejsze rozszerzenie
+# control_plane_projects przeszłoby bez ani jednej bramki. Wyjątek ma być odpowiedzią na istniejącą blokadę,
+# nie polisą wykupioną z góry.
+deny contains msg if {
+	some name, m in input.members
+	control_plane_exception_declared(m)
+	not on_control_plane_list(m)
+	msg := sprintf(
+		"members/%s: control_plane_exception na projekcie spoza listy control_plane_projects — wyjątek trzymany „na zapas\" cicho rozbroi bramkę, gdy lista się rozszerzy. Usuń go",
+		[name],
+	)
+}
+
+# Numer projektu zapisany w YAML-u bez cudzysłowów jest liczbą, a `project_number` w pliku członka jest
+# zawsze stringiem — porównanie nigdy nie trafi. Bramka wyglądałaby na uzbrojoną i nie łapała niczego,
+# czyli byłaby gorsza od jej braku (fałszywe poczucie pokrycia). Schema łapie to samo `type: string`;
+# ta reguła jest drugą warstwą, bo cichy no-op akurat tej bramki kosztuje interwencję org-level.
+deny contains msg if {
+	some cp in object.get(input.policy, "control_plane_projects", [])
+	not is_string(cp)
+	msg := sprintf(
+		"policy.yaml control_plane_projects: wpis %v nie jest tekstem — numer projektu zapisz w cudzysłowach, inaczej ta bramka nigdy niczego nie dopasuje",
+		[cp],
+	)
+}
+
+on_control_plane_list(m) if {
+	some cp in object.get(input.policy, "control_plane_projects", [])
+	m.project_id == cp
+}
+
+# Lista przyjmuje ID albo numer — członek musi zostać złapany niezależnie od tego, którym z nich został
+# wpisany. Jedna ścieżka dopasowania byłaby bramką, którą omija się literówką w wyborze formatu.
+on_control_plane_list(m) if {
+	some cp in object.get(input.policy, "control_plane_projects", [])
+	m.project_number == cp
+}
+
+# `object.get` z sentinelem `null` zamiast `m.control_plane_exception`: odwołanie do brakującego klucza jest
+# w rego NIEZDEFINIOWANE, a wtedy `not` zachowuje się inaczej niż na wartości. Sentinel czyni ten predykat
+# totalnym — brak pola i puste pole znaczą to samo: wyjątku nie ma.
+control_plane_exception_declared(m) if {
+	object.get(m, "control_plane_exception", null) != null
+}
+
+# `is_object` PRZED odczytem uzasadnienia: gdyby ktoś wpisał tam string, `object.get` byłoby niezdefiniowane,
+# reguła wyżej by nie odpaliła i malformowany wyjątek przeszedłby jako ważny. Tu każdy kształt inny niż
+# obiekt z 20-znakowym uzasadnieniem oznacza „niedostatecznie uzasadniony" (fail-closed).
+control_plane_exception_justified(m) if {
+	exc := m.control_plane_exception
+	is_object(exc)
+	count(object.get(exc, "justification", "")) >= 20
+}
+
 # --- promocja do enforced ---------------------------------------------------------------------------
 
 # Okno obserwacji: minimum dni w dry-run. Bez tej bramki „promocja" staje się formalnością zaraz po

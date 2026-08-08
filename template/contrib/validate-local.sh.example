@@ -9,8 +9,16 @@
 # jednego swojego pliku potrzebuje tylko REGUŁ (schemas + policy, z paczki) i LISTY DOSTĘPNYCH OPCJI
 # (profile, access levels — z kontraktu). Ani jedno, ani drugie nie mówi mu, kto jest w perimetrze.
 #
+# SKĄD WZIĄĆ OBA WEJŚCIA — jednym narzędziem i jednym tokenem, bez `gcloud` i bez konta w Google Cloud:
+#
+#   gh release download --repo ORG/gcp-vpc-sc --pattern gates.tar.gz --clobber && tar -xzf gates.tar.gz
+#   gh release download contract --repo ORG/gcp-vpc-sc --pattern contract.json --clobber
 #   ./validate-local.sh --member vpc-sc/prj-example-vertex-prod.yaml \
 #       --gates ./gates --contract ./contract.json
+#
+# Kontrakt jest publikowany RÓWNIEŻ do bucketa (dla konsumentów maszynowych spoza GitHuba), z tego samego
+# kroku apply co asset — więc obie kopie są tożsame i wybór drogi jest kwestią wygody, nie aktualności.
+# Dla repozytorium dywizji droga przez release jest jedyną, która nie wymaga tożsamości w GCP.
 set -euo pipefail
 
 MEMBER="" GATES="./gates" CONTRACT="./contract.json"
@@ -26,18 +34,63 @@ done
 [ -n "$MEMBER" ] || { echo "użycie: $0 --member <plik.yaml> [--gates <kat>] [--contract <plik>]" >&2; exit 2; }
 [ -f "$MEMBER" ] || { echo "nie ma pliku: $MEMBER" >&2; exit 1; }
 [ -d "$GATES/schemas" ] || { echo "brak $GATES/schemas — pobierz paczkę bramek (release gates-*)" >&2; exit 1; }
-[ -f "$CONTRACT" ] || { echo "brak kontraktu: $CONTRACT — pobierz z bucketa kontraktów" >&2; exit 1; }
+[ -f "$CONTRACT" ] || { echo "brak kontraktu: $CONTRACT — pobierz: gh release download contract --repo <ORG>/<REPO> --pattern contract.json" >&2; exit 1; }
 
 fail=0
 note() { printf '  %-6s %s\n' "$1" "$2"; }
 problem() { note "BŁĄD" "$1"; fail=$((fail + 1)); }
 
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+
+# Deklaracja dywizji NIE JEST plikiem członka — jest od niego WĘŻSZA. Cztery pola (`stage`, `dry_run_since`,
+# `review_by`, `change_ref`) wypełnia druga strona granicy: `stage` zawsze na `dry-run`, daty okna obserwacji
+# z dnia przyjęcia wniosku, referencję zmiany ze zdarzenia, które ją przyniosło. Walidujemy więc KOPIĘ
+# uzupełnioną dokładnie tak, jak uzupełni ją kanał wejściowy.
+#
+# DLACZEGO nie żądać tych pól od zespołu: musiałby wpisać u siebie wartości, których nie kontroluje —
+# a wymyślone pola to dokładnie te, których nikt potem nie czyta. Przy `dry_run_since` jest gorzej niż
+# nieporządek: data wsteczna od wnioskodawcy sprawia, że bramka promocji liczy okno obserwacji jako dawno
+# minione, czyli kasuje pomiar, dla którego dwustopniowy onboarding istnieje.
+#
+# DLACZEGO to NIE jest poluzowanie schematu: plik członka po tamtej stronie nadal MUSI mieć komplet pól
+# i nadal sprawdza go TA SAMA schema. Zmienia się wyłącznie to, KTO je wpisuje.
+PELNY="$work/member.yaml"
+python3 - "$MEMBER" "$PELNY" <<'UZUPELNIJ'
+import datetime, os, sys, yaml
+
+REVIEW_AFTER_DAYS = 180  # ta sama stała co w tools/render_member.py po stronie perimetru
+
+deklaracja = yaml.safe_load(open(sys.argv[1])) or {}
+dzis = datetime.date.today()
+deklaracja["stage"] = "dry-run"  # nadpisujemy, nie setdefault: etap nigdy nie pochodzi od wnioskodawcy
+deklaracja.setdefault("dry_run_since", dzis.isoformat())
+deklaracja.setdefault("review_by", (dzis + datetime.timedelta(days=REVIEW_AFTER_DAYS)).isoformat())
+deklaracja.setdefault("exceptions", [])
+
+# `change_ref` W KSZTAŁCIE, jaki nada mu action — bo z tego pola reguła onboardingu wyciąga NAZWĘ
+# REPOZYTORIUM i sprawdza, czy wolno mu wnioskować o ten projekt. Bez odtworzenia kształtu ta reguła
+# nie miałaby czego ocenić i lokalna walidacja byłaby słabsza od tej po drugiej stronie.
+#
+# Poza CI zmiennej nie ma — i wtedy NIE zmyślamy referencji `pr:`. Zmyślona przepuszczałaby regułę
+# „czy to repozytorium może" na podstawie repozytorium, którym tylko twierdzimy, że jesteśmy. Wariant
+# `manual:` mówi wprost „pochodzenie nieznane", a rozstrzygnięcie zostawia pipeline'owi (i tak samo
+# repo perimetru, które konfrontuje referencję z nadawcą dispatcha).
+repo = os.environ.get("GITHUB_REPOSITORY", "")
+if repo:
+    deklaracja.setdefault("change_ref", f"pr:{repo}#0")
+else:
+    deklaracja.setdefault("change_ref", "manual:walidacja lokalna poza pipeline'em, pochodzenie nieznane")
+
+yaml.safe_dump(deklaracja, open(sys.argv[2], "w"), sort_keys=False, allow_unicode=True)
+UZUPELNIJ
+
 echo "== schema =="
-check-jsonschema --schemafile "$GATES/schemas/member.schema.json" "$MEMBER" && note "OK" "struktura pliku"
+check-jsonschema --schemafile "$GATES/schemas/member.schema.json" "$PELNY" && note "OK" "struktura pliku"
 
 echo "== zgodność z kontraktem =="
 # Te trzy sprawdzenia dają zespołowi odpowiedź „czy to w ogóle ma sens" bez żadnego dostępu do perimetru.
-python3 - "$MEMBER" "$CONTRACT" <<'PY' || fail=$((fail + 1))
+python3 - "$PELNY" "$CONTRACT" <<'PY' || fail=$((fail + 1))
 import json, sys, yaml
 
 member = yaml.safe_load(open(sys.argv[1]))
@@ -107,9 +160,8 @@ PY
 echo "== reguły onboardingu (rego) =="
 # Reguły potrzebują kontekstu (baseline, katalog profili, data), którego zespół nie ma. Budujemy minimalne
 # wejście z kontraktu — to wystarcza dla reguł o kształcie i czasie, a nie wymaga dostępu do repo perimetru.
-work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
-python3 - "$MEMBER" "$CONTRACT" > "$work/declarations.json" <<'PY'
+# Wejściem jest uzupełniona kopia: reguły oceniają członka, jakim on BĘDZIE po tamtej stronie granicy.
+python3 - "$PELNY" "$CONTRACT" > "$work/declarations.json" <<'PY'
 import datetime, json, sys, yaml
 member = yaml.safe_load(open(sys.argv[1]))
 contract = json.load(open(sys.argv[2]))

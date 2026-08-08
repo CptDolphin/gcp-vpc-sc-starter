@@ -1,14 +1,22 @@
 # contrib/action.yml
 # Composite action used BY A DIVISION'S OWN REPOSITORY to request a perimeter change.
 #
-# The division's repository never applies anything and needs NO permission in Access Context Manager.
-# It needs exactly two things: read on one JSON file (the contract) and a token that can open a PR.
+# The division's repository never applies anything and needs NO permission in Access Context Manager —
+# and, since the contract moved to a release asset, NO identity in Google Cloud at all. It needs exactly
+# one thing: a GitHub App token that can read this repository's releases and open a pull request.
 #
-# WHY not let them apply: Access Context Manager rewrites the whole org-level policy on every change
-# (read-modify-write). Two repositories applying in parallel overwrite each other's rules — the audit log
-# shows two successful updates and a rule is simply gone. On top of that, `servicePerimeters.update` cannot
-# be scoped below the organization, so every such repository would get the right to change the boundary for
-# the entire company.
+# WHY the contract is fetched from a release and not from `gs://…`: reading the bucket copy requires the
+# division's repository to federate an identity into GCP and hold a grant on the contract prefix. Thirty
+# divisions meant thirty grants — issued so that someone could read 4 KB of JSON. The bucket copy still
+# exists for machine consumers outside GitHub; it is simply no longer on this path. Both copies are written
+# by the SAME apply step (see apply.yml), so there is no "which one is current" question to ask.
+#
+# WHY not let them apply: Access Context Manager rewrites the whole org-level policy on every change and
+# guards it with an eTag. Parallel appliers do NOT lose rules silently — the loser fails loudly with
+# `Error 400: The eTag provided ... does not match` (measured: ~80-100% of time-overlapping runs). That is not
+# reassuring: with two mutators every other merge randomly fails and needs a retry, and each new division
+# raises the collision rate. On top of that, `servicePerimeters.update` cannot be scoped below the
+# organization, so every such repository would get the right to change the boundary for the entire company.
 #
 # WHY the contract + gates bundle instead of a submodule: a submodule hands over the WHOLE perimeter
 # repository — including every division's service accounts (perimeter/members/) and your corporate IP ranges
@@ -17,15 +25,10 @@
 # Usage in the division's repository:
 #
 #   - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-#   - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.9            # read-only on the contracts bucket prefix
-#     with:
-#       workload_identity_provider: ${{ vars.WIF_PROVIDER }}
-#       service_account: ${{ vars.CONTRACT_READER_SA }}
 #   - uses: ORG/gcp-vpc-sc/contrib@main
 #     with:
 #       member-file: vpc-sc/prj-example-vertex-prod.yaml
 #       perimeter-repo: ORG/gcp-vpc-sc
-#       contract-uri: gs://ORG-tf-contracts/vpc-sc/contract.json
 #       app-token: ${{ steps.app.outputs.token }}
 
 name: Request VPC-SC perimeter change
@@ -38,13 +41,12 @@ inputs:
   perimeter-repo:
     description: ORG/REPO of the perimeter repository.
     required: true
-  contract-uri:
-    description: "gs:// URI of the published contract (read-only access needed)."
-    required: true
   app-token:
     description: >
-      Token of a GitHub App installed on both repositories, with `pull_requests: write` on the perimeter
-      repository. GITHUB_TOKEN will NOT work — it is scoped to the repository it was issued for.
+      Token of a GitHub App installed on both repositories, with `contents: read` and `pull_requests: write`
+      on the perimeter repository. `contents: read` was already required for the gates bundle, so the
+      contract rides an existing grant — no new permission anywhere. GITHUB_TOKEN will NOT work: it is
+      scoped to the repository it was issued for.
     required: true
   gates-version:
     description: >
@@ -80,10 +82,19 @@ runs:
         tar -xzf gates.tar.gz
 
     # Contract = the list of options you may choose from (profiles, access level names, your own projects).
+    #
+    # The `contract` release tag is deliberately NOT an input and deliberately NOT pinnable. Gates are RULES,
+    # so pinning them buys reproducible validation; the contract is a snapshot of STATE, so a pinned copy
+    # means validating against profiles and access levels that may no longer exist — a green run that lies.
+    # The perimeter repository moves this tag on every apply, exactly like `Cache-Control: no-store` on the
+    # bucket copy.
     - name: fetch the contract
       shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.app-token }}
       run: |
-        gcloud storage cat "${{ inputs.contract-uri }}" > contract.json
+        gh release download contract --repo "${{ inputs.perimeter-repo }}" \
+          --pattern 'contract.json' --clobber
         echo "contract from $(python3 -c 'import json;print(json.load(open("contract.json"))["schema_version"])') schema, \
         $(python3 -c 'import json;print(len(json.load(open("contract.json"))["profiles"]))') profiles available"
 
