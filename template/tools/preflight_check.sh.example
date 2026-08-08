@@ -9,23 +9,30 @@
 #   4. strefa DNS kieruje googleapis.com na restricted VIP → jw., najczęstsza cicha awaria onboardingu
 #   5. (ostrzeżenie) istnieją już endpointy Vertex → endpoint utworzony PRZED wejściem do perimetru
 #      sprawia, że późniejszy deploy modelu na niego zawodzi; to nie blokuje PR-a, ale musi być powiedziane
+#   6. konta serwisowe z reguł ISTNIEJĄ → ACM waliduje tożsamości po swojej stronie i odrzuca CAŁĄ zmianę
+#      komunikatem `invalid or non-existent`, czyli literówka wywraca apply po review, na obiekcie org-plane
 #
-# Uprawnienia (read-only): cloudasset.viewer, compute.networkViewer, dns.reader — docs/2-uprawnienia-i-wif.md
+# Uprawnienia (read-only): cloudasset.viewer, compute.networkViewer, dns.reader, iam.serviceAccountViewer
+# — docs/2-uprawnienia-i-wif.md
 set -euo pipefail
 
 PROJECT_ID=""
 PROJECT_NUMBER=""
 STRICT=1
+IDENTITIES=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --project) shift; PROJECT_ID="${1:-}" ;;
     --number)  shift; PROJECT_NUMBER="${1:-}" ;;
+    # Powtarzalna. Wartość w formacie ACM (`serviceAccount:…`, `user:…`, `group:…`) — dokładnie tak, jak stoi
+    # w pliku członka, żeby nie trzeba było jej po drodze przepisywać (przepisywanie to kolejna literówka).
+    --identity) shift; IDENTITIES+=("${1:-}") ;;
     --warn-only) STRICT=0 ;;
     *) echo "nieznany argument: $1" >&2; exit 2 ;;
   esac
   shift
 done
-[ -n "$PROJECT_ID" ] && [ -n "$PROJECT_NUMBER" ] || { echo "użycie: $0 --project <id> --number <numer>" >&2; exit 2; }
+[ -n "$PROJECT_ID" ] && [ -n "$PROJECT_NUMBER" ] || { echo "użycie: $0 --project <id> --number <numer> [--identity <spec>]…" >&2; exit 2; }
 
 fail=0
 note() { printf '  %-6s %s\n' "$1" "$2"; }
@@ -82,6 +89,34 @@ if gcloud ai endpoints list --project="$PROJECT_ID" --region=europe-west4 --form
   | grep -q .; then
   note "UWAGA" "istnieją endpointy Vertex sprzed wejścia do perimetru — deploy modelu na nie zawiedzie; odtwórz je po dołączeniu"
 fi
+
+# 6. tożsamości z reguł istnieją
+#
+# DLACZEGO tutaj, a nie wyłącznie w bramce OPA: `perimeter.rego` sprawdza KSZTAŁT adresu na plan-JSON i robi
+# to na każdym PR bez żadnych poświadczeń — ale adres poprawny składniowo i wskazujący na nieistniejące konto
+# przechodzi tam bez zająknięcia. ACM odrzuca go dopiero przy apply, komunikatem `invalid or non-existent`,
+# i wywraca CAŁĄ zmianę, nie jedną regułę. Ten check wymaga poświadczeń, więc żyje w pre-flighcie recenzenta.
+for spec in ${IDENTITIES+"${IDENTITIES[@]}"}; do
+  case "$spec" in
+    serviceAccount:*)
+      sa="${spec#serviceAccount:}"
+      if gcloud iam service-accounts describe "$sa" --format='value(email)' >/dev/null 2>&1; then
+        note "OK" "konto serwisowe istnieje: $sa"
+      else
+        problem "konto serwisowe NIE ISTNIEJE albo brak dostępu odczytu: $sa → ACM odrzuci apply"
+      fi
+      ;;
+    user:*|group:*)
+      # Świadomie bez werdyktu: istnienia użytkownika i grupy nie da się potwierdzić uprawnieniami GCP —
+      # to Directory API Workspace, czyli inna domena administracyjna i inne poświadczenia. Bramka, która
+      # udawałaby, że sprawdza, byłaby gorsza od jawnego „nie wiem".
+      note "UWAGA" "nie weryfikuję z GCP: $spec (Workspace Directory API) — ACM sprawdzi przy apply"
+      ;;
+    *)
+      problem "tożsamość bez znanego prefiksu typu: $spec (oczekiwane serviceAccount:/user:/group:)"
+      ;;
+  esac
+done
 
 if [ "$fail" -gt 0 ] && [ "$STRICT" -eq 1 ]; then
   echo "pre-flight NIEZALICZONY ($fail błędów) — naprawia właściciel projektu, nie repo perimetru" >&2

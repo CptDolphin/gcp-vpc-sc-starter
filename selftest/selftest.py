@@ -1089,6 +1089,56 @@ def test_tools() -> None:
           p.stderr[-300:] + json.dumps(viol))
 
 
+# --------------------------------------------------------------------- pre-flight
+# Atrapa `gcloud`: udaje ZDROWY projekt (istnieje, numer sie zgadza, PGA i DNS w porzadku), zeby jedyna
+# zmienna w tescie byla odpowiedz o TOZSAMOSC. Lista kont istniejacych przychodzi zmienna srodowiskowa.
+GCLOUD_ATRAPA = """#!/usr/bin/env bash
+case "$*" in
+  "projects describe "*) echo "123456789012" ;;
+  *"service-accounts describe "*)
+    for arg in "$@"; do case " $STUB_SA_OK " in *" $arg "*) exit 0 ;; esac; done
+    exit 1 ;;
+  *"perimeters list"*) echo "[]" ;;
+  *"managed-zones list"*) printf 'googleapis.com.\\nnotebooks.googleusercontent.com.\\n' ;;
+  *) : ;;
+esac
+exit 0
+"""
+
+
+def test_preflight() -> None:
+    print("\n== pre-flight ==")
+    bin_dir = ROOT / "stub-bin"
+    bin_dir.mkdir(exist_ok=True)
+    (bin_dir / "gcloud").write_text(GCLOUD_ATRAPA)
+    (bin_dir / "gcloud").chmod(0o755)
+    env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}",
+               STUB_SA_OK="sa-example@prj-example.iam.gserviceaccount.com")
+    baza = ["bash", "tools/preflight_check.sh", "--project", "prj-example", "--number", "123456789012"]
+
+    p = sh(baza, cwd=ROOT, env=env)
+    check("preflight: zdrowy projekt bez tozsamosci przechodzi", p.returncode == 0, p.stdout + p.stderr)
+
+    p = sh(baza + ["--identity", "serviceAccount:sa-example@prj-example.iam.gserviceaccount.com"], cwd=ROOT, env=env)
+    check("preflight: ISTNIEJACE konto serwisowe przechodzi", p.returncode == 0, p.stdout + p.stderr)
+
+    # NEGATYW — to jest ten defekt: adres poprawny skladniowo, konta nie ma. Bramka OPA na ksztalcie tego
+    # nie zlapie, a ACM odrzuca CALA zmiane dopiero przy apply (`invalid or non-existent`, #1904).
+    p = sh(baza + ["--identity", "serviceAccount:literowka@prj-example.iam.gserviceaccount.com"], cwd=ROOT, env=env)
+    check("preflight: NIEISTNIEJACE konto serwisowe wywraca pre-flight",
+          p.returncode != 0 and "NIE ISTNIEJE" in p.stdout, p.stdout + p.stderr)
+
+    p = sh(baza + ["--identity", "sa-example@prj-example.iam.gserviceaccount.com"], cwd=ROOT, env=env)
+    check("preflight: tozsamosc bez prefiksu typu ODRZUCONA",
+          p.returncode != 0 and "prefiksu" in p.stdout, p.stdout + p.stderr)
+
+    # user:/group: NIE moga byc raportowane jako sprawdzone — istnienia nie da sie potwierdzic z GCP.
+    p = sh(baza + ["--identity", "user:example.person@example.com"], cwd=ROOT, env=env)
+    check("preflight: user:/group: jawnie NIEZWERYFIKOWANE, nie 'OK'",
+          p.returncode == 0 and "Workspace Directory API" in p.stdout and "UWAGA" in p.stdout,
+          p.stdout + p.stderr)
+
+
 # --------------------------------------------------------------------- workflows
 def test_workflows() -> None:
     print("\n== workflows ==")
@@ -1227,6 +1277,7 @@ def main() -> int:
     test_lint_and_pinning()
     test_rego()
     test_tools()
+    test_preflight()
     test_workflows()
     test_schemas()
 

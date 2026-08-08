@@ -47,6 +47,46 @@ deny contains msg if {
 	msg := sprintf("%s: reguła bez identities — nie ma czego autoryzować", [r.address])
 }
 
+# ACM waliduje ISTNIENIE tożsamości po swojej stronie i odrzuca CAŁĄ zmianę:
+# `The email address ... is invalid or non-existent` (zmierzone na żywym API, Issue #1904). Literówka w koncie
+# serwisowym wywraca więc apply dopiero PO review, na obiekcie org-plane — a wygląda jak problem z uprawnieniami.
+#
+# Istnienia konta nie da się sprawdzić bez chmury, ale KSZTAŁT adresu tak — i to on łapie najczęstszą pomyłkę
+# (zjedzone `.iam`, `gserviceaccounts.com` przez „s", adres bez domeny). Resztę domyka `tools/preflight_check.sh
+# --identity`, który pyta API o istnienie i wymaga poświadczeń.
+#
+# ŚWIADOMIE nie walidujemy nazwy projektu w adresie ani nie wymagamy domeny `*.iam.gserviceaccount.com`:
+# konta domyślne i zarządzane przez Google mieszkają pod `developer.`, `appspot.`, `cloudbuild.`. Bramka
+# odrzucająca poprawne konto blokuje onboarding, a to kosztuje więcej niż jedna literówka wykryta przy apply.
+deny contains msg if {
+	some r in planned
+	some block in array.concat(
+		object.get(r.values, "ingress_from", []),
+		object.get(r.values, "egress_from", []),
+	)
+	some identity in object.get(block, "identities", [])
+	not identity_ma_poprawny_ksztalt(identity)
+	msg := sprintf(
+		"%s: tożsamość %q ma nieprawidłowy kształt — ACM odrzuci apply komunikatem `invalid or non-existent`",
+		[r.address, identity],
+	)
+}
+
+identity_ma_poprawny_ksztalt(identity) if {
+	regex.match(`^serviceAccount:[^@\s]+@[^@\s]+\.gserviceaccount\.com$`, identity)
+}
+
+identity_ma_poprawny_ksztalt(identity) if {
+	regex.match(`^(user|group):[^@\s]+@[^@\s]+\.[a-zA-Z]{2,}$`, identity)
+}
+
+# Federacja tożsamości (Workforce/Workload Identity) ma kształt URI, nie adresu e-mail. Dopuszczamy bez
+# dalszej walidacji: bramka, która tej formy nie zna, odrzuciłaby poprawną konfigurację.
+identity_ma_poprawny_ksztalt(identity) if {
+	some prefix in ["principal://", "principalSet://", "principalHierarchy://"]
+	startswith(identity, prefix)
+}
+
 # --- metody -----------------------------------------------------------------------------------------
 
 # Usługi, dla których Access Context Manager NIE PUBLIKUJE listy metod (`supportedMethods` puste). Lista
