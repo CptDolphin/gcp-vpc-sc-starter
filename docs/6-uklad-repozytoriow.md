@@ -55,9 +55,14 @@ plików: limit to **6000 atrybutów na konfigurację perimetru**, liczony osobno
 plików YAML to ~840 kB i milisekundy w `fileset()`. Dlatego reguły są profilami, a budżet mierzy się od
 pierwszego dnia (`tools/attribute_budget.py`).
 
-## Wersja dla odbiorcy zewnętrznego
+## Gotowy przykład drugiej strony
 
-Gotowy przykład obu repozytoriów (włącznie z `network.tf` i `dns.tf` po stronie dywizji) leży w katalogu
-`examples/vpc-sc-multirepo/` repozytorium, w którym ten starter jest publikowany. Tamten katalog jest
-**snapshotem do pokazania** — pełnym, ale zamrożonym; źródłem prawdy dla treści merytorycznej jest ten
-dokument i kod startera.
+Kompletne repozytorium dywizji — `vpc-sc/request.yaml`, workflow i README mówiące wprost, **czego zespół
+nie dostaje** — leży w [`examples/division-repo/`](../examples/division-repo/README.md) tego startera.
+Nie jest to snapshot do pokazania, tylko materiał do skopiowania: selftest uruchamia na nim realny
+`validate-local.sh` (pozytyw) oraz ten sam wniosek z cudzego repozytorium (negatyw), więc przykład albo
+działa, albo test jest czerwony.
+
+Czego tam **nie ma**: `network.tf` i `dns.tf` dywizji. To prereq sieciowy, którego perimeter tylko
+**weryfikuje** (pre-flight), a nie provisionuje — wiersz „prereq sieciowy" w tabeli wyżej. Wrzucenie ich
+do przykładu sugerowałoby, że są częścią tego kanału; snippety do skopiowania są w `docs/`.

@@ -19,7 +19,7 @@ Osiem decyzji, na których to stoi — wraz z odrzuconymi wariantami — jest w
 ./install.sh /sciezka/do/nowego/repo          # rozpakuj wszystko
 ./install.sh /sciezka --dry-run               # tylko pokaż mapowanie nazw
 ./install.sh /sciezka --only validate.yml     # jeden plik — wdrożenie etapami
-python3 selftest/selftest.py                  # dowód, że to działa (138 testów)
+python3 selftest/selftest.py                  # dowód, że to działa (150 testów)
 ```
 
 Po rozpakowaniu podmień placeholdery (`<ORG_ID>`, `<ACCESS_POLICY_NUMBER>`, `<STATE_BUCKET>`,
@@ -76,6 +76,17 @@ i przeczytaj [`docs/1-wdrozenie.md`](docs/1-wdrozenie.md) — kolejność krokó
 - [`contrib/README.md`](template/contrib/README.md.example) (po rozpakowaniu: `contrib/README.md`) — instrukcja
   dla **innych repozytoriów**: co dostają w kontrakcie, jak walidują u siebie, czego nie mogą
 
+## Przykład drugiej strony granicy
+
+[`examples/division-repo/`](examples/division-repo/README.md) — **kompletne repozytorium dywizji** do
+skopiowania: jeden `vpc-sc/request.yaml`, workflow (walidacja na PR, zgłoszenie dopiero po merge) i README,
+który mówi wprost **czego zespół NIE dostaje** — konta serwisowego, stanu Terraform, wglądu w `members/`
+innych dywizji ani w zakresy IP z `access-levels/`. Jedno prawo: otworzyć PR.
+
+Ten katalog **nie jest rozpakowywany** przez `install.sh`: to materiał dla repozytorium dywizji, a `install.sh`
+buduje repozytorium perimetru — workflow przykładu stałby się tam żywym jobem wysyłającym zgłoszenie do
+samego siebie (uzasadnienie w nagłówku `install.sh`, guard w selfteście).
+
 ## Eksperymenty
 
 [`experiments/konflikty-ukladow/`](experiments/konflikty-ukladow/README.md) — ile PR-ów z dziesięciu przechodzi
@@ -89,10 +100,11 @@ sprzątanie. Uruchom, zanim ktoś podejmie decyzję na podstawie opinii — kosz
 ## Dowód, że działa
 
 `python3 selftest/selftest.py` rozpakowuje starter do katalogu tymczasowego i uruchamia na nim realne bramki —
-**138/138** przy ostatnim przebiegu: `terraform fmt`/`validate`/**`test`** (14 przypadków renderera),
+**150/150** przy ostatnim przebiegu: `terraform fmt`/`validate`/**`test`** (14 przypadków renderera),
 `conftest verify` (45 testów reguł), **`tflint`** na obu stackach, narzędzia na realnych deklaracjach
-(w tym cztery fixture'y kanału ticketowego), `actionlint` na dziesięciu workflow, guardy na treść stacku IAM,
-kontraktu, nazwy obiektów ACM i pinowanie akcji.
+(w tym cztery fixture'y kanału ticketowego), `actionlint` na dziesięciu workflow **i na workflow przykładu
+dywizji**, realny `validate-local.sh` uruchomiony na `examples/division-repo/vpc-sc/request.yaml`, guardy
+na treść stacku IAM, kontraktu, nazwy obiektów ACM i pinowanie akcji.
 
 Testy są w połowie **negatywne** i to jest sedno: sprawdzają, że bramka **PADA** na złym wejściu — promocja
 przed oknem obserwacji, baseline bez `aiplatform`, plan z `ANY_IDENTITY`/`method: "*"`, ticket bez

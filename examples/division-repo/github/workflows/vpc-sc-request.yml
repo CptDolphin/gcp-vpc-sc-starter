@@ -1,0 +1,120 @@
+# .github/workflows/vpc-sc-request.yml (w REPOZYTORIUM DYWIZJI — tu katalog `github/` jest bez kropki,
+# żeby ten plik został martwym tekstem w starterze; ożywa dopiero po skopiowaniu do swojego repo)
+#
+# Dwa zadania, świadomie rozdzielone, bo mają różne konsekwencje:
+#   * WALIDACJA jedzie na każdym pushu do pull requesta — błąd ma być widoczny u ciebie, w sekundy,
+#     a nie w odrzuconym PR-ze w cudzym repozytorium;
+#   * ZGŁOSZENIE (`repository_dispatch`) jedzie dopiero po MERGE'u. Wysłanie wniosku to skutek uboczny
+#     z konsekwencjami po drugiej stronie granicy — otwarty PR nie może go wywołać, bo wtedy każdy,
+#     kto potrafi otworzyć PR w tym repozytorium, potrafi też wygenerować PR w repo perimetru.
+#
+# DLACZEGO `pull_request: closed` + `merged == true`, a nie `push` na `main`: akcja buduje referencję
+# zmiany jako `pr:ORG/repo#NUMER`. Na zdarzeniu `push` numeru PR-a po prostu nie ma i akcja wpisałaby
+# numer PRZEBIEGU — czyli ślad audytowy po tamtej stronie wskazywałby na uruchomienie workflowa zamiast
+# na przegląd, który tę zmianę zatwierdził. Zdarzenie `closed` niesie prawdziwy numer i odpala się
+# dokładnie raz, po merge'u.
+
+name: vpc-sc-request
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+    paths:
+      - "vpc-sc/**"
+
+permissions:
+  contents: read # tyle wystarcza: nic tu nie zapisujemy we własnym repo
+
+concurrency:
+  # Po projekcie, nie po gałęzi: dwa wnioski o ten sam projekt mają iść po kolei, a wnioski o różne
+  # projekty nie mają na siebie czekać. `cancel-in-progress` zostaje domyślnie wyłączone — przerwane
+  # zgłoszenie w połowie dispatcha to najgorszy moment na anulowanie.
+  group: vpc-sc-request-${{ github.ref }}
+
+jobs:
+  # --- 1. Walidacja u siebie -------------------------------------------------------------------------
+  # Nie wołamy tu akcji `contrib`, mimo że ona też waliduje: jej OSTATNI krok WYSYŁA zgłoszenie,
+  # a na otwartym PR-ze nie chcemy niczego wysyłać. Rozdzielenie kosztuje pięć linijek pobrania paczek
+  # i daje jednoznaczną odpowiedź na pytanie „co ten workflow może zrobić na PR-ze": nic poza czytaniem.
+  walidacja:
+    name: waliduj deklaracje wobec kontraktu
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: narzedzia
+        run: |
+          pip install --quiet pyyaml check-jsonschema
+          curl -sSfL -o /tmp/conftest.tar.gz \
+            https://github.com/open-policy-agent/conftest/releases/download/v0.56.0/conftest_0.56.0_Linux_x86_64.tar.gz
+          tar -xzf /tmp/conftest.tar.gz -C /tmp conftest
+          sudo mv /tmp/conftest /usr/local/bin/
+
+      # Token GitHub App: `contents: read` na repo perimetru (release'y) i `pull_requests: write`
+      # (dopiero w drugim jobie). GITHUB_TOKEN NIE zadziała — jest zawężony do repozytorium, w którym
+      # powstał, a my sięgamy po release'y cudzego repo.
+      - uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v3.2.0
+        id: app
+        with:
+          app-id: ${{ vars.VPCSC_APP_ID }}
+          private-key: ${{ secrets.VPCSC_APP_KEY }}
+          owner: ORG
+          repositories: gcp-vpc-sc
+
+      # Dwie paczki, dwie różne role — i różny stosunek do pinowania:
+      #   gates.tar.gz  = REGUŁY (schematy + rego). Można przypiąć wersję: chcesz powtarzalnej walidacji.
+      #   contract.json = STAN świata (jakie profile i access levels istnieją DZIŚ). Przypięty pokazywałby
+      #                   profile, których już nie ma — czyli dawałby u ciebie zielono na wniosku, który
+      #                   repo perimetru odrzuci. Dlatego zawsze bieżący.
+      # Ani jedna z nich nie wymaga konta w Google Cloud.
+      - name: pobierz bramki i kontrakt
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: |
+          gh release download --repo ORG/gcp-vpc-sc --pattern 'gates.tar.gz' --clobber
+          tar -xzf gates.tar.gz
+          gh release download contract --repo ORG/gcp-vpc-sc --pattern 'contract.json' --clobber
+
+      # GITHUB_REPOSITORY jest czytane przez walidator: sprawdza w kontrakcie, czy TO repozytorium ma
+      # ten projekt na liście dozwolonych. To kopia informacyjna — decyzję i tak podejmuje reguła
+      # po tamtej stronie, na pliku z repo perimetru. Tutaj oszczędza wysłania wniosku, który przepadnie.
+      - name: waliduj
+        run: |
+          bash ./gates/validate-local.sh \
+            --member vpc-sc/request.yaml \
+            --gates ./gates \
+            --contract ./contract.json
+
+  # --- 2. Zgłoszenie po merge'u ----------------------------------------------------------------------
+  zgloszenie:
+    name: wyslij wniosek do repo perimetru
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v3.2.0
+        id: app
+        with:
+          app-id: ${{ vars.VPCSC_APP_ID }}
+          private-key: ${{ secrets.VPCSC_APP_KEY }}
+          owner: ORG
+          repositories: gcp-vpc-sc
+
+      # Akcja waliduje jeszcze raz, i to nie jest zbędne powtórzenie: między otwarciem PR-a a merge'em
+      # kontrakt mógł się zmienić (ktoś wycofał profil), więc walidacja z PR-a jest już nieaktualna.
+      #
+      # `@<SHA_WYDANIA>`, nigdy `@main`: ruchomy tag to mutowalna referencja — kto kontroluje tag,
+      # kontroluje kod uruchamiany z waszym tokenem. Ten sam powód, dla którego wszystkie akcje wyżej
+      # są przypięte 40-znakowym SHA-em, a wersja stoi w komentarzu obok.
+      - uses: ORG/gcp-vpc-sc/contrib@<SHA_WYDANIA> # np. v1.4.0 — NIE @main
+        with:
+          member-file: vpc-sc/request.yaml
+          perimeter-repo: ORG/gcp-vpc-sc
+          app-token: ${{ steps.app.outputs.token }}
+          # gates-version: gates-2026.07.30-abc1234   # przypnij, jeśli chcesz powtarzalnej walidacji

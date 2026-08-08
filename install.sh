@@ -39,6 +39,17 @@ DOCS="$STARTER/docs"
 # AGENTS.md jedzie tą samą drogą: opisuje niezmienniki i placeholdery, więc jest potrzebny TAM, gdzie
 # ktoś realnie zmienia konfigurację, a nie w katalogu, z którego się kopiuje.
 AGENTS="$STARTER/AGENTS.md"
+# `examples/` ŚWIADOMIE NIE JEST TU WYMIENIONE — i to nie jest przeoczenie.
+#
+# `examples/division-repo/` to materiał dla repozytorium DYWIZJI, czyli drugiej strony granicy. Docelowe
+# repo tego skryptu jest repozytorium PERIMETRU. Skopiowanie tam przykładu dałoby dwa konkretne szkody,
+# nie tylko bałagan: (a) `examples/division-repo/github/workflows/vpc-sc-request.yml` zmapowałby się na
+# `.github/workflows/` i stałby się ŻYWYM workflowem, który wysyła `repository_dispatch` do repozytorium
+# perimetru — czyli do samego siebie; (b) `vpc-sc/request.yaml` wyglądałby w repo perimetru na deklarację
+# członka, którą ktoś zapomniał przenieść do `perimeter/members/`.
+#
+# Przykład zostaje więc w starterze i kopiuje go RĘCZNIE zespół dywizji, do SWOJEGO repozytorium —
+# razem z dodaniem kropki do `github/`. Guard w selfteście pilnuje, że `examples/` nie ląduje w celu.
 [ -d "$SRC" ] || { echo "brak katalogu template/ obok skryptu" >&2; exit 1; }
 [ -d "$DOCS" ] || { echo "brak katalogu docs/ obok skryptu" >&2; exit 1; }
 [ -f "$AGENTS" ] || { echo "brak AGENTS.md obok skryptu" >&2; exit 1; }

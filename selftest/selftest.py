@@ -146,6 +146,17 @@ def bootstrap() -> None:
     check("template/ nie zawiera plikow-kropek", not dotfiles, str(dotfiles))
     check("template/ nie zawiera zywych *.tf", not live_tf, str(live_tf))
 
+    # `examples/` to material dla repozytorium DYWIZJI, a install.sh rozpakowuje repozytorium PERIMETRU.
+    # Gdyby przyklad tam trafil, `examples/division-repo/github/workflows/vpc-sc-request.yml` zmapowalby sie
+    # na `.github/workflows/` i stalby sie ZYWYM workflowem wysylajacym dispatch do samego siebie. Zbior
+    # `expected` wyzej zlapalby to jako "nadmiarowe", ale bez nazwy powodu — a to jest decyzja, nie literowka.
+    check("examples/ NIE laduje w docelowym repo (material dla repo DYWIZJI, nie perimetru)",
+          not [f for f in got if f.startswith("examples/") or f.endswith("vpc-sc-request.yml")],
+          str(sorted(f for f in got if f.startswith("examples/"))))
+    # Ten sam niezmiennik co dla template/: dopoki przyklad lezy tutaj, ma byc martwym tekstem.
+    przyklad_kropki = [str(f) for f in (STARTER / "examples").rglob(".*")]
+    check("examples/ nie zawiera plikow-kropek (github/ bez kropki)", not przyklad_kropki, str(przyklad_kropki))
+
 
 # --------------------------------------------------------------------- terraform
 def test_terraform() -> None:
@@ -391,6 +402,123 @@ def test_kontrakt_dwie_publikacje() -> None:
     r = [s for s in kroki if "gh release upload" in s.get("run", "")]
     check("test LAPIE rozdzielenie apply i publikacji na dwa kroki (anty-tautologia)",
           a != r and len(a) == 1 and len(r) == 1, f"a={len(a)} r={len(r)}")
+
+
+# ------------------------------------------------------------ przyklad repozytorium dywizji
+def buduj_kontrakt(root: pathlib.Path) -> dict:
+    """Odtwarza kontrakt z plików rozpakowanego repo — te same pola, które publikuje `contract.tf`.
+
+    DLACZEGO z plików, a nie ręcznie wpisany słownik: kontrakt wpisany w test zamarza w chwili napisania,
+    więc dzień po dodaniu profilu przykład dywizji nadal „przechodzi" wobec katalogu, którego już nie ma.
+    Czytając te same YAML-e co renderer, testujemy przykład wobec AKTUALNEJ zawartości startera.
+    """
+    policy = yaml.safe_load((root / "perimeter/policy.yaml").read_text())
+    profile = [yaml.safe_load(f.read_text()) for f in sorted((root / "perimeter/profiles").glob("*.yaml"))]
+    poziomy = []
+    for f in sorted((root / "perimeter/access-levels").glob("*.yaml")):
+        poziomy += [al["name"] for al in yaml.safe_load(f.read_text())["access_levels"]]
+    contributors = yaml.safe_load((root / "perimeter/contributors.yaml").read_text())["contributors"]
+    return {
+        "schema_version": 1,
+        "perimeter_name": "accessPolicies/000000000000/servicePerimeters/test",
+        "restricted_services": policy["restricted_services"],
+        "onboarding": policy["onboarding"],
+        "access_levels": sorted(poziomy),
+        "profiles": [{"name": p["name"], "risk": p.get("risk", "unknown"), "summary": p.get("summary", ""),
+                      "parameters": [x["name"] for x in p.get("parameters", [])],
+                      "has_egress": bool(p.get("egress"))} for p in profile],
+        "contributors": [{"repository": c["repository"], "division": c["division"],
+                          "allowed_projects": c["allowed_projects"]} for c in contributors],
+        "members_published": True,
+        "members": [],
+    }
+
+
+def test_przyklad_repo_dywizji() -> None:
+    """`examples/division-repo/` ma być DZIAŁAJĄCYM przykładem, nie ilustracją.
+
+    Dlatego nie sprawdzamy tu obecności plików ani fraz w dokumentacji, tylko URUCHAMIAMY na przykładzie
+    ten sam `validate-local.sh`, który pobiera u siebie zespół dywizji. Przykład, który „wygląda dobrze",
+    a nie przechodzi własnej bramki, jest gorszy od jego braku: uczy kształtu, który zostanie odrzucony.
+    """
+    print("\n== przyklad repozytorium dywizji ==")
+    przyklad = STARTER / "examples/division-repo"
+    request = przyklad / "vpc-sc/request.yaml"
+    check("examples/division-repo ma trzy pliki (request, workflow, README)",
+          request.exists() and (przyklad / "github/workflows/vpc-sc-request.yml").exists()
+          and (przyklad / "README.md").exists())
+    if not request.exists():
+        return
+
+    dekl = yaml.safe_load(request.read_text())
+    # NIEZMIENNIK PEDAGOGICZNY: wniosek jest WĘŻSZY niż plik członka. Cztery pola należą do perimetru —
+    # `stage` decyduje o etapie (jedno pole omijałoby dwustopniowy onboarding), a `dry_run_since` wyznacza
+    # okno obserwacji (data wsteczna od wnioskodawcy kasuje pomiar, dla którego to okno istnieje).
+    obce = [k for k in ("stage", "dry_run_since", "review_by", "change_ref") if k in dekl]
+    check("request.yaml NIE zawiera pol nalezacych do perimetru", not obce, f"znalezione: {obce}")
+    check("request.yaml zawiera komplet pol, ktorych wlascicielem jest dywizja",
+          {"schema_version", "division", "project_id", "project_number", "owner_group", "approved_by",
+           "profiles"} <= set(dekl), f"jest: {sorted(dekl)}")
+
+    # Workflow nie może wysyłać zgłoszenia z otwartego PR-a: dispatch ma konsekwencje po drugiej stronie
+    # granicy, więc wychodzi dopiero po merge'u. Sprawdzamy STRUKTURĘ (warunek joba), nie tekst.
+    wf = yaml.safe_load((przyklad / "github/workflows/vpc-sc-request.yml").read_text())
+    zgloszenie = wf["jobs"]["zgloszenie"]
+    check("workflow wysyla zgloszenie DOPIERO po merge",
+          "merged == true" in str(zgloszenie.get("if", "")), str(zgloszenie.get("if")))
+    uzywa_akcji = [s for s in zgloszenie["steps"] if "contrib@" in str(s.get("uses", ""))]
+    check("workflow wola akcje contrib (a nie kopiuje jej logiki)", len(uzywa_akcji) == 1)
+    check("job walidacji NIE wola akcji wysylajacej dispatch",
+          not [s for s in wf["jobs"]["walidacja"]["steps"] if "contrib@" in str(s.get("uses", ""))])
+
+    # Ten workflow ma zostac SKOPIOWANY do cudzego repozytorium — skladnia musi byc poprawna tutaj, bo
+    # tam pierwszym testem bylby czerwony przebieg u kogos innego. `test_workflows` lintuje wylacznie
+    # workflowy ROZPAKOWANEGO repo, wiec przyklad wymaga osobnego wywolania.
+    if have("actionlint"):
+        p = sh(["actionlint", str(przyklad / "github/workflows/vpc-sc-request.yml")])
+        check("actionlint na workflow przykladu", p.returncode == 0, p.stdout[-800:])
+    else:
+        print("  SKIP  actionlint niedostepny lokalnie (workflow przykladu nie zostal zlintowany)")
+
+    # Nazwa repozytorium dywizji istnieje WYŁĄCZNIE po stronie perimetru — w `contributors.yaml`. Nie ma
+    # jej w żadnym pliku przykładu i to nie jest przeoczenie: repozytorium nie deklaruje, czym jest ani
+    # o co wolno mu prosić. Dlatego stoi tutaj jako stała, a nie jest wyciągana z materiału dywizji.
+    REPO_PRZYKLADU = "ORG/example-division-vertex"
+
+    # Mapowanie repo→projekty MUSI istnieć po stronie perimetru — bez niego przykład jest niekompletny
+    # i pierwszy realny wniosek odbije się o „repozytorium nie ma wpisu w contributors".
+    wpisy = yaml.safe_load((ROOT / "perimeter/contributors.yaml").read_text())["contributors"]
+    wpis = next((c for c in wpisy if c["repository"] == REPO_PRZYKLADU), None)
+    check("contributors.yaml mapuje repo dywizji na projekt i dywizje z przykladu",
+          wpis is not None and dekl["project_id"] in wpis["allowed_projects"]
+          and wpis["division"] == dekl["division"],
+          f"wpis: {wpis}")
+    if wpis is None:
+        return
+    repo_przykladu = REPO_PRZYKLADU
+
+    if not (have("check-jsonschema") and have("conftest")):
+        print("  SKIP  brak check-jsonschema albo conftest — pomijam uruchomienie validate-local.sh")
+        return
+
+    # E2E: realny skrypt, realne bramki, realny plik przykładu. `--gates ROOT`, bo rozpakowane repo ma
+    # `schemas/` i `policy/` dokładnie tam, gdzie paczka bramek trzyma je u zespołu.
+    (ROOT / "kontrakt-przykladu.json").write_text(json.dumps(buduj_kontrakt(ROOT)))
+    srodowisko = dict(os.environ, GITHUB_REPOSITORY=repo_przykladu)
+    p = sh(["bash", str(ROOT / "contrib/validate-local.sh"), "--member", str(request),
+            "--gates", str(ROOT), "--contract", "kontrakt-przykladu.json"], cwd=ROOT, env=srodowisko)
+    check("validate-local.sh PRZEPUSZCZA przykladowy request.yaml (bez stage i dat)",
+          p.returncode == 0, (p.stdout + p.stderr)[-900:])
+
+    # NEGATYW: ten sam plik zgłoszony z repozytorium, które nie ma tego projektu na liście. Bramka, która
+    # przepuszcza wszystko, przeszłaby test wyżej i nie chroniłaby niczego — to jest jedyny dowód, że
+    # `contributors.yaml` cokolwiek rozstrzyga.
+    srodowisko["GITHUB_REPOSITORY"] = "ORG/example-division-obca"
+    p = sh(["bash", str(ROOT / "contrib/validate-local.sh"), "--member", str(request),
+            "--gates", str(ROOT), "--contract", "kontrakt-przykladu.json"], cwd=ROOT, env=srodowisko)
+    check("validate-local.sh ODRZUCA ten sam wniosek z CUDZEGO repozytorium",
+          p.returncode != 0 and "contributors" in (p.stdout + p.stderr),
+          (p.stdout + p.stderr)[-900:])
 
 
 # --------------------------------------------------------------------- monitoring
@@ -943,6 +1071,7 @@ def main() -> int:
     test_iam_bootstrap()
     test_contract()
     test_kontrakt_dwie_publikacje()
+    test_przyklad_repo_dywizji()
     test_monitoring()
     test_brownfield()
     test_external_egress_and_guard()

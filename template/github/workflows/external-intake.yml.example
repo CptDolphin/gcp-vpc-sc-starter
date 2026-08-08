@@ -48,7 +48,9 @@ jobs:
           SOURCE_REPO: ${{ github.event.client_payload.source_repository }}
         run: |
           python3 - <<'PY'
-          import json, os, pathlib, sys, yaml
+          import datetime, json, os, pathlib, sys, yaml
+
+          REVIEW_AFTER_DAYS = 180  # ta sama stala co w tools/render_member.py (kanal ticketowy)
 
           member = json.loads(os.environ["MEMBER_JSON"])
           source = os.environ["SOURCE_REPO"]
@@ -75,9 +77,19 @@ jobs:
                   f"(stage: {current.get('stage', '?')}); zmiane profili albo promocje zglos PR-em "
                   "na istniejacym pliku, nie kanalem wejsciowym")
 
-          # stage is forced here, exactly like in the ServiceNow path: a member always starts in dry-run,
-          # no matter what the sender put in the file.
+          # Fields the REQUESTER does not own are written here, exactly like in the ServiceNow path
+          # (tools/render_member.py). `stage` always starts at dry-run, no matter what the sender put in
+          # the file — otherwise a single field in a payload would skip the whole two-stage onboarding.
+          #
+          # The dates are overwritten for a sharper reason than tidiness: `dry_run_since` is what the
+          # promotion gate measures the observation window from. A backdated value ("2020-01-01") makes
+          # that window look long past, so the 14 days of measurement DEC-4 exists for simply vanish.
+          # A field describing WHEN the measurement started cannot come from the party being measured.
+          dzis = datetime.date.today()
           member["stage"] = "dry-run"
+          member["dry_run_since"] = dzis.isoformat()
+          member["review_by"] = (dzis + datetime.timedelta(days=REVIEW_AFTER_DAYS)).isoformat()
+          member.setdefault("exceptions", [])
 
           out.write_text(yaml.safe_dump(member, sort_keys=False, allow_unicode=True))
           print(f"zapisano {out}")

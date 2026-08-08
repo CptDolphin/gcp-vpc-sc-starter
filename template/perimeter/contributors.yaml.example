@@ -21,3 +21,18 @@ contributors:
       - prj-example-vertex-prod
     # Kontakt do eskalacji, gdy zgłoszenie z tego repo wygląda podejrzanie.
     owner_group: grp-example-division-cloud@example.com
+
+  # Drugi wpis pokazuje, jak to mapowanie wygląda dla KONKRETNEGO repozytorium dywizji — kompletny
+  # przykład takiego repo (z `vpc-sc/request.yaml` i workflowem) leży w `examples/division-repo/`
+  # startera. Ten wiersz jest jedynym miejscem, w którym „repo example-division-vertex może wnioskować
+  # o prj-example-vertex-prod" jest w ogóle zapisane — po tamtej stronie nie ma tej informacji.
+  #
+  # DLACZEGO ta lista mieszka TUTAJ, a nie u dywizji (powtórzone, bo to jest najczęstsze pytanie do tego
+  # pliku): gdyby zespół trzymał ją u siebie, rozszerzyłby ją TYM SAMYM COMMITEM, którym dodaje projekt.
+  # Wniosek autoryzowałby wtedy sam siebie. Jedno repozytorium = jedna dywizja = jawna lista projektów,
+  # a zmiana każdego z tych trzech elementów wymaga approvalu sieci i security (CODEOWNERS).
+  - repository: ORG/example-division-vertex
+    division: example-division
+    allowed_projects:
+      - prj-example-vertex-prod
+    owner_group: grp-example-division-cloud@example.com

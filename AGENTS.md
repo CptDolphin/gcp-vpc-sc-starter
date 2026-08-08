@@ -28,6 +28,7 @@ a nie HCL.
 | `use_explicit_dry_run_spec = true` **zawsze** | `perimeter.tf` | bez tego nie istnieje członek „tylko w dry-run", czyli nie da się etapować onboardingu (DEC-4) |
 | `lifecycle.ignore_changes` na listach szkieletu | `perimeter.tf` | szkielet i zasoby per-członek biją się o te same listy: każdy apply kasuje to, co dodał poprzedni (DEC-6) |
 | Nowy członek zawsze `stage: dry-run` | `render_member.py` + reguła OPA | wejście od razu do konfiguracji egzekwowanej odcina cudzą produkcję po merge'u (DEC-4) |
+| `stage`, `dry_run_since`, `review_by`, `change_ref` wpisuje **strona perimetru**, nigdy wnioskodawca | `render_member.py`, `external-intake.yml`, uzupełnianie w `validate-local.sh` + `test_przyklad_repo_dywizji` | `dry_run_since` z datą wsteczną sprawia, że bramka promocji liczy okno obserwacji jako dawno minione — 14 dni pomiaru, dla których istnieje DEC-4, znika. Pole opisujące czas pomiaru nie może pochodzić od mierzonego |
 | Kanał wejściowy **nie nadpisuje** istniejącego pliku członka | `out.exists()` w `render_member.py` i `external-intake.yml` | powtórne zgłoszenie zapisałoby `stage: dry-run` na członku `enforced` — projekt traci ochronę PR-em wyglądającym na onboarding. Reguła OPA tego nie łapie: porównuje dwa PLIKI, a tu plik jest ten sam |
 | Apply jest single-flight | `concurrency` w `apply.yml`, bez `cancel-in-progress` | dwa równoległe apply nadpisują się na polityce org-level (DEC-6) |
 | Projekt z `policy.yaml` §`control_plane_projects` **nie wchodzi** do perimetru | reguła OPA w `onboarding.rego` (furtka: `control_plane_exception` w pliku członka) | **jedyne złamanie, którego `git revert` NIE COFA.** Bucket stanu leży w projekcie administracyjnym perimetru; w konfiguracji egzekwowanej konto apply traci dostęp do własnego stanu, bo woła z GitHub Actions — spoza granicy. Apply rewertu też potrzebuje stanu, więc pętli nie da się przerwać pipeline'em: wychodzi z niej człowiek z uprawnieniami org-level, ręcznie na żywej polityce |
@@ -87,7 +88,7 @@ python3 selftest/selftest.py          # rozpakowuje starter do katalogu tymczaso
 ```
 
 Wymaga na PATH: `terraform` (1.15.5), `conftest`, `tflint`, `python3` z `pyyaml`; opcjonalnie `actionlint`
-i `check-jsonschema` (ich brak daje SKIP z nazwą, nigdy ciche zielone). Oczekiwany wynik: **138/138**.
+i `check-jsonschema` (ich brak daje SKIP z nazwą, nigdy ciche zielone). Oczekiwany wynik: **150/150**.
 
 Sam skan samodzielności (bez terraforma i conftesta, sam Python) da się uruchomić na dowolnej ścieżce —
 przydaje się tam, gdzie materiał jest publikowany razem z innymi katalogami:
