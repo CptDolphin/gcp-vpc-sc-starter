@@ -195,6 +195,23 @@ def test_terraform() -> None:
     check("swieze repo nie ma zadnej reguly egzekwowanej",
           p.returncode == 0 and p.stdout.strip().splitlines()[-1].strip() == "0", p.stdout + p.stderr[-300:])
 
+    # KOLEJNOSC DESTROY: regula ingress referuje access level po NAZWIE (string z YAML), wiec Terraform sam
+    # nie zbuduje krawedzi i moze skasowac poziom przed regula — API odrzuca `you must first remove the
+    # reference` (zmierzone na zywym ACM 2026-08-07, #1904). Mierzymy GRAF, ktory Terraform faktycznie
+    # zbudowal, a nie obecnosc slowa `depends_on` w pliku: bez tego test potwierdzalby wlasny tekst.
+    # Kontrola anty-tautologiczna: przed poprawka to samo zapytanie zwracalo 0 krawedzi.
+    p = sh(["terraform", f"-chdir={tf}", "graph"])
+    krawedzie = {
+        (a, b)
+        for a, b in re.findall(r'"([^"]+)"\s*->\s*"([^"]+)"', p.stdout)
+    }
+    poziom = "google_access_context_manager_access_level.level"
+    for wariant in ("dry_run_ingress_policy", "ingress_policy"):
+        regula = f"google_access_context_manager_service_perimeter_{wariant}.rule"
+        check(f"graf: {wariant} zalezy od access levelu (kolejnosc destroy)",
+              p.returncode == 0 and (regula, poziom) in krawedzie,
+              f"brak krawedzi {regula} -> {poziom}; stderr={p.stderr[-300:]}")
+
     # Sekcje opcjonalne MUSZA byc opcjonalne NAPRAWDE. `count` na zasobie nie wystarcza: blok `locals` liczy
     # sie zawsze, wiec odwolanie do nieistniejacej sekcji wywraca `validate` — czyli funkcja opisana jako
     # opcjonalna jest w praktyce obowiazkowa. Wykryte przy pierwszym przygotowaniu prawdziwego testu na
