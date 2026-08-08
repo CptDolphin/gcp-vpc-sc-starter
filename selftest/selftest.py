@@ -245,6 +245,77 @@ def test_iam_bootstrap() -> None:
     check("iam-bootstrap: deny uzywa principal://.../serviceAccounts/",
           "principal://iam.googleapis.com/projects/-/serviceAccounts/" in body)
 
+    # --- kontrakt zmiennej contract_reader_groups ----------------------------------------------------
+    # DLACZEGO ten guard istnieje: zmienna ma `default = []`, więc `for_each` nie tworzy ANI JEDNEJ
+    # instancji i ani fmt, ani validate, ani plan nigdy nie dotykają jej wartości. Trzy miejsca opisujące
+    # jej format — walidacja w variables.tf, `member` w main.tf i przykład w terraform.tfvars.sample —
+    # rozjechały się dokładnie dlatego, że nic ich ze sobą nie porównywało: walidacja WYMAGAŁA prefiksu
+    # `group:`, main.tf ten sam prefiks DOKLEJAŁ, a przykład go NIE MIAŁ. Każda niepusta wartość była
+    # zepsuta w jedną albo w drugą stronę (`group:group:...` w IAM albo błąd walidacji przy odkomentowaniu
+    # przykładu), a selftest przez cały ten czas świecił na zielono.
+    #
+    # Guard mierzy EFEKT — to, co realnie wyszłoby do IAM — a nie tekst plików. Dzięki temu przeżyje
+    # ŚWIADOME odwrócenie kontraktu (prefiks może mieszkać po stronie zmiennej albo po stronie main.tf)
+    # i mimo to odrzuci obie kombinacje sprzeczne: podwójny prefiks ORAZ goły adres jako principala.
+    #
+    # SYGNAŁEM JEST `plan`, NIE `console`: zmierzone na tym stacku — `terraform console` kończy się kodem 0
+    # MIMO odrzuconej walidacji (wypisuje błąd i liczy dalej). Test oparty na jego kodzie wyjścia
+    # przepuszczałby wszystko, czyli byłby dokładnie tą bramką-atrapą, której brak wpuścił tu sprzeczność.
+    # `plan` działa bez poświadczeń GCP, bo stan jest pusty i wszystkie zasoby są `create` — provider nie
+    # woła API.
+    sample = (d / "terraform.tfvars.sample").read_text()
+    m = re.search(r"^#\s*contract_reader_groups\s*=\s*\[(.*?)\]", sample, re.M)
+    przyklady = re.findall(r'"([^"]+)"', m.group(1)) if m else []
+    check("iam-bootstrap: tfvars.sample pokazuje przyklad contract_reader_groups",
+          bool(przyklady), "brak zakomentowanego przykladu — nie ma czego porownac z walidacja")
+
+    baza = ["-var=org_id=123456789012", "-var=identity_project_id=prj-example-identity",
+            "-var=github_repository=example-org/gcp-vpc-sc", "-var=state_bucket=bkt-example-tf-state",
+            "-var=contracts_bucket=bkt-example-contracts"]
+
+    def plan_grup(wartosci, out=None):
+        cmd = ["terraform", f"-chdir={d}", "plan", "-no-color", "-input=false", "-lock=false"]
+        cmd += [f"-out={out}"] if out else []
+        return sh(cmd + baza + [f"-var=contract_reader_groups={json.dumps(wartosci)}"])
+
+    if przyklady:
+        # 1. Przykład z sample'a MUSI przejść walidację. To pilnuje trzeciego miejsca: dokumentacja, którą
+        #    czytelnik odkomentowuje, nie może padać na bramce z pliku obok.
+        p = plan_grup(przyklady, out="zz_selftest.tfplan")
+        check("iam-bootstrap: przyklad z tfvars.sample przechodzi walidacje contract_reader_groups",
+              p.returncode == 0, (p.stdout[-400:] + p.stderr[-700:]))
+
+        # 2. Renderowany principal musi nieść prefiks `group:` DOKŁADNIE RAZ. Oczekiwanie liczymy z tego
+        #    samego przykładu, więc guard nie przyklepuje jednej ze stron sporu — sprawdza ich ZGODNOŚĆ.
+        member = ""
+        if p.returncode == 0:
+            s = sh(["terraform", f"-chdir={d}", "show", "-json", "zz_selftest.tfplan"])
+            zasoby = json.loads(s.stdout)["planned_values"]["root_module"].get("resources", [])
+            member = next((r["values"]["member"] for r in zasoby
+                           if r["type"] == "google_storage_bucket_iam_member"
+                           and r["name"] == "contract_reader"), "")
+        oczekiwany = "group:" + przyklady[0].removeprefix("group:")
+        check("iam-bootstrap: walidacja i main.tf zgodne co do prefiksu group: (dokladnie jeden)",
+              member == oczekiwany,
+              f"member={member!r}, oczekiwano={oczekiwany!r} — walidacja i renderowanie rozjechaly sie")
+        (d / "zz_selftest.tfplan").unlink(missing_ok=True)
+
+        # 3. Forma PRZECIWNA do przykładu musi być odrzucona. Gdyby przechodziły obie, ten sam kontrakt
+        #    renderowałby się raz dobrze, a raz z podwójnym prefiksem — zależnie od tego, skąd kto skopiował
+        #    wartość. Jeden dopuszczalny format, nie dwa.
+        wzor = przyklady[0]
+        przeciwna = wzor.removeprefix("group:") if wzor.startswith("group:") else "group:" + wzor
+        p = plan_grup([przeciwna])
+        check("iam-bootstrap: przeciwna forma wpisu contract_reader_groups jest ODRZUCANA",
+              p.returncode != 0, f"rc={p.returncode} dla {przeciwna!r} — walidacja przepuszcza oba formaty")
+
+    # 4. Intencja bezpieczeństwa, niezależna od tego, po której stronie mieszka prefiks: kontrakt niesie
+    #    nazwy projektów, dywizji i profili, więc principal otwarty na świat albo przypięty do konkretnego
+    #    człowieka nie ma prawa tędy wejść.
+    for zly in ["allUsers", "allAuthenticatedUsers", "user:ktos@example.com", "domain:example.com"]:
+        check(f"iam-bootstrap: contract_reader_groups ODRZUCA {zly}",
+              plan_grup([zly]).returncode != 0, "principal spoza grup przeszedl walidacje")
+
 
 # --------------------------------------------------------------------- kontrakt
 def test_contract() -> None:

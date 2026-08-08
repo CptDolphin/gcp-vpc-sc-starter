@@ -115,15 +115,46 @@ variable "contract_prefix" {
 }
 
 variable "contract_reader_groups" {
-  description = "Grupy Google konsumentów SPOZA GitHuba (joby w GCP, skrypty operacyjne), które mogą CZYTAĆ kontrakt z bucketa — read-only. Repozytoria dywizji tu NIE należą: pobierają kontrakt jako asset release'u, tokenem GitHuba. Pusta lista = poprawne, domyślne ustawienie."
+  description = "Grupy Google konsumentów SPOZA GitHuba (joby w GCP, skrypty operacyjne), które mogą CZYTAĆ kontrakt z bucketa — read-only. SAM adres grupy, BEZ prefiksu `group:`: prefiks dokłada main.tf. Repozytoria dywizji tu NIE należą: pobierają kontrakt jako asset release'u, tokenem GitHuba. Pusta lista = poprawne, domyślne ustawienie."
   type        = list(string)
   default     = []
 
+  # DLACZEGO GRUPY, A NIE KONTA POJEDYNCZYCH OSÓB: zespół utrzymujący tych konsumentów zmienia skład dużo
+  # częściej niż ten stack. Człowiek wpisany tutaj odchodzi z firmy i zostawia grant, którego nikt nie
+  # sprząta, bo nikt już nie pamięta, że istnieje. Adres grupy przeżywa rotację — dostęp nadaje się i odbiera
+  # w katalogu, tam gdzie i tak zarządza się składem zespołu, BEZ zmiany w Terraformie i bez apply przez
+  # zespół IAM (to on jest właścicielem tego stacku, więc każda taka zmiana to osobna kolejka i przegląd).
+  #
+  # KONTRAKT TEJ ZMIENNEJ: sam adres, prefiks dokłada main.tf. Trzy miejsca muszą mówić to samo — walidacja
+  # niżej, `member` w main.tf i przykład w terraform.tfvars.sample. Rozjazd któregokolwiek z nich daje albo
+  # `group:group:...`, albo goły adres jako principala; jedno i drugie to grant, który nie działa. Pilnuje
+  # tego selftest, bo przy `default = []` sam plan tej wartości nigdy nie dotyka.
+
   validation {
-    # Wyłącznie `group:` — `allUsers` albo `domain:` w tym miejscu upublicznia kontrakt (nazwy projektów,
-    # dywizji i profili) całej organizacji lub internetowi. Konta pojedynczych osób odrzucamy świadomie:
-    # dostęp per człowiek gnije, grupa jest zarządzana tam, gdzie zarządza się zespołem.
-    condition     = alltrue([for g in var.contract_reader_groups : startswith(g, "group:")])
-    error_message = "contract_reader_groups przyjmuje tylko wpisy `group:...` (bez user:, domain:, allUsers)."
+    # Dwukropek w wartości znaczy, że ktoś wkleił gotowego principala z konsoli albo z dokumentacji IAM.
+    # Odrzucamy KAŻDY prefiks, także taki, którego dziś nie znamy — adres grupy nigdy nie zawiera dwukropka,
+    # więc ten warunek się nie zestarzeje, a lista dozwolonych prefiksów zestarzałaby się po cichu.
+    # `allUsers`/`allAuthenticatedUsers` dwukropka nie mają, więc dostają własny człon: kontrakt niesie nazwy
+    # projektów, dywizji i profili, a te dwa wpisy pokazałyby je całej organizacji albo internetowi.
+    #
+    # DLACZEGO osobno od kształtu adresu niżej, skoro tamten warunek odrzuciłby to samo: chodzi o KOMUNIKAT.
+    # „to nie jest adres e-mail" nad wpisem `group:grp-...@example.com` czyta się jak błąd narzędzia — nikt
+    # nie widzi w nim prefiksu, bo prefiks wygląda na część adresu.
+    condition = alltrue([
+      for g in var.contract_reader_groups :
+      !strcontains(g, ":") && !contains(["allUsers", "allAuthenticatedUsers"], g)
+    ])
+    error_message = "contract_reader_groups przyjmuje SAM adres grupy (grp-...@example.com): bez prefiksu `group:`, bez user:/serviceAccount:/domain: i bez allUsers."
+  }
+
+  validation {
+    # Kształt adresu. Bez tego literówka („grp-example-division-cloud" bez domeny) przechodzi plan i wraca
+    # jako błąd API dopiero przy apply — u zespołu IAM, który nie wie, jaki adres miał tu być, bo prosił
+    # o niego zespół z drugiej strony kontraktu. Taniej odrzucić to tutaj, komunikatem niosącym nazwę zmiennej.
+    condition = alltrue([
+      for g in var.contract_reader_groups :
+      can(regex("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9][a-zA-Z0-9.-]*\\.[a-zA-Z]{2,}$", g))
+    ])
+    error_message = "contract_reader_groups: każdy wpis to adres e-mail grupy Google (np. grp-example-division-cloud@example.com)."
   }
 }

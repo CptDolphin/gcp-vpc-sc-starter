@@ -14,4 +14,4 @@ state_bucket        = "bkt-tf-state-vpcsc"  # versioning + soft-delete, BEZ rete
 
 # Kanał zewnętrzny (repozytoria zespołów) — puste = nieaktywny:
 # contracts_bucket       = "bkt-tf-contracts"          # MUSI być inny niż state_bucket
-# contract_reader_groups = ["grp-example-division-cloud@example.com"]
+# contract_reader_groups = ["grp-example-division-cloud@example.com"]  # SAM adres grupy — prefiks `group:` dokłada main.tf
