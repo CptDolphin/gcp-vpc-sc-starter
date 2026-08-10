@@ -1339,6 +1339,43 @@ def test_tools() -> None:
     check("violations_report.py ODRZUCA wejscie, ktore nie jest lista wpisow",
           p.returncode != 0 and "Traceback" not in p.stderr, f"rc={p.returncode} " + p.stderr[-300:])
 
+    # ---- ZAKRES ODCZYTU: poprawiony raport na zlym zakresie to nadal slepy raport --------------------
+    # Wpis audytowy VPC-SC laduje w logu PROJEKTU, ktory jest wlascicielem chronionego zasobu — czyli
+    # czlonka. `--organization=` czyta wylacznie `organizations/<id>/logs/…` i nic ponizej, wiec zakres
+    # wygladajacy najszerzej widzi najmniej. Zmierzone na zywym perimetrze: organizacja zwrocila 0 wpisow,
+    # projekt czlonka 30 — ten sam filtr, to samo okno. Zero jest nieodroznialne od czystego okna, ktore
+    # promotion_gate przyjmuje jako DOWOD, wiec sam zly zakres wystarczal do promocji czlonka z 30
+    # naruszeniami. Atrapa `gcloud` odwzorowuje wlasnie te asymetrie: organizacja pusta, czlonek z wpisem.
+    wf_raport = yaml.safe_load((ROOT / ".github/workflows/violations-report.yml").read_text())
+    krok_logow = next((k for k, _ in kroki_workflow(wf_raport)
+                       if "gcloud logging read" in str(k.get("run", ""))), None)
+    check("violations-report.yml ma krok czytajacy logi audytowe", krok_logow is not None)
+    if krok_logow is not None:
+        czlonek = json.loads((ROOT / "declarations.json").read_text())["members"]
+        czlonek = sorted(m["project_id"] for m in czlonek.values())[0]
+        wpis = json.loads((ROOT / "tests/vpcsc-violation-dryrun.json").read_text())[:1]
+        (ROOT / "wpis-czlonka.json").write_text(json.dumps(wpis))
+        bin_logi = ROOT / "stub-bin-logi"
+        bin_logi.mkdir(exist_ok=True)
+        (bin_logi / "gcloud").write_text(
+            "#!/usr/bin/env bash\n"
+            "case \"$*\" in\n"
+            "  *--organization=*) echo '[]' ;;\n"
+            f"  *--project={czlonek}*) cat \"$PWD/wpis-czlonka.json\" ;;\n"
+            "  *) echo '[]' ;;\n"
+            "esac\n")
+        (bin_logi / "gcloud").chmod(0o755)
+        env = dict(os.environ, PATH=f"{bin_logi}:{os.environ['PATH']}",
+                   ORG_ID="123456789012", DAYS="14")
+        (ROOT / "raw.json").unlink(missing_ok=True)
+        p = subprocess.run(["bash", "-e", "-c", krok_logow["run"]],
+                           cwd=ROOT, env=env, capture_output=True, text=True)
+        surowe = json.loads((ROOT / "raw.json").read_text()) if (ROOT / "raw.json").exists() else []
+        # Anty-tautologia: gdyby krok czytal SAMA organizacje, atrapa oddalaby `[]` i lista bylaby pusta.
+        check("violations-report.yml czyta logi PROJEKTOW czlonkow, nie samej organizacji",
+              p.returncode == 0 and len(surowe) == 1,
+              f"rc={p.returncode} wpisow={len(surowe)} " + (p.stdout + p.stderr)[-400:])
+
 
 # --------------------------------------------------- eksperyment wyscigu (klasyfikacja wynikow)
 # Atrapy `terraform` i `gcloud` pozwalaja wysterowac KAZDA z czterech kategorii werdyktu bez chmury.

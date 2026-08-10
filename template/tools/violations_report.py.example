@@ -31,15 +31,24 @@ CZEGO TEN RAPORT NIE OBIECUJE: `principalEmail` w logach `cloudaudit.googleapis.
 GCP zredagowany (`m...@ra...m`) i wtedy raport nie nazwie wołającego. Do namierzenia wywołania służy
 `vpcServiceControlsUniqueId` — dlatego trafia do raportu markdown.
 
-Wejście: `gcloud logging read` w formacie JSON (organizacja, okno N dni). Sprawdź kod wyjścia — przy
-odmowie `gcloud logging read` i tak wypisuje na stdout `[]`, więc samo przekierowanie do pliku zamienia
-„nie wolno mi było przeczytać" w „nie było naruszeń":
+SKĄD BRAĆ WEJŚCIE — zakres organizacji NIE WYSTARCZA. Wpis audytowy VPC-SC ląduje w logu PROJEKTU, który
+jest właścicielem chronionego zasobu, czyli członka; `--organization=` czyta wyłącznie `organizations/<id>/
+logs/…` i nic poniżej. Zmierzone na żywym perimetrze: zakres organizacji zwrócił **0** wpisów, a projekt
+członka **30** — ten sam filtr, to samo okno 14 dni. To zero jest nieodróżnialne od czystego okna, więc sam
+zły zakres wystarczał, by `promotion_gate` przepuścił członka z 30 naruszeniami. Czytaj organizację ORAZ
+każdy projekt z `perimeter/members/` i scal wyniki po `insertId` (zakresy mogą się pokrywać) — tak robi to
+`.github/workflows/violations-report.yml`.
+
+Sprawdź też kod wyjścia: przy odmowie `gcloud logging read` i tak wypisuje na stdout `[]`, więc samo
+przekierowanie do pliku zamienia „nie wolno mi było przeczytać" w „nie było naruszeń":
 
   set -o pipefail
-  gcloud logging read \\
-    'protoPayload.metadata."@type"="type.googleapis.com/google.cloud.audit.VpcServiceControlAuditMetadata"
-     AND protoPayload.metadata.dryRun="true"' \\
-    --organization=<ORG_ID> --freshness=14d --format=json > raw.json || exit 1
+  for ZAKRES in --organization=<ORG_ID> --project=<PROJEKT_CZLONKA>; do
+    gcloud logging read \\
+      'protoPayload.metadata."@type"="type.googleapis.com/google.cloud.audit.VpcServiceControlAuditMetadata"
+       AND protoPayload.metadata.dryRun="true"' \\
+      "$ZAKRES" --freshness=14d --format=json > "raw-${ZAKRES#--}.json" || exit 1
+  done
 
 Użycie:
     python3 tools/violations_report.py --logs raw.json --declarations declarations.json \\
