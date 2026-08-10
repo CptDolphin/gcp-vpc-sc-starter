@@ -4,7 +4,7 @@
 #
 # Każdy check zamyka konkretny tryb awarii:
 #   1. projekt istnieje i numer zgadza się z ID   → literówka w numerze dodałaby do perimetru CUDZY projekt
-#   2. projekt nie jest w innej konfiguracji enforced → twarde ograniczenie ACM; apply padłby po review
+#   2. projekt nie jest w innej konfiguracji EGZEKWOWANEJ → twarde ograniczenie ACM; apply padłby po review
 #   3. podsieci mają Private Google Access        → bez tego ruch do API nie pójdzie przez restricted VIP
 #   4. strefa DNS kieruje googleapis.com na restricted VIP → jw., najczęstsza cicha awaria onboardingu
 #   5. (ostrzeżenie) istnieją już endpointy Vertex → endpoint utworzony PRZED wejściem do perimetru
@@ -12,82 +12,233 @@
 #   6. konta serwisowe z reguł ISTNIEJĄ → ACM waliduje tożsamości po swojej stronie i odrzuca CAŁĄ zmianę
 #      komunikatem `invalid or non-existent`, czyli literówka wywraca apply po review, na obiekcie org-plane
 #
+# TRZY WERDYKTY, NIE DWA. Check może stwierdzić, że wymóg jest spełniony (OK), że jest złamany (BŁĄD)
+# albo że **nie dotyczy tego projektu** (N/D). Czwartego stanu — „nie udało się sprawdzić" — nie zamiatamy
+# pod OK: nieodczytany check jest raportowany jako BŁĄD z powodem. Pre-flight, który mówi „OK" o czymś,
+# czego nie odczytał, jest gorszy od braku pre-flightu, bo produkuje fałszywe poczucie sprawdzenia.
+#
+# DLACZEGO checki 3 i 4 są WARUNKOWE (N/D na projekcie bez sieci). VPC-SC działa na płaszczyźnie API —
+# członkostwo w perimetrze nie wymaga ani jednej maszyny ani sieci VPC. Private Google Access i prywatna
+# strefa DNS opisują wyłącznie to, jak ruch Z WNĘTRZA sieci projektu trafia do googleapis.com; w projekcie,
+# który sieci nie ma, nie ma czego routować i wymóg jest bezprzedmiotowy. Twardy wymóg „zawsze" kazałby
+# poprawnemu kandydatowi zbudować sieć, której nie potrzebuje, a — co gorsze — zamieniłby check w alarm
+# odpalający się przy każdym onboardingu. Odruchową reakcją na check, który zawsze krzyczy, jest
+# `--warn-only`, czyli wyciszenie RÓWNIEŻ tego przypadku, w którym PGA naprawdę brakuje. Check, który
+# woła „wilk", rozbraja sam siebie.
+#
 # Uprawnienia (read-only): cloudasset.viewer, compute.networkViewer, dns.reader, iam.serviceAccountViewer
 # — docs/2-uprawnienia-i-wif.md
 set -euo pipefail
 
+# DLACZEGO to jest pierwsza linijka kodu, a nie szczegół. gcloud, natrafiając na wyłączone API, proponuje
+# JEGO WŁĄCZENIE: „API [...] not enabled on project [...]. Would you like to enable and retry? (y/N)".
+# Pytanie idzie na **stderr**, a checki niżej stderr przechwytują — więc na terminalu skrypt po prostu
+# stawałby w miejscu bez widocznego powodu, a odpowiedź „y" WŁĄCZYŁABY usługę w CUDZYM projekcie.
+# Narzędzie deklarowane jako wyłącznie odczytowe (DEC-5) nie ma prawa niczego proponować.
+export CLOUDSDK_CORE_DISABLE_PROMPTS=1
+
 PROJECT_ID=""
 PROJECT_NUMBER=""
+VERTEX_REGION="europe-west4"
 STRICT=1
 IDENTITIES=()
+
+uzycie() {
+  cat >&2 <<'POMOC'
+użycie: preflight_check.sh --project <id> --number <numer> [--identity <spec>]… [--region <region>] [--warn-only]
+
+  --project   ID projektu kandydata
+  --number    numer projektu — MUSI zgadzać się z ID (check 1)
+  --identity  tożsamość w formacie ACM (`serviceAccount:…`, `user:…`, `group:…`), powtarzalna
+  --region    region, w którym szukamy endpointów Vertex (domyślnie europe-west4)
+  --warn-only kod wyjścia 0 mimo błędów; NIE zmienia werdyktu, tylko go nie egzekwuje
+POMOC
+  exit "${1:-2}"
+}
+
+# Flaga bez wartości była wcześniej cichym `exit 1` bez jednego słowa wyjaśnienia (`shift` na pustej
+# liście + `set -e`) — czyli błąd użycia nieodróżnialny od niezaliczonego checku.
+wymagaj_wartosci() {
+  [ "$2" -gt 0 ] || { echo "flaga $1 wymaga wartości" >&2; uzycie; }
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
-    --project) shift; PROJECT_ID="${1:-}" ;;
-    --number)  shift; PROJECT_NUMBER="${1:-}" ;;
-    # Powtarzalna. Wartość w formacie ACM (`serviceAccount:…`, `user:…`, `group:…`) — dokładnie tak, jak stoi
-    # w pliku członka, żeby nie trzeba było jej po drodze przepisywać (przepisywanie to kolejna literówka).
-    --identity) shift; IDENTITIES+=("${1:-}") ;;
-    --warn-only) STRICT=0 ;;
-    *) echo "nieznany argument: $1" >&2; exit 2 ;;
+    --project)  wymagaj_wartosci "$1" $(($# - 1)); PROJECT_ID="$2";     shift 2 ;;
+    --number)   wymagaj_wartosci "$1" $(($# - 1)); PROJECT_NUMBER="$2"; shift 2 ;;
+    # Wartość w formacie ACM — dokładnie tak, jak stoi w pliku członka, żeby nie trzeba było jej po drodze
+    # przepisywać (przepisywanie to kolejna literówka).
+    --identity) wymagaj_wartosci "$1" $(($# - 1)); IDENTITIES+=("$2");  shift 2 ;;
+    --region)   wymagaj_wartosci "$1" $(($# - 1)); VERTEX_REGION="$2";  shift 2 ;;
+    --warn-only) STRICT=0; shift ;;
+    -h|--help)  uzycie 0 ;;
+    *) echo "nieznany argument: $1" >&2; uzycie ;;
   esac
-  shift
 done
-[ -n "$PROJECT_ID" ] && [ -n "$PROJECT_NUMBER" ] || { echo "użycie: $0 --project <id> --number <numer> [--identity <spec>]…" >&2; exit 2; }
+[ -n "$PROJECT_ID" ] && [ -n "$PROJECT_NUMBER" ] || uzycie
 
 fail=0
-note() { printf '  %-6s %s\n' "$1" "$2"; }
-problem() { note "BŁĄD" "$1"; fail=$((fail + 1)); }
+nd=0
+note()    { printf '  %s  %s\n' "$1" "$2"; }
+ok()      { note "OK   " "$1"; }
+uwaga()   { note "UWAGA" "$1"; }
+problem() { note "BŁĄD " "$1"; fail=$((fail + 1)); }
+nie_dotyczy() { note "N/D  " "$1"; nd=$((nd + 1)); }
+
+# Uruchamia gcloud zachowując stdout, stderr i kod wyjścia ROZDZIELNIE. Poprzednia wersja wszystkich
+# checków wołała `gcloud … 2>/dev/null` i wnioskowała z samej treści stdout — a stdout nieudanego
+# wywołania jest pusty, więc „nie udało się zapytać" wyglądało identycznie jak „zapytałem i nic nie ma".
+GOUT=""; GERR=""; GRC=0
+g() {
+  local plik
+  plik="$(mktemp "${TMPDIR:-/tmp}/preflight.XXXXXX")"
+  set +e
+  GOUT="$(gcloud "$@" 2>"$plik")"
+  GRC=$?
+  set -e
+  GERR="$(tr '\n' ' ' < "$plik" | cut -c1-240)"
+  rm -f "$plik"
+}
+
+# Wyłączone API zwraca PERMISSION_DENIED — TEN SAM kod, którym odpowiada odmowa VPC-SC. Rozstrzyga
+# wyłącznie treść komunikatu, nigdy kod błędu; wnioskowanie z kodu jest tu udokumentowaną pomyłką.
+api_wylaczone() {
+  case "$GERR" in
+    *"has not been used in project"*|*"SERVICE_DISABLED"*|*"not enabled on project"*|*"API is not enabled"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 
 echo "pre-flight: $PROJECT_ID ($PROJECT_NUMBER)"
 
 # 1. projekt istnieje i numer się zgadza
-actual="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)' 2>/dev/null || true)"
-if [ -z "$actual" ]; then
+g projects describe "$PROJECT_ID" --format='value(projectNumber)'
+if [ "$GRC" -ne 0 ] || [ -z "$GOUT" ]; then
   problem "projekt $PROJECT_ID nie istnieje albo brak dostępu odczytu"
-elif [ "$actual" != "$PROJECT_NUMBER" ]; then
-  problem "numer projektu nie zgadza się: deklarowany $PROJECT_NUMBER, realny $actual"
+elif [ "$GOUT" != "$PROJECT_NUMBER" ]; then
+  problem "numer projektu nie zgadza się: deklarowany $PROJECT_NUMBER, realny $GOUT"
 else
-  note "OK" "projekt istnieje, numer zgodny"
+  ok "projekt istnieje, numer zgodny"
 fi
 
-# 2. kolizja perimetrów — projekt może należeć tylko do JEDNEJ konfiguracji egzekwowanej
-if gcloud access-context-manager perimeters list --format=json 2>/dev/null \
-  | grep -q "\"projects/$PROJECT_NUMBER\""; then
-  note "UWAGA" "projekt występuje już w jakiejś konfiguracji perimetru — sprawdź, czy to NASZ perimetr"
+# 2. kolizja perimetrów — projekt może należeć tylko do JEDNEJ konfiguracji EGZEKWOWANEJ.
+#
+# Konfiguracja dry-run (`spec`) i egzekwowana (`status`) to dwie różne rzeczy i mylenie ich kosztuje
+# dwa razy: obecność w cudzym `status` BLOKUJE onboarding (twarde ograniczenie ACM), a obecność we
+# WŁASNYM `spec` jest normalnym, zamierzonym etapem dwustopniowego wejścia. Poprzednia wersja szukała
+# numeru `grep`em w surowym JSON-ie całej listy, więc nie odróżniała ani jednego od drugiego, ani nawet
+# tego, w KTÓRYM perimetrze projekt siedzi — i mówiła „sprawdź, czy to NASZ perimetr", nie podając nazwy.
+g access-context-manager perimeters list \
+  --format='value(name,status.resources.list(),spec.resources.list())'
+if [ "$GRC" -ne 0 ]; then
+  problem "nie zweryfikowano kolizji perimetrów (odczyt listy nie powiódł się): $GERR"
 else
-  note "OK" "brak kolizji z innym perimetrem"
+  # awk z jawnym FS='\t' — `read` z IFS=$'\t' ZWIJA sąsiadujące taby (tab jest znakiem białym w IFS),
+  # więc perimetr z pustą konfiguracją egzekwowaną przesuwałby kolumny i członek dry-run byłby
+  # raportowany jako EGZEKWOWANY. Zmierzone; to nie jest hipotetyczne.
+  kolizja="$(printf '%s\n' "$GOUT" | awk -F'\t' -v cel="projects/$PROJECT_NUMBER" '
+    function zawiera(pole,   i, n, a) {
+      n = split(pole, a, ";")
+      for (i = 1; i <= n; i++) { gsub(/^[ \t]+|[ \t]+$/, "", a[i]); if (a[i] == cel) return 1 }
+      return 0
+    }
+    NF == 0 { next }
+    zawiera($2) { print "ENFORCED\t" $1; next }
+    zawiera($3) { print "DRYRUN\t" $1 }
+  ')"
+  zbadane="$(printf '%s' "$GOUT" | grep -c . || true)"
+  enforced="$(printf '%s\n' "$kolizja" | awk -F'\t' '$1=="ENFORCED"{print $2}' | tr '\n' ' ')"
+  dryrun="$(printf '%s\n' "$kolizja" | awk -F'\t' '$1=="DRYRUN"{print $2}' | tr '\n' ' ')"
+  if [ -n "${enforced// /}" ]; then
+    problem "projekt jest już w EGZEKWOWANEJ konfiguracji perimetru: ${enforced% } → ACM nie dopuszcza drugiej"
+  elif [ -n "${dryrun// /}" ]; then
+    uwaga "projekt jest w konfiguracji DRY-RUN perimetru: ${dryrun% } → to etap onboardingu, nie kolizja; potwierdź, że to ten perimetr"
+  else
+    ok "brak kolizji — projektu nie ma w żadnej konfiguracji (zbadano perimetrów: $zbadane)"
+  fi
+fi
+
+# Jedno pytanie, na którym wiszą checki 3 i 4: czy w tym projekcie JEST co routować do googleapis.com.
+# Pytamy raz, bo dwa niezależne odczyty mogłyby dać dwie różne odpowiedzi na to samo pytanie — a to
+# dokładnie ten rozjazd, który sprawiał, że check 3 mówił OK, a check 4 BŁĄD o tym samym projekcie.
+SIEC="nieznane"; SIEC_POWOD=""
+g compute networks list --project="$PROJECT_ID" --format='value(name)'
+if [ "$GRC" -eq 0 ] && [ -n "$GOUT" ]; then
+  SIEC="jest"
+elif [ "$GRC" -eq 0 ]; then
+  SIEC="brak"; SIEC_POWOD="projekt nie ma ani jednej sieci VPC"
+elif api_wylaczone; then
+  # To jest ODPOWIEDŹ, nie brak odpowiedzi: sieci VPC nie da się utworzyć przy wyłączonym Compute API.
+  SIEC="brak"; SIEC_POWOD="Compute API wyłączone — sieci VPC w projekcie nie ma"
+else
+  SIEC_POWOD="$GERR"
 fi
 
 # 3. Private Google Access na podsieciach
-subnets_without_pga="$(gcloud compute networks subnets list --project="$PROJECT_ID" \
-  --format='value(name,privateIpGoogleAccess)' 2>/dev/null | awk '$2=="False"{print $1}' || true)"
-if [ -n "$subnets_without_pga" ]; then
-  problem "podsieci bez Private Google Access: $(echo "$subnets_without_pga" | tr '\n' ' ')"
-else
-  note "OK" "Private Google Access włączony na wszystkich podsieciach"
-fi
+case "$SIEC" in
+  brak)
+    nie_dotyczy "Private Google Access nie dotyczy — $SIEC_POWOD" ;;
+  nieznane)
+    problem "nie zweryfikowano Private Google Access (nie wiadomo, czy projekt ma sieć): $SIEC_POWOD" ;;
+  *)
+    g compute networks subnets list --project="$PROJECT_ID" --format='value(name,privateIpGoogleAccess)'
+    if [ "$GRC" -ne 0 ]; then
+      problem "nie zweryfikowano Private Google Access (odczyt podsieci nie powiódł się): $GERR"
+    elif [ -z "$GOUT" ]; then
+      nie_dotyczy "Private Google Access nie dotyczy — sieć istnieje, ale nie ma w niej ani jednej podsieci"
+    else
+      bez_pga="$(printf '%s\n' "$GOUT" | awk -F'\t' '$2=="False"{print $1}' | tr '\n' ' ')"
+      if [ -n "${bez_pga// /}" ]; then
+        problem "podsieci bez Private Google Access: ${bez_pga% }"
+      else
+        ok "Private Google Access włączony na wszystkich podsieciach"
+      fi
+    fi ;;
+esac
 
-# 4. DNS na restricted VIP (199.36.153.4/30)
-if gcloud dns managed-zones list --project="$PROJECT_ID" --format='value(dnsName)' 2>/dev/null \
-  | grep -q "googleapis.com"; then
-  note "OK" "istnieje prywatna strefa dla googleapis.com"
-else
-  problem "brak prywatnej strefy DNS dla googleapis.com → ruch do API nie pójdzie przez restricted VIP"
-fi
-
-# 4b. Workbench z własnymi kernelami wymaga private.googleapis.com (199.36.153.8/30) dla
+# 4. DNS na restricted VIP (199.36.153.4/30) — jeden odczyt stref obsługuje też 4b.
+#
+# 4b: Workbench z własnymi kernelami wymaga private.googleapis.com (199.36.153.8/30) dla
 #     *.notebooks.googleusercontent.com — jedyny wyjątek od reguły „wszystko przez restricted".
-if gcloud dns managed-zones list --project="$PROJECT_ID" --format='value(dnsName)' 2>/dev/null \
-  | grep -q "notebooks.googleusercontent.com"; then
-  note "OK" "strefa dla notebooks.googleusercontent.com obecna (Workbench)"
-else
-  note "UWAGA" "brak strefy notebooks.googleusercontent.com → Workbench z własnym kernelem nie wstanie"
-fi
+case "$SIEC" in
+  brak)
+    nie_dotyczy "prywatna strefa DNS na restricted VIP nie dotyczy — $SIEC_POWOD" ;;
+  nieznane)
+    problem "nie zweryfikowano stref DNS (nie wiadomo, czy projekt ma sieć): $SIEC_POWOD" ;;
+  *)
+    g dns managed-zones list --project="$PROJECT_ID" --format='value(dnsName)'
+    if [ "$GRC" -ne 0 ]; then
+      problem "nie zweryfikowano stref DNS (odczyt nie powiódł się): $GERR"
+    else
+      if printf '%s\n' "$GOUT" | grep -q 'googleapis\.com'; then
+        ok "istnieje prywatna strefa dla googleapis.com"
+      else
+        problem "brak prywatnej strefy DNS dla googleapis.com → ruch do API nie pójdzie przez restricted VIP"
+      fi
+      if printf '%s\n' "$GOUT" | grep -q 'notebooks\.googleusercontent\.com'; then
+        ok "strefa dla notebooks.googleusercontent.com obecna (Workbench)"
+      else
+        uwaga "brak strefy notebooks.googleusercontent.com → Workbench z własnym kernelem nie wstanie"
+      fi
+    fi ;;
+esac
 
 # 5. kolejność tworzenia endpointów Vertex (ostrzeżenie, nie blokada)
-if gcloud ai endpoints list --project="$PROJECT_ID" --region=europe-west4 --format='value(name)' 2>/dev/null \
-  | grep -q .; then
-  note "UWAGA" "istnieją endpointy Vertex sprzed wejścia do perimetru — deploy modelu na nie zawiedzie; odtwórz je po dołączeniu"
+#
+# Region jest parametrem i jest WYPISYWANY. Wcześniej był zaszyty na sztywno i check milczał zawsze —
+# i gdy endpointów nie było, i gdy były w innym regionie, i gdy odczyt padł. Check, który w komplecie
+# przypadków nie mówi nic, jest nieodróżnialny od checku, którego nie ma.
+g ai endpoints list --project="$PROJECT_ID" --region="$VERTEX_REGION" --format='value(name)'
+if [ "$GRC" -ne 0 ]; then
+  if api_wylaczone; then
+    nie_dotyczy "Vertex AI API wyłączone → endpointów sprzed wejścia do perimetru nie ma"
+  else
+    uwaga "nie zweryfikowano endpointów Vertex w regionie $VERTEX_REGION: $GERR"
+  fi
+elif [ -n "$GOUT" ]; then
+  uwaga "istnieją endpointy Vertex ($VERTEX_REGION) sprzed wejścia do perimetru — deploy modelu na nie zawiedzie; odtwórz je po dołączeniu"
+else
+  ok "brak endpointów Vertex sprzed wejścia do perimetru (sprawdzony region: $VERTEX_REGION)"
 fi
 
 # 6. tożsamości z reguł istnieją
@@ -100,8 +251,9 @@ for spec in ${IDENTITIES+"${IDENTITIES[@]}"}; do
   case "$spec" in
     serviceAccount:*)
       sa="${spec#serviceAccount:}"
-      if gcloud iam service-accounts describe "$sa" --format='value(email)' >/dev/null 2>&1; then
-        note "OK" "konto serwisowe istnieje: $sa"
+      g iam service-accounts describe "$sa" --format='value(email)'
+      if [ "$GRC" -eq 0 ]; then
+        ok "konto serwisowe istnieje: $sa"
       else
         problem "konto serwisowe NIE ISTNIEJE albo brak dostępu odczytu: $sa → ACM odrzuci apply"
       fi
@@ -110,7 +262,7 @@ for spec in ${IDENTITIES+"${IDENTITIES[@]}"}; do
       # Świadomie bez werdyktu: istnienia użytkownika i grupy nie da się potwierdzić uprawnieniami GCP —
       # to Directory API Workspace, czyli inna domena administracyjna i inne poświadczenia. Bramka, która
       # udawałaby, że sprawdza, byłaby gorsza od jawnego „nie wiem".
-      note "UWAGA" "nie weryfikuję z GCP: $spec (Workspace Directory API) — ACM sprawdzi przy apply"
+      uwaga "nie weryfikuję z GCP: $spec (Workspace Directory API) — ACM sprawdzi przy apply"
       ;;
     *)
       problem "tożsamość bez znanego prefiksu typu: $spec (oczekiwane serviceAccount:/user:/group:)"
@@ -118,8 +270,18 @@ for spec in ${IDENTITIES+"${IDENTITIES[@]}"}; do
   esac
 done
 
-if [ "$fail" -gt 0 ] && [ "$STRICT" -eq 1 ]; then
+if [ "$nd" -gt 0 ]; then
+  echo "  (checków nie dotyczących tego projektu: $nd — patrz N/D wyżej)"
+fi
+
+if [ "$fail" -gt 0 ]; then
+  # `--warn-only` zmienia WYŁĄCZNIE kod wyjścia. Werdykt zostaje ten sam: poprzednia wersja kończyła się
+  # słowem „zaliczony" mimo błędów, czyli linią, którą czyta się w logu CI i w podsumowaniu recenzenta.
   echo "pre-flight NIEZALICZONY ($fail błędów) — naprawia właściciel projektu, nie repo perimetru" >&2
-  exit 1
+  if [ "$STRICT" -eq 1 ]; then
+    exit 1
+  fi
+  echo "kod wyjścia 0 na żądanie (--warn-only) — werdykt powyżej NIE zmienia się" >&2
+  exit 0
 fi
 echo "pre-flight zaliczony"

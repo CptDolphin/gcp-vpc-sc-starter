@@ -1190,16 +1190,39 @@ def test_eksperyment_wyscigu() -> None:
 
 
 # --------------------------------------------------------------------- pre-flight
-# Atrapa `gcloud`: udaje ZDROWY projekt (istnieje, numer sie zgadza, PGA i DNS w porzadku), zeby jedyna
-# zmienna w tescie byla odpowiedz o TOZSAMOSC. Lista kont istniejacych przychodzi zmienna srodowiskowa.
+# Atrapa `gcloud`: domyslnie udaje ZDROWY projekt Z SIECIA (istnieje, numer sie zgadza, PGA i DNS w
+# porzadku). STUB_FAIL wymusza blad KONKRETNEGO wywolania — bez tego nie da sie sprawdzic wlasnosci,
+# ktora jest tu najwazniejsza: ze pre-flight NIE ORZEKA o rzeczy, ktorej nie odczytal. Poprzednia atrapa
+# konczyla kazde nieobsluzone wywolanie `exit 0` z pustym stdout, wiec „nie udalo sie zapytac" i
+# „zapytalem, nic nie ma" byly w tescie tym samym stanem — dokladnie tym zlepkiem, ktory na zywym
+# projekcie kazal skryptowi napisac „OK, Private Google Access wlaczony" o projekcie BEZ SIECI.
 GCLOUD_ATRAPA = """#!/usr/bin/env bash
+awaria() { echo "$1" >&2; exit 1; }
+
+# Skrypt jest wylacznie do odczytu (DEC-5), wiec nie ma prawa dopuscic do pytania „czy wlaczyc API?".
+# Zywy gcloud zadaje je na stderr, ktory pre-flight przechwytuje — na terminalu skrypt stalby w miejscu
+# bez widocznego powodu, a „y" wlaczyloby usluge w CUDZYM projekcie. Atrapa egzekwuje to zachowaniem.
+[ "${CLOUDSDK_CORE_DISABLE_PROMPTS:-}" = "1" ] || awaria "ATRAPA: pre-flight nie wylaczyl pytan gcloud"
+
 case "$*" in
   "projects describe "*) echo "123456789012" ;;
   *"service-accounts describe "*)
     for arg in "$@"; do case " $STUB_SA_OK " in *" $arg "*) exit 0 ;; esac; done
     exit 1 ;;
-  *"perimeters list"*) echo "[]" ;;
-  *"managed-zones list"*) printf 'googleapis.com.\\nnotebooks.googleusercontent.com.\\n' ;;
+  *"perimeters list"*)
+    [ "${STUB_FAIL:-}" = "perimeters" ] && awaria "ERROR: PERMISSION_DENIED: brak dostepu do polityki"
+    printf '%b\\n' "${STUB_PERIMETERS-}" ;;
+  *"subnets list"*)
+    [ "${STUB_FAIL:-}" = "subnets" ] && awaria "ERROR: INTERNAL: backend error"
+    printf '%b\\n' "${STUB_SUBNETS-subnet-a\\tTrue}" ;;
+  *"networks list"*)
+    [ "${STUB_FAIL:-}" = "compute-off" ] && awaria \\
+      "ERROR: PERMISSION_DENIED: Compute Engine API has not been used in project prj-example before or it is disabled."
+    [ "${STUB_FAIL:-}" = "compute-other" ] && awaria "ERROR: PERMISSION_DENIED: caller lacks compute.networks.list"
+    printf '%b\\n' "${STUB_NETWORKS-vpc-example}" ;;
+  *"managed-zones list"*)
+    [ "${STUB_FAIL:-}" = "dns" ] && awaria "ERROR: INTERNAL: backend error"
+    printf '%b\\n' "${STUB_ZONES-googleapis.com.\\nnotebooks.googleusercontent.com.}" ;;
   *) : ;;
 esac
 exit 0
@@ -1237,6 +1260,67 @@ def test_preflight() -> None:
     check("preflight: user:/group: jawnie NIEZWERYFIKOWANE, nie 'OK'",
           p.returncode == 0 and "Workspace Directory API" in p.stdout and "UWAGA" in p.stdout,
           p.stdout + p.stderr)
+
+    # ------------------------------------------------------------------ nie orzekaj o tym, czego nie odczytales
+    # Wszystkie ponizsze przypadki nalezaly wczesniej do JEDNEJ klasy defektu: nieudane wywolanie gcloud bylo
+    # wyciszane (`2>/dev/null`), a pusty stdout interpretowany jako odpowiedz. Zmierzone na zywym projekcie:
+    # projekt BEZ SIECI dostawal „OK Private Google Access wlaczony na wszystkich podsieciach" (check padl
+    # otwarty) i rownoczesnie „BLAD brak prywatnej strefy DNS" (check padl zamkniety) — dwa przeciwne werdykty
+    # o tym samym, nieodczytanym stanie.
+
+    # Kontrola pozytywna sily checku 3: podsiec BEZ PGA nadal ma wywracac pre-flight. Bez tej asercji
+    # „nie mow OK, gdy nie wiesz" dalby sie spelnic przez zwykle wylaczenie checku.
+    p = sh(baza, cwd=ROOT, env=dict(env, STUB_SUBNETS="subnet-b\tFalse"))
+    check("preflight: podsiec BEZ Private Google Access wywraca pre-flight",
+          p.returncode != 0 and "subnet-b" in p.stdout, p.stdout + p.stderr)
+
+    # Projekt bez sieci NIE JEST zlym kandydatem — VPC-SC dziala na plaszczyznie API. PGA i DNS maja byc
+    # oznaczone jako niedotyczace, a nie zmyslone w ktoralkolwiek strone.
+    p = sh(baza, cwd=ROOT, env=dict(env, STUB_FAIL="compute-off"))
+    check("preflight: projekt BEZ SIECI — PGA i DNS jako N/D, ani OK, ani BLAD",
+          p.returncode == 0 and p.stdout.count("N/D") >= 2
+          and "Private Google Access włączony" not in p.stdout
+          and "brak prywatnej strefy DNS" not in p.stdout, p.stdout + p.stderr)
+
+    # A tu roznica, ktorej stara wersja nie widziala wcale: „API wylaczone" to ODPOWIEDZ (sieci nie ma),
+    # a kazdy inny blad to BRAK odpowiedzi. Ten sam kod PERMISSION_DENIED, dwa rozne wnioski — rozstrzyga
+    # TRESC komunikatu, nigdy kod bledu.
+    p = sh(baza, cwd=ROOT, env=dict(env, STUB_FAIL="compute-other"))
+    check("preflight: siec NIEODCZYTANA (inny blad) = BLAD 'nie zweryfikowano', nie N/D",
+          p.returncode != 0 and "nie zweryfikowano" in p.stdout and "N/D" not in p.stdout,
+          p.stdout + p.stderr)
+
+    p = sh(baza, cwd=ROOT, env=dict(env, STUB_FAIL="perimeters"))
+    check("preflight: nieodczytana lista perimetrow NIE jest raportowana jako 'brak kolizji'",
+          p.returncode != 0 and "nie zweryfikowano kolizji" in p.stdout
+          and "brak kolizji" not in p.stdout, p.stdout + p.stderr)
+
+    # Konfiguracja EGZEKWOWANA blokuje onboarding (twarde ograniczenie ACM), DRY-RUN jest normalnym etapem
+    # dwustopniowego wejscia. Stara wersja szukala numeru grepem w surowym JSON-ie calej listy, wiec mowila
+    # to samo zdanie o obu — a przy promocji wlasnego czlonka byl to alarm o wlasnym perimetrze.
+    p = sh(baza, cwd=ROOT, env=dict(env, STUB_PERIMETERS="per-inny\tprojects/123456789012\t"))
+    check("preflight: projekt w EGZEKWOWANEJ konfiguracji = BLAD, z nazwa perimetru",
+          p.returncode != 0 and "EGZEKWOWANEJ" in p.stdout and "per-inny" in p.stdout,
+          p.stdout + p.stderr)
+
+    p = sh(baza, cwd=ROOT, env=dict(env, STUB_PERIMETERS="per-nasz\t\tprojects/123456789012"))
+    check("preflight: projekt w DRY-RUN = UWAGA 'etap onboardingu', nie blokada",
+          p.returncode == 0 and "DRY-RUN" in p.stdout and "per-nasz" in p.stdout
+          and "EGZEKWOWANEJ" not in p.stdout, p.stdout + p.stderr)
+
+    # `--warn-only` ma zmieniac KOD WYJSCIA, nie werdykt. Stara wersja konczyla slowem „zaliczony" mimo
+    # bledow — czyli linia, ktora czyta sie w logu CI, twierdzila dokladnie odwrotnie niz tresc raportu.
+    p = sh(["bash", "tools/preflight_check.sh", "--project", "prj-example", "--number", "999999999999",
+            "--warn-only"], cwd=ROOT, env=env)
+    check("preflight: --warn-only NIE oglasza 'pre-flight zaliczony'",
+          p.returncode == 0 and "NIEZALICZONY" in p.stdout + p.stderr
+          and "pre-flight zaliczony" not in p.stdout + p.stderr, p.stdout + p.stderr)
+
+    # Blad uzycia ma byc odrozniany od niezaliczonego checku — wczesniej `shift` na pustej liscie konczyl
+    # skrypt cichym kodem 1, bez jednego slowa.
+    p = sh(["bash", "tools/preflight_check.sh", "--number", "123456789012", "--project"], cwd=ROOT, env=env)
+    check("preflight: flaga bez wartosci konczy sie komunikatem, nie cichym 1",
+          p.returncode != 0 and "wymaga wartości" in p.stdout + p.stderr, p.stdout + p.stderr)
 
 
 # --------------------------------------------------------------------- workflows

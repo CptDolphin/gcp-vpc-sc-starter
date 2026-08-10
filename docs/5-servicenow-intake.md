@@ -193,6 +193,14 @@ jeden ticket miał robić oba kroki, to jest integracja **dwóch** automatów (f
 rozszerzenie tego workflow — i wymaga osobnej decyzji, bo tworzenie projektu to inny blast-radius niż dodanie
 go do granicy.
 
+Prerekwizyt PGA/DNS jest **warunkowy i tak też go sprawdza pre-flight**: dotyczy projektu, który ma sieć VPC.
+VPC-SC działa na płaszczyźnie API, więc członkiem może być projekt bez jednej maszyny — trzymający same
+zbiory BigQuery, buckety albo endpoint wołany z zewnątrz. W takim projekcie nie ma czego routować do
+googleapis.com i pre-flight raportuje oba checki jako **N/D**, nie jako błąd. Wymóg „zawsze" kazałby
+poprawnemu kandydatowi zbudować sieć, której nie potrzebuje, i — groźniej — zamieniłby check w alarm
+odpalający się przy każdym onboardingu, a odruchową reakcją na taki alarm jest `--warn-only`, czyli
+wyciszenie **również** projektów, w których PGA naprawdę brakuje.
+
 Recenzent uruchamia go z tożsamościami z wniosku — powtarzalne `--identity`, wartości przepisane 1:1 z pliku
 członka:
 
