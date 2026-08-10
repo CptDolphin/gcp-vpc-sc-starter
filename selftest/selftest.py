@@ -1726,6 +1726,32 @@ def test_workflows() -> None:
     intake = (ROOT / ".github/workflows/intake.yml").read_text()
     check("intake: ticket weryfikowany przez API, nie z payloadu", "snow_verify.py" in intake)
 
+    # Raport naruszeń czyta audit-log KAŻDEGO projektu członkowskiego, a `logging.googleapis.com` jest usługą
+    # chronioną — więc tożsamość, którą robi to raport, MUSI mieć regułę ingress w baseline. Inaczej system
+    # zjada własny dowód: w dry-run raport dopisuje członkowi naruszenie od siebie samego (a promotion_gate
+    # wymaga zera), a po pierwszej promocji ten odczyt jest odmawiany i dowodu nie ma już dla nikogo.
+    #
+    # Warunek czytamy Z PLIKÓW, nie z listy wpisanej w test: konto bierzemy z `service_account:` w workflow,
+    # usługę z komendy, której on używa. Przepisanie ich tutaj zamieniłoby tę asercję w kopię konfiguracji —
+    # zmiana raportu na inne konto przestałaby być wykrywalna, a to jest dokładnie ten rozjazd, który boli.
+    raport = (ROOT / ".github/workflows/violations-report.yml").read_text()
+    polityka = (ROOT / "perimeter/policy.yaml").read_text()
+    czyta_logi_czlonka = "gcloud logging read" in raport and "--project=$pid" in raport
+    konto_raportu = re.search(r"service_account:\s*\$\{\{\s*vars\.(\w+)\s*\}\}", raport)
+    konto_planu = konto_raportu is not None and konto_raportu.group(1) == "PLAN_SERVICE_ACCOUNT"
+    baseline = yaml.safe_load(polityka).get("baseline_ingress", [])
+    pokryte = any(
+        any("sa-vpcsc-plan@" in i for i in r.get("identities", []))
+        and any(op.get("service") == "logging.googleapis.com"
+                and "LoggingServiceV2.ListLogEntries" in op.get("methods", [])
+                for op in r.get("operations", []))
+        for r in baseline
+    )
+    check("baseline_ingress pokrywa tozsamosc, ktora czyta audit-log czlonkow",
+          not (czyta_logi_czlonka and konto_planu) or pokryte,
+          "violations-report czyta logi czlonka kontem planu, a baseline_ingress nie ma dla niego reguly "
+          "na logging.googleapis.com/LoggingServiceV2.ListLogEntries")
+
     ext = (ROOT / ".github/workflows/external-intake.yml").read_text()
     # Kanał zewnętrzny ma dwa niezbywalne zabezpieczenia: change_ref musi wskazywać repozytorium, które
     # NAPRAWDĘ wysłało dispatch, a stage jest nadpisywany na dry-run niezależnie od treści payloadu.

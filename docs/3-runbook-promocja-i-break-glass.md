@@ -104,6 +104,13 @@ kategorii i odrzuci je tak samo jak każde inne wywołanie spoza granicy:
 | **Monitoring i eksport metryk** | „to przecież nasze" — a to nadal wywołanie API spoza perimetru | `restricted_services` + reguła, albo projekt monitoringu w perimetrze |
 | **CI/CD deployujący z zewnątrz** | zespół pamięta o aplikacji, nie o pipeline'ie, który ją wdraża | profil `cicd-deploy-from-outside` |
 | **Rzadkie zadania** (kwartalny audyt, roczna recertyfikacja) | statystycznie nie mieszczą się w oknie | świadoma decyzja: wydłużyć okno albo przyjąć ryzyko i zapisać je |
+| **Raport naruszeń tego perimetru** (`violations-report.yml`) | „to przecież nasza własna bramka" — a czyta audit-log projektu członka kontem planu, czyli woła `logging.googleapis.com` (usługę chronioną) spoza granicy | `baseline_ingress` §`platform-violations-read` — **musi istnieć PRZED pierwszą promocją** |
+
+> **Ten ostatni wiersz jest inny od pozostałych i dlatego stoi osobno.** Wszystkie powyżej odcinają ruch
+> DYWIZJI, a ten odcina **dowód**. W dry-run raport dopisuje członkowi naruszenie od samego siebie, więc okno
+> nigdy się nie wyczyści; po promocji ten sam odczyt jest odmawiany, a workflow pada — czyli pierwsza udana
+> promocja zabiera `violations.json` wszystkim następnym. Zmierzone na żywej organizacji 2026-08-10:
+> 1 z 34 naruszeń członka pochodziło od `sa-vpcsc-plan`, metoda `LoggingServiceV2.ListLogEntries`.
 
 **Jak to sprawdzić, zanim promujesz:** przejdź listę z właścicielem projektu i zapytaj wprost *„co się
 uruchamia u was rzadziej niż raz na dwa tygodnie?"*. To pytanie wyłapuje więcej niż przeglądanie logów, bo
