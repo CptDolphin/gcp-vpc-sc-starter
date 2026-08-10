@@ -131,4 +131,31 @@ locals {
 
   ingress_rules_enforced = { for k, r in local.ingress_rules_effective : k => r if r.stage == "enforced" }
   egress_rules_enforced  = { for k, r in local.egress_rules_all : k => r if r.stage == "enforced" }
+
+  # --- budżet atrybutów: JEDNA definicja liczenia ---------------------------------------------------
+  #
+  # Limit 6000 obowiązuje OSOBNO dla każdej konfiguracji i dotyczy atrybutów W REGUŁACH ingress/egress:
+  # odwołań do projektów, sieci, access levels, selektorów metod, tożsamości i ról (docs: VPC SC quotas).
+  # `restricted_services` i lista członków mają własne, osobne limity i tu się NIE liczą.
+  #
+  # DLACZEGO local, a nie to samo wyrażenie w dwóch miejscach: „ile atrybutów zjada ta konfiguracja" miało
+  # w tym repo TRZY niezależne implementacje — output, kontrakt i `tools/attribute_budget.py`. Rozjechały
+  # się dokładnie tak, jak rozjeżdżają się kopie: output liczył reguły baseline, kontrakt ich nie liczył
+  # w dry-run, ale liczył w enforced (bo `ingress_rules_enforced` filtruje `ingress_rules_effective`), więc
+  # promocja wszystkich członków dawała `used_enforced > used_dry_run` — liczbę, która przy dry-run
+  # zawierającym WSZYSTKICH członków nie może powstać. Trzy liczby na jedno pytanie to nie redundancja,
+  # tylko gwarancja, że przynajmniej dwie kłamią.
+  attribute_usage_dry_run = sum(concat([0], [
+    for k, r in merge(local.ingress_rules_effective, local.egress_rules_all) :
+    length(r.identities) + length(lookup(r, "access_levels", [])) + length(r.resources)
+    + length(lookup(r, "external_resources", []))
+    + sum(concat([0], [for op in r.operations : 1 + length(op.methods)]))
+  ]))
+
+  attribute_usage_enforced = sum(concat([0], [
+    for k, r in merge(local.ingress_rules_enforced, local.egress_rules_enforced) :
+    length(r.identities) + length(lookup(r, "access_levels", [])) + length(r.resources)
+    + length(lookup(r, "external_resources", []))
+    + sum(concat([0], [for op in r.operations : 1 + length(op.methods)]))
+  ]))
 }

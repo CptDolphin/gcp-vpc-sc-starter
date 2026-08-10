@@ -27,20 +27,13 @@ locals {
     path   = ""
   }
 
-  # Zużycie budżetu atrybutów liczone tak samo jak w outputs.tf — zespół widzi, ile miejsca zostało,
-  # zanim poprosi o profil, który go zje.
+  # Zużycie budżetu atrybutów — TA SAMA wartość co w `attribute_estimate` (outputs.tf), bo obie czytają
+  # `local.attribute_usage_*` z locals.tf. Zespół widzi, ile miejsca zostało, zanim poprosi o profil,
+  # który je zje, i widzi DOKŁADNIE tę liczbę, na którą pada guard CI — nie drugie wyliczenie tego samego.
   contract_budget = {
     limit_per_config = local.policy.attribute_budget.limit_per_config
-    used_dry_run = sum(concat([0], [
-      for k, r in merge(local.ingress_rules_all, local.egress_rules_all) :
-      length(r.identities) + length(lookup(r, "access_levels", [])) + length(r.resources)
-      + sum(concat([0], [for op in r.operations : 1 + length(op.methods)]))
-    ]))
-    used_enforced = sum(concat([0], [
-      for k, r in merge(local.ingress_rules_enforced, local.egress_rules_enforced) :
-      length(r.identities) + length(lookup(r, "access_levels", [])) + length(r.resources)
-      + sum(concat([0], [for op in r.operations : 1 + length(op.methods)]))
-    ]))
+    used_dry_run     = local.attribute_usage_dry_run
+    used_enforced    = local.attribute_usage_enforced
   }
 
   contract_document = {

@@ -21,22 +21,13 @@ output "members_dry_run_only" {
 # Guard w CI czyta ten output — dzięki temu ostrzeżenie pojawia się w PR, a nie dopiero w błędzie API.
 output "attribute_estimate" {
   description = "Szacunek zużycia atrybutów per konfiguracja (dry-run i enforced) wobec limitu z policy.yaml."
+  # Wyrażenie liczące siedzi w locals.tf (`attribute_usage_*`) i jest współdzielone z kontraktem — patrz
+  # komentarz tam. Baseline mnoży się przez liczbę członków, więc przy trzydziestu dywizjach to on zużywa
+  # większość budżetu; liczenie samych reguł profilowych dawało wynik ZANIŻONY, czyli guard mówiłby
+  # „jest miejsce" dokładnie wtedy, gdy zaczyna go brakować.
   value = {
-    limit = local.policy.attribute_budget.limit_per_config
-    # `ingress_rules_effective`, nie `ingress_rules_all`: baseline mnoży się przez liczbę członków, więc
-    # przy trzydziestu dywizjach to on zużywa większość budżetu. Liczenie samych reguł profilowych dawało
-    # tu wynik ZANIŻONY — czyli guard mówiłby „jest miejsce" dokładnie wtedy, gdy zaczyna go brakować.
-    dry_run = sum(concat([0], [
-      for k, r in merge(local.ingress_rules_effective, local.egress_rules_all) :
-      length(r.identities) + length(lookup(r, "access_levels", [])) + length(r.resources)
-      + length(lookup(r, "external_resources", []))
-      + sum(concat([0], [for op in r.operations : 1 + length(op.methods)]))
-    ]))
-    enforced = sum(concat([0], [
-      for k, r in merge(local.ingress_rules_enforced, local.egress_rules_enforced) :
-      length(r.identities) + length(lookup(r, "access_levels", [])) + length(r.resources)
-      + length(lookup(r, "external_resources", []))
-      + sum(concat([0], [for op in r.operations : 1 + length(op.methods)]))
-    ]))
+    limit    = local.policy.attribute_budget.limit_per_config
+    dry_run  = local.attribute_usage_dry_run
+    enforced = local.attribute_usage_enforced
   }
 }

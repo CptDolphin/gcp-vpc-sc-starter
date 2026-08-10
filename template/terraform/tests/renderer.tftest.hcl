@@ -281,6 +281,29 @@ run "budzet_liczy_reguly_baseline" {
     condition     = output.attribute_estimate.dry_run > 0
     error_message = "Szacunek zużycia atrybutów wynosi zero przy niepustym repo — guard budżetu nic nie mierzy."
   }
+
+  # ANTY-TAUTOLOGIA. Dwie asercje wyżej przechodzą TAKŻE wtedy, gdy baseline nie jest liczony — spełnia je
+  # każdy dodatni szacunek, więc tytuł tego runa obiecywał więcej, niż sprawdzał. Ta porównuje szacunek
+  # z tym samym rachunkiem policzonym po SAMYCH regułach profilowych (`ingress_rules_all`, bez baseline'u):
+  # dopóki baseline jest doliczany, szacunek musi być ostro większy. Po podmianie `_effective` na `_all`
+  # w locals.tf obie strony się zrównują i asercja pada — czyli test mierzy dokładnie tę pomyłkę.
+  assert {
+    condition = output.attribute_estimate.dry_run > sum(concat([0], [
+      for k, r in merge(local.ingress_rules_all, local.egress_rules_all) :
+      length(r.identities) + length(lookup(r, "access_levels", [])) + length(r.resources)
+      + length(lookup(r, "external_resources", []))
+      + sum(concat([0], [for op in r.operations : 1 + length(op.methods)]))
+    ]))
+    error_message = "Szacunek nie rośnie po doliczeniu reguł baseline — guard ich nie liczy, a API tak."
+  }
+
+  # Kontrakt i output MUSZĄ podawać tę samą liczbę. Rozjazd (kontrakt liczył dry-run bez baseline'u, a
+  # enforced z baselinem) daje konsumentowi inny budżet niż ten, na którym pada guard CI.
+  assert {
+    condition = (local.contract_budget.used_dry_run == output.attribute_estimate.dry_run
+    && local.contract_budget.used_enforced == output.attribute_estimate.enforced)
+    error_message = "Budżet w kontrakcie różni się od `attribute_estimate` — dwie liczby na jedno pytanie."
+  }
 }
 
 # --- 14. Access levels: kompozycja, tożsamości, regiony ---------------------------------------------
