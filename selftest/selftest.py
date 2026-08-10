@@ -407,6 +407,68 @@ def test_iam_bootstrap() -> None:
               bool(wyrazenia) and all(w.endswith(koncowka) for w in wyrazenia),
               f"expressions={wyrazenia!r}, oczekiwana koncowka={koncowka!r}")
 
+    # --- monitoring: konto apply musi UMIEC ODCZYTAC to, czym zarzadza -------------------------------
+    # DLACZEGO TEN GUARD ISTNIEJE: `terraform apply` zaczyna od REFRESHU, wiec apply jest nadzbiorem planu
+    # i musi czytac takze zasoby, ktorych w danym przebiegu nie zmienia. Przez caly czas konto apply nie
+    # mialo do metryk i alertow ZADNEGO prawa — plan byl zielony (org-level role read-only konta plan),
+    # a apply padal na `403 logging.logMetrics.get`, i to przy KAZDEJ zmianie. Zaden test tego nie widzial,
+    # bo wszystkie mierzyly plan.
+    #
+    # Guard mierzy EFEKT z plan-JSON: kto dostaje role i jakie uprawnienia ta rola niesie. Guard tekstowy
+    # („czy w main.tf stoi google_project_iam_member") przeszedlby takze wtedy, gdyby rola trafila do
+    # niewlasciwego konta albo nie niosla uprawnien odczytu.
+    mon_projekt = "prj-example-monitoring"
+
+    def plan_monitoring(wartosc, out):
+        cmd = ["terraform", f"-chdir={d}", "plan", "-no-color", "-input=false", "-lock=false", f"-out={out}"]
+        return sh(cmd + baza + [f"-var=monitoring_project_id={wartosc}"])
+
+    def zasoby_planu(out):
+        s = sh(["terraform", f"-chdir={d}", "show", "-json", out])
+        return json.loads(s.stdout)["planned_values"]["root_module"].get("resources", [])
+
+    # 1. BEZPIECZNA DEGRADACJA: puste = sekcja monitoring w policy.yaml wylaczona, zero grantow.
+    #    Bez tego wariantu wdrozenie bez monitoringu dostawaloby granty w projekcie, ktorego nie ma.
+    p = plan_monitoring("", "zz_mon_off.tfplan")
+    zasoby = zasoby_planu("zz_mon_off.tfplan") if p.returncode == 0 else []
+    check("iam-bootstrap: puste monitoring_project_id NIE tworzy zadnego grantu monitoringu",
+          p.returncode == 0 and not [r for r in zasoby if "monitoring" in r["name"]],
+          f"rc={p.returncode}, zasoby={[r['address'] for r in zasoby if 'monitoring' in r['name']]}")
+    (d / "zz_mon_off.tfplan").unlink(missing_ok=True)
+
+    # 2. WLACZONE: rola istnieje, niesie uprawnienia ODCZYTU (nie tylko zapisu) i idzie do konta APPLY.
+    p = plan_monitoring(mon_projekt, "zz_mon_on.tfplan")
+    check("iam-bootstrap: niepuste monitoring_project_id PRZECHODZI plan (test anty-tautologiczny)",
+          p.returncode == 0, (p.stdout[-400:] + p.stderr[-700:]))
+    rola, przypisania = {}, []
+    if p.returncode == 0:
+        for r in zasoby_planu("zz_mon_on.tfplan"):
+            if r["type"] == "google_project_iam_custom_role" and r["name"] == "monitoring_writer":
+                rola = r["values"]
+            if r["type"] == "google_project_iam_member" and r["name"] == "apply_monitoring":
+                przypisania.append(r["values"])
+    (d / "zz_mon_on.tfplan").unlink(missing_ok=True)
+
+    perms = set(rola.get("permissions") or [])
+    # Uprawnienia ODCZYTU sa tu rownie obowiazkowe jak zapis — to na nich padal refresh.
+    for perm in ("logging.logMetrics.get", "monitoring.alertPolicies.get"):
+        check(f"iam-bootstrap: rola monitoringu niesie {perm} (bez tego pada REFRESH, nie zapis)",
+              perm in perms, f"permissions={sorted(perms)}")
+    check("iam-bootstrap: rola monitoringu jest WASKA (bez sinkow i kubelkow logow)",
+          perms and not {p for p in perms if p.startswith(("logging.sinks", "logging.buckets", "logging.views"))},
+          f"permissions={sorted(perms)}")
+    check("iam-bootstrap: rola monitoringu powstaje w projekcie z monitoring_project_id",
+          rola.get("project") == mon_projekt, f"project={rola.get('project')!r}")
+
+    # ANTY-TAUTOLOGIA po drugiej stronie: konto plan ma zostac read-only. Gdyby rola trafila do obu,
+    # guard wyzej nadal by przeszedl, a niezmiennik „plan nie ma ani jednego uprawnienia zapisujacego"
+    # zniknalby bez sladu.
+    czlonkowie = [a.get("member", "") for a in przypisania]
+    check("iam-bootstrap: rola monitoringu idzie do konta APPLY",
+          any("sa-vpcsc-apply@" in m for m in czlonkowie), f"member={czlonkowie!r}")
+    check("iam-bootstrap: rola monitoringu NIE idzie do konta plan (plan zostaje read-only)",
+          not any("sa-vpcsc-plan@" in m for m in czlonkowie), f"member={czlonkowie!r}")
+
 
 # --------------------------------------------------------------------- kontrakt
 def test_contract() -> None:

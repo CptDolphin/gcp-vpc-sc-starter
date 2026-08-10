@@ -5,12 +5,19 @@ identity_project_id = "prj-cloud-identity"  # projekt na konta serwisowe i pulę
 github_repository   = "ORG/gcp-vpc-sc"      # dokładnie to repo wpuszcza attribute_condition puli WIF
 state_bucket        = "bkt-tf-state-vpcsc"  # versioning + soft-delete, BEZ retention-lock
 
+# Monitoring perimetru — MUSI zgadzać się z `monitoring.project_id` w perimeter/policy.yaml.
+# Puste = sekcja `monitoring` w policy.yaml wyłączona. Niepuste, gdy sekcja jest włączona: bez tego
+# `terraform apply` w repo perimetru pada na odświeżeniu metryk (403 logging.logMetrics.get), i to przy
+# KAŻDEJ zmianie, także niezwiązanej z monitoringiem.
+# monitoring_project_id = "prj-cloud-monitoring"
+
 # Domyślne — zmieniaj tylko świadomie:
 # apply_environment    = "perimeter-apply"  # musi zgadzać się z environment w .github/workflows/apply.yml
 # state_prefix         = "vpc-sc/perimeter" # musi zgadzać się z prefix w terraform/versions.tf repo perimetru
 # wif_pool_id          = "github-actions"
 # wif_provider_id      = "github"
-# grant_logging_viewer = true               # false = brak raportu naruszeń → promocja bez dowodu
+# grant_logging_viewer = true               # false = brak raportu naruszeń ORAZ (przy włączonym monitoringu)
+#                                           #         czerwony plan: to ta sama rola daje logMetrics.get
 
 # Kanał zewnętrzny (repozytoria zespołów) — puste = nieaktywny:
 # contracts_bucket       = "bkt-tf-contracts"          # MUSI być inny niż state_bucket

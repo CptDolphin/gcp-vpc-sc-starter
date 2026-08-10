@@ -107,9 +107,23 @@ variable "wif_provider_id" {
 }
 
 variable "grant_logging_viewer" {
-  description = "Czy nadać kontu plan roles/logging.viewer na organizacji. Bez tego workflow violations-report nie odczyta naruszeń dry-run, a wtedy promocja do enforced opiera się na deklaracji zamiast na dowodzie."
+  description = "Czy nadać kontu plan roles/logging.viewer na organizacji. Bez tego workflow violations-report nie odczyta naruszeń dry-run, a wtedy promocja do enforced opiera się na deklaracji zamiast na dowodzie. DRUGI, MNIEJ OCZYWISTY SKUTEK ustawienia na false: przy włączonej sekcji `monitoring` w policy.yaml ta sama rola daje kontu plan `logging.logMetrics.get`, bez którego KAŻDY `terraform plan` pada na odświeżeniu metryk — czyli wyłączenie raportu wyłącza też planowanie."
   type        = bool
   default     = true
+}
+
+variable "monitoring_project_id" {
+  description = "Projekt, w którym repozytorium perimetru tworzy metryki i alerty — musi zgadzać się z `monitoring.project_id` w perimeter/policy.yaml. Puste = sekcja `monitoring` wyłączona, żaden grant nie powstaje (bezpieczna degradacja)."
+  type        = string
+  default     = ""
+
+  validation {
+    # Puste = monitoring wyłączony (świadomie dopuszczone, tak samo jak przy `contracts_bucket`).
+    # Niepuste musi być ID projektu — numer wklejony tu zamiast ID tworzy granty w projekcie, którego nie ma,
+    # a API mówi tylko „not found", bez podpowiedzi, że pomyliły się dwa różne pola.
+    condition     = var.monitoring_project_id == "" || can(regex("^[a-z][a-z0-9-]{4,28}[a-z0-9]$", var.monitoring_project_id))
+    error_message = "monitoring_project_id to ID projektu (6-30 znaków, małe litery/cyfry/myślniki) albo pusty string, gdy sekcja monitoring w policy.yaml jest wyłączona."
+  }
 }
 
 variable "contracts_bucket" {
