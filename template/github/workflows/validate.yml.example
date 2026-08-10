@@ -22,6 +22,11 @@ on:
 
 permissions:
   contents: read
+  # `actions: read` — wyłącznie po to, żeby pobrać artefakt `violations` z ostatniego udanego przebiegu
+  # `violations-report.yml`. To jest DOWÓD dla bramki promocji; skąd on się bierze, tłumaczy krok „dowód
+  # naruszeń" niżej. Bez tego uprawnienia `gh run download` dostaje 403, dowodu nie ma i promocja stoi —
+  # czyli degradacja idzie w stronę bezpieczną, ale kosztuje czas na diagnozę, więc uprawnienie zostaje.
+  actions: read
 
 concurrency:
   group: validate-${{ github.ref }}
@@ -90,15 +95,75 @@ jobs:
             exit 1
           fi
 
+      # DOWÓD DLA BRAMKI PROMOCJI. `promotion_gate` odrzuca członka `enforced`, dla którego nie ma wpisu
+      # w `violations_last_window` — „brak danych" nie jest tym samym co „zero naruszeń". Dowód powstaje
+      # w `violations-report.yml`: workflow z tożsamością WIF czyta audit-log organizacji i każdego projektu
+      # członkowskiego, i zapisuje `violations.json` jako artefakt.
+      #
+      # DLACZEGO ARTEFAKT PRZEBIEGU, A NIE PLIK W REPO. Plik commitowany do PR-a dałby się napisać ręcznie —
+      # bramka mierzyłaby wtedy to, co promujący o sobie napisał. Artefakt produkuje przebieg na gałęzi
+      # domyślnej, z poświadczeniami, których PR nie ma. To jest ta sama zasada, co „payload webhooka to dane,
+      # nigdy autoryzacja" (DEC-2).
+      #
+      # DLACZEGO KROK NIE PADA, GDY DOWODU NIE MA. Ogromna większość PR-ów nie promuje nikogo i raport ich
+      # nie dotyczy; czerwony `validate` na PR-ze o access levelu to szum, a szum jest sposobem, w jaki
+      # bramki umierają. Brak dowodu blokuje więc WYŁĄCZNIE promocję — przez regułę OPA, nie przez ten krok.
+      # Degradacja jest bezpieczna w obie strony: bez pliku `--violations` nie zostanie podane, mapa będzie
+      # pusta, a każdy `stage: enforced` odpadnie na „brak raportu naruszeń dla okna obserwacji".
+      #
+      # ŚWIEŻOŚĆ JEST CZĘŚCIĄ DOWODU. Raport sprzed miesiąca opisuje okno, które dawno minęło, a wygląda
+      # dokładnie tak samo jak wczorajszy. Artefakt starszy niż `clean_window_days` z `policy.yaml` jest
+      # więc traktowany jak jego brak — odrzucamy go tutaj, zamiast pozwolić mu przejść jako świeży.
+      - name: dowód naruszeń z ostatniego raportu (jeśli jest)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -o pipefail
+          gh run list --workflow=violations-report.yml --branch="${{ github.event.repository.default_branch }}" \
+            --status=success --limit=1 --json databaseId,createdAt > biegi.json || echo '[]' > biegi.json
+          python3 - <<'PY' > wybor.txt
+          import datetime, json, pathlib, yaml
+          okno = yaml.safe_load(open("perimeter/policy.yaml"))["onboarding"]["clean_window_days"]
+          biegi = json.loads(pathlib.Path("biegi.json").read_text() or "[]")
+          if not biegi:
+              print("brak przebiegu violations-report")
+          else:
+              t = datetime.datetime.fromisoformat(biegi[0]["createdAt"].replace("Z", "+00:00"))
+              wiek = (datetime.datetime.now(datetime.timezone.utc) - t).days
+              # Raport starszy niż okno opisuje okno, które dawno minęło, a wygląda jak wczorajszy.
+              print(f"{biegi[0]['databaseId']} {wiek} {okno}" if wiek <= okno
+                    else f"raport ma {wiek} d przy oknie {okno} d")
+          PY
+          czytaj=$(cat wybor.txt)
+          case "$czytaj" in
+            [0-9]*)
+              read -r id wiek okno <<< "$czytaj"
+              if gh run download "$id" --name violations --dir dowod; then
+                echo "dowod: przebieg $id, wiek $wiek d, okno $okno d"
+                cat dowod/violations.json
+              else
+                echo "::notice::artefakt violations niedostepny (wygasl?) — promocja bedzie odrzucona na braku dowodu"
+              fi
+              ;;
+            *) echo "::notice::$czytaj — promocja czlonka bedzie odrzucona na braku dowodu" ;;
+          esac
+
       # The rego rules need context (policy + profiles + members + today), so we build one document first.
+      # `--violations` dokładamy TYLKO wtedy, gdy dowód naprawdę leży na dysku — `collect_declarations.py`
+      # bez tej flagi zostawia mapę pustą, czyli fail-closed dla każdej promocji.
       - name: collect declarations
-        run: python3 tools/collect_declarations.py > declarations.json
+        run: |
+          if [ -f dowod/violations.json ]; then
+            python3 tools/collect_declarations.py --violations dowod/violations.json > declarations.json
+          else
+            python3 tools/collect_declarations.py > declarations.json
+          fi
 
       - name: rego unit tests
         run: conftest verify --policy policy
 
-      # Promotion gates read violations_last_window. On a PR that does not promote anyone this is empty and
-      # the rules simply do not fire; on a promotion PR the reviewer must attach the report artifact.
+      # Promotion gates read violations_last_window — wypełnione w krokach wyżej z artefaktu raportu. Na PR-ze,
+      # który nikogo nie promuje, mapa nie ma znaczenia i reguły po prostu nie odpalają.
       - name: onboarding rules
         run: conftest test --policy policy --namespace vpcsc.onboarding declarations.json
 
