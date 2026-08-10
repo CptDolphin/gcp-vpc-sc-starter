@@ -55,9 +55,12 @@ jobs:
           tar -xzf /tmp/conftest.tar.gz -C /tmp conftest
           sudo mv /tmp/conftest /usr/local/bin/
 
-      # Token GitHub App: `contents: read` na repo perimetru (release'y) i `pull_requests: write`
-      # (dopiero w drugim jobie). GITHUB_TOKEN NIE zadziała — jest zawężony do repozytorium, w którym
-      # powstał, a my sięgamy po release'y cudzego repo.
+      # Token GitHub App na repo perimetru. GITHUB_TOKEN NIE zadziała — jest zawężony do repozytorium,
+      # w którym powstał, a my sięgamy po release'y cudzego repo.
+      #
+      # Ten job potrzebuje wyłącznie `contents: read`. Instalacja aplikacji ma jednak jeden zakres dla
+      # obu jobów, a job `zgloszenie` wymaga `contents: write` (patrz komentarz tam) — README §„Zakres
+      # tokenu" mówi, co z tego wynika i jak wygląda wariant węższy.
       - uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v3.2.0
         id: app
         with:
@@ -108,6 +111,10 @@ jobs:
 
       # Akcja waliduje jeszcze raz, i to nie jest zbędne powtórzenie: między otwarciem PR-a a merge'em
       # kontrakt mógł się zmienić (ktoś wycofał profil), więc walidacja z PR-a jest już nieaktualna.
+      #
+      # Jej OSTATNI krok woła `POST /repos/{o}/{r}/dispatches`, a ten endpoint wymaga na repo perimetru
+      # uprawnienia `contents: write` — zmierzone, `contents: read` + `pull-requests: write` daje HTTP 403
+      # („Resource not accessible by integration"). README §„Zakres tokenu" ma tabelę pomiaru.
       #
       # `@<SHA_WYDANIA>`, nigdy `@main`: ruchomy tag to mutowalna referencja — kto kontroluje tag,
       # kontroluje kod uruchamiany z waszym tokenem. Ten sam powód, dla którego wszystkie akcje wyżej

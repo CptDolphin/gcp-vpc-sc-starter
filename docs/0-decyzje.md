@@ -250,7 +250,8 @@ nie dane.
 serwisowe i grant `roles/storage.objectViewer` na prefiksie — po to, żeby przeczytać 4 KB JSON-a. Przy trzydziestu
 dywizjach to trzydzieści grantów, a zdanie „zespół nie dostaje żadnych uprawnień w GCP" przestawało być faktem
 dokładnie w tym miejscu. Asset release'u pobiera się tym samym tokenem GitHuba, którym dywizja i tak pobiera
-paczkę bramek (`contents: read`) — druga droga **nie dokłada ani jednego uprawnienia po żadnej ze stron**.
+paczkę bramek — druga droga **nie dokłada ani jednego uprawnienia po żadnej ze stron** (odczyt release'u
+mieści się w tym, co token ma już na wysyłkę zgłoszenia, punkt 3 niżej).
 Bucket zostaje, bo konsument spoza GitHuba (job w GCP, skrypt operacyjny) nie ma jak sięgnąć po release.
 
 **Niezbywalne: obie publikacje wychodzą z JEDNEGO kroku apply.** Bajty assetu to output `contract_json`, czyli
@@ -271,9 +272,13 @@ stronie i `Cache-Control: no-store` po drugiej.
 2. **Kontrakt trafia do INNEGO bucketa niż stan.** Wspólny bucket oznacza, że jeden błąd w warunku IAM odsłania
    state, a state to pełna mapa granicy. Egzekwowane `precondition` w `contract.tf`.
 3. **Dwa rozłączne ACL:** writer = konto apply na prefiksie kontraktu; reader = konsumenci maszynowi spoza
-   GitHuba, read-only. Konsument nie może podmienić danych, którym ufa kolejny konsument. Po stronie GitHuba
-   tę samą rozłączność daje sam model uprawnień: `contents: read` u dywizji, `contents: write` wyłącznie
-   w jobie apply.
+   GitHuba, read-only. Konsument nie może podmienić danych, którym ufa kolejny konsument. **Po stronie
+   GitHuba tej rozłączności NIE MA i trzeba to powiedzieć wprost:** token dywizji potrzebuje
+   `contents: write` na repo perimetru, bo tyle wymaga `repository_dispatch` (zmierzone: `contents: read`
+   → HTTP 403 `Resource not accessible by integration`; szczegóły w `contrib/README.md` §„Zakres tokenu").
+   Kontraktu w release'ie to nie zmienia — asset i tak czyta się uprawnieniem, które token ma na wysyłkę
+   zgłoszenia. Granicy pilnuje więc nie zakres tokenu, tylko `contributors.yaml` po stronie perimetru,
+   payload traktowany jako dane i apply wyłącznie z gałęzi domyślnej.
 4. **Kontrakt jest informacją, nie źródłem decyzji.** Reguła sprawdzająca, czy repozytorium może wnioskować o dany
    projekt, czyta plik **z repo**, nie z kontraktu. Gdyby decyzja zależała od kontraktu, wystarczyłoby go podmienić.
 

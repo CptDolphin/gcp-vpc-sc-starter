@@ -3,7 +3,8 @@
 #
 # The division's repository never applies anything and needs NO permission in Access Context Manager —
 # and, since the contract moved to a release asset, NO identity in Google Cloud at all. It needs exactly
-# one thing: a GitHub App token that can read this repository's releases and open a pull request.
+# one thing: a GitHub App token on THIS repository. See the `app-token` input for what that token really
+# has to be able to do — it is not what the phrase "it only opens a pull request" suggests.
 #
 # WHY the contract is fetched from a release and not from `gs://…`: reading the bucket copy requires the
 # division's repository to federate an identity into GCP and hold a grant on the contract prefix. Thirty
@@ -43,10 +44,17 @@ inputs:
     required: true
   app-token:
     description: >
-      Token of a GitHub App installed on both repositories, with `contents: read` and `pull_requests: write`
-      on the perimeter repository. `contents: read` was already required for the gates bundle, so the
-      contract rides an existing grant — no new permission anywhere. GITHUB_TOKEN will NOT work: it is
-      scoped to the repository it was issued for.
+      Token of a GitHub App installed on both repositories, with `contents: write` on the perimeter
+      repository — and nothing else. MEASURED, because the intuitive answer is wrong in both directions:
+      the last step here calls `POST /repos/{owner}/{repo}/dispatches`, which needs Contents WRITE
+      (`contents: read` + `pull-requests: write` returns HTTP 403 "Resource not accessible by
+      integration"), while `pull_requests` is not needed at all — the pull request is opened on the other
+      side by `external-intake.yml`, with the perimeter repository's own GITHUB_TOKEN. Contents write is
+      broader than "open a pull request"; what actually bounds this channel is `perimeter/contributors.yaml`
+      living on the other side, the payload being data rather than authorization, and apply running only
+      from the default branch. A narrower variant exists (`workflow_dispatch` needs `actions: write`, which
+      grants no code write) and costs a change on both sides of the channel. GITHUB_TOKEN will NOT work
+      either way: it is scoped to the repository it was issued for.
     required: true
   gates-version:
     description: >
