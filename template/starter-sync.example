@@ -1,0 +1,21 @@
+# .starter-sync — z KTÓREGO commita startera pochodzi materiał w tym repozytorium.
+#
+# PO CO TEN PLIK. Ten repozytorium jest rozpakowanym starterem plus wartościami środowiska (numer
+# organizacji, polityka dostępu, buckety, konta, projekty). Poprawki powstają w starterze, bo tam jest
+# ich miejsce — i dopóki nikt ich nie przeniesie, granica chodzi na innym kodzie niż źródło. Zmierzone:
+# dwa rozjazdy w ciągu jednego dnia, a w drugim z nich raport naruszeń meldował czyste okno przy 30
+# realnych naruszeniach i był DOWODEM dla bramki promocji. Rozjazd nie jest długiem estetycznym.
+#
+# CZEGO TU NIE MA I DLACZEGO. Nie porównujemy drzewa repo z wyjściem `install.sh` bajt w bajt: to repo
+# LEGALNIE różni się od szablonu wartościami środowiska, więc taka bramka świeciłaby na czerwono zawsze
+# i nauczyłaby wszystkich ją ignorować. Porównujemy WSKAŹNIK: commit startera zapisany niżej kontra
+# `main` startera. To pokazuje dokładnie to, co trzeba przenieść, i nic ponad to.
+#
+# JAK AKTUALIZOWAĆ. Synchronizacja to trójstronny merge, nie kopia: rozpakuj `install.sh` startera
+# z commita spod `commit:` ORAZ z `main` do dwóch katalogów tymczasowych i scal z drzewem tego repo
+# jako „ours". Kontrola po scaleniu: dla każdej wartości środowiska liczba plików z nią ma być
+# IDENTYCZNA przed i po. Dopiero potem podnieś `commit:` — w tym samym pull requeście, co przeniesione
+# poprawki. Podniesiony osobno oznacza „zsynchronizowane" tam, gdzie nic nie przeniesiono.
+
+repo: CptDolphin/gcp-vpc-sc-starter
+commit: 0000000000000000000000000000000000000000

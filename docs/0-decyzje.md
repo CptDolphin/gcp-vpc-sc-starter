@@ -304,3 +304,56 @@ snapshotu stanu. Rekomendacja z dokumentacji brzmi — publikuj dane do konsumpc
 - *Osobny workflow publikujący asset po apply.* Wygląda na czystszy podział odpowiedzialności, a jest dokładnie
   tym trybem awarii, którego unikamy: drugi wyzwalacz, drugi odczyt stanu i cicha rozbieżność dwóch kopii,
   której konsument nie ma jak zauważyć.
+
+---
+
+## DEC-9 — Rozjazd ze starterem wykrywa bramka porównująca WSKAŹNIK, nie drzewo
+
+**Problem.** Repozytorium perimetru to rozpakowany starter plus wartości środowiska. Defekty znajdują się przy
+pomiarach na żywej organizacji, poprawki idą do startera — bo tam jest ich miejsce — a produkcja zostaje w tyle
+do następnego ręcznego przeniesienia. Przy jednym operatorze to koszt; przy zespole to gwarancja, że granica
+chodzi na innym kodzie niż źródło.
+
+To nie jest hipoteza. W jednym dniu wystąpiły **dwa** rozjazdy i oba dotyczyły tego samego pliku, który jest
+DOWODEM dla bramki promocji:
+
+| Rozjazd | Co robiła wersja na produkcji |
+|---|---|
+| przypisanie naruszeń | `0 z 26` naruszeń przypisanych do członka → raport „czysto" |
+| zakres odczytu logów | `0` wpisów na zakresie organizacji przy `30` w projekcie członka → raport „czysto" |
+
+W obu przypadkach `promotion_gate` przechodził, a promocja do `enforced` opierałaby się na dowodzie, o którym
+dziś wiadomo, że kłamał. Wniosek: opóźnienie synchronizacji nie jest długiem estetycznym — jest zieloną bramką
+zbudowaną na przestarzałym narzędziu.
+
+**Decyzja.** Bramka `starter-drift` w repozytorium perimetru porównuje **commit startera zapisany w
+`.starter-sync`** z `main` startera i wypisuje listę commitów pomiędzy. Harmonogram tygodniowy (poniedziałek,
+przed PR-ami promocyjnymi) + `workflow_dispatch`. Rozjazd = czerwony workflow **i** Issue aktualizowane
+w miejscu. Runbook promocji ma to jako **krok 0**, przed uruchomieniem raportu.
+
+**Dlaczego wskaźnik, a nie porównanie drzewa z wyjściem `install.sh`.** Repo perimetru **legalnie** różni się od
+szablonu: numer organizacji, polityka dostępu, buckety, konta, projekty. Porównanie bajt w bajt świeciłoby na
+czerwono zawsze i w ciągu tygodnia nauczyłoby wszystkich je ignorować — a bramka, którą się ignoruje, jest
+gorsza niż jej brak, bo daje poczucie pokrycia. Wskaźnik jest jednoznaczny: albo commit się zgadza, albo nie,
+i od razu widać, CO trzeba przenieść.
+
+**Dlaczego to nie blokuje każdego pull requesta.** PR o access level nie ma nic wspólnego z tym, że starter
+poszedł do przodu; oblewanie go byłoby szumem, a szum to sposób, w jaki bramki umierają. Blokowana jest
+**jedna** operacja — promocja do `enforced` — bo to jest ta, której dowód jest nic niewart, gdy narzędzia
+produkujące dowód są przestarzałe.
+
+**Dlaczego bramka mieszka w repozytorium perimetru, a nie w starterze.** Starter jest publiczny, perimetr
+prywatny. Bramka po stronie startera musiałaby dostać poświadczenia do prywatnego repo — czyli repozytorium
+publiczne trzymałoby klucz do prywatnego, żeby powiedzieć mu o zaległym merge'u. Odwrotny kierunek nie wymaga
+ani jednego sekretu: publiczny starter czyta się anonimowo.
+
+**Odrzucone.**
+- *Automatyczne otwieranie PR-a z poprawkami.* Synchronizacja jest **trójstronnym merge'em** z drzewem repo jako
+  „ours", z ręcznym rozstrzygnięciem konfliktów tam, gdzie ta sama poprawka weszła niezależnie po obu stronach.
+  Bot generujący „sync PR" ślepym nadpisaniem skasowałby wartości środowiska — czyli zamienił problem
+  „przestarzała bramka" na problem „granica wskazuje cudzą organizację".
+- *Świadome przyjęcie, że sync jest ręczny, i sam zapis prerekwizytu w runbooku.* Prerekwizyt w runbooku został
+  (krok 0), ale sam z siebie nie wystarcza: nie ma sygnału, dopóki ktoś nie przeczyta runbooka, a oba rozjazdy
+  z tego dnia wykryto przypadkiem, przy pomiarze czegoś innego. Zapisany wymóg bez sygnału to założenie.
+- *Codzienny harmonogram.* Starter zmienia się seriami po kilka poprawek; codzienne przypomnienie o tym samym
+  rozjeździe to szum. Tydzień + `workflow_dispatch` przed promocją pokrywa realny rytm.
