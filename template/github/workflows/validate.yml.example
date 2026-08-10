@@ -11,6 +11,12 @@ on:
       - "policy/**"
       - "schemas/**"
       - "terraform/**"
+      # `iam-bootstrap/**` — bramka na ten stack ISTNIEJE niżej (krok „tflint - iam-bootstrap stack"),
+      # ale bez tej ścieżki odpalała się WYŁĄCZNIE wtedy, gdy w tym samym pull requeście zmieniało się
+      # coś innego. PR dotykający samego `iam-bootstrap/` nie dostawał ŻADNEGO checku — a to jest stack
+      # nadający wszystkie uprawnienia tego systemu, więc akurat on nie może być jedynym katalogiem bez
+      # bramki. Zmierzone na wdrożeniu: „no checks reported on the branch".
+      - "iam-bootstrap/**"
       - ".github/workflows/validate.yml"
   workflow_dispatch:
 
