@@ -17,6 +17,7 @@ Podmień (grep po `<` znajdzie wszystkie):
 | `<ACCESS_POLICY_NUMBER>` | `perimeter/policy.yaml` | numer org-level access policy (`gcloud access-context-manager policies list`) |
 | `<STATE_BUCKET>` | `terraform/versions.tf` **oraz** `iam-bootstrap/versions.tf` | bucket stanu (versioning + soft-delete, **bez** retention-lock). Ta sama nazwa w obu miejscach, ale **prefiksy różne** (`vpc-sc/perimeter` vs `vpc-sc/iam-bootstrap`) — konta CI perimetru mają zapis wyłącznie na swoim prefiksie i nie mogą nadpisać stanu stacku, który nadaje im uprawnienia |
 | `@your-org/*` | `.github/CODEOWNERS` | realne zespoły GitHub |
+| `commit: 000…0` | `.starter-sync` | SHA commita startera, z którego rozpakowałeś materiał (`git -C <starter> rev-parse HEAD`). Bez tego `starter-drift` nie ma z czym porównać i pada — celowo: repo, o którym nie wiadomo, jaką wersję bramek uruchamia, nie jest „zsynchronizowane" |
 | zakresy IP | `perimeter/access-levels/corp.yaml` | korporacyjne zakresy (w szablonie są adresy TEST-NET z RFC 5737) |
 
 W `perimeter/policy.yaml` zostaw `manage_skeleton: false`, jeśli perimetr **już istnieje** — patrz

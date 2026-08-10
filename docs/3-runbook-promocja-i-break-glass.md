@@ -13,6 +13,7 @@ Wszystkie warunki muszą być spełnione (bramka `promotion_gate` w `policy/onbo
 
 | Warunek | Próg | Skąd wiadomo |
 |---|---|---|
+| **Repo nie odstaje od startera** | `starter-drift` zielony | patrz krok 0 — bez tego pozostałe wiersze są dowodem z nieznanej wersji narzędzi |
 | Czas w dry-run | `dry_run_min_days` z `policy.yaml` (domyślnie 14) | pole `dry_run_since` w pliku członka |
 | Naruszenia w oknie | **0** w ostatnich `clean_window_days` (domyślnie 7) | `violations.json` z workflow `violations-report` |
 | Raport w ogóle istnieje | wpis dla tego członka | brak wpisu = brak dowodu, nie „zero" |
@@ -22,6 +23,20 @@ Wszystkie warunki muszą być spełnione (bramka `promotion_gate` w `policy/onbo
 > Najczęstszy tryb awarii po promocji to zadanie, które uruchamia się raz w miesiącu.
 
 ### Kroki
+
+0. **Sprawdź, czy to repo nie odstaje od startera — PRZED raportem, nie po nim:**
+
+```bash
+gh workflow run starter-drift.yml && gh run watch
+```
+
+   Ten krok jest tu, bo pominięcie go już raz kosztowało dowód. Raport naruszeń przez pewien czas
+   przypisywał **0 z 26** realnych naruszeń do członka, a potem — po naprawie przypisania — czytał logi
+   z zakresu, w którym ich nie ma (**0** wpisów na organizacji przy **30** w projekcie członka). Obie
+   poprawki istniały w starterze, zanim ktokolwiek przeniósł je tutaj. W obu przypadkach `violations.json`
+   pokazywał czyste okno, `promotion_gate` przechodził, a promocja opierałaby się na dowodzie, o którym
+   dziś wiadomo, że kłamał. **Czerwony `starter-drift` = promocja czeka**, bo narzędzia produkujące dowód
+   są częścią tego, co jest przestarzałe.
 
 1. Uruchom raport za pełne okno:
 
@@ -44,8 +59,11 @@ gh workflow run violations-report.yml -f days=14
 
 ```bash
 terraform -chdir=terraform output members_enforced        # członek na liście
+# ZAKRES = PROJEKT CZŁONKA, nie organizacja. Wpis audytowy VPC-SC ląduje w logu projektu, który jest
+# właścicielem chronionego zasobu; `--organization=` czyta tylko `organizations/<id>/logs/…` i nic poniżej.
+# Zmierzone: 0 wpisów na organizacji przy 30 w projekcie członka, ten sam filtr i to samo okno.
 gcloud logging read 'protoPayload.metadata."@type"="type.googleapis.com/google.cloud.audit.VpcServiceControlAuditMetadata"
-  AND protoPayload.metadata.dryRun="false"' --organization=<ORG_ID> --freshness=1h --limit=20
+  AND protoPayload.metadata.dryRun="false"' --project=<PROJEKT_CZLONKA> --freshness=1h --limit=20
 ```
 
 Puste drugie zapytanie przez pierwszą godzinę = ruch dywizji działa. Niepuste = masz incydent, przejdź do
@@ -109,8 +127,10 @@ o jego ruchu — po naprawie promocja wymaga takiego samego dowodu jak za pierws
 1. Potwierdź, że to naprawdę perimetr (a nie IAM, nie sieć, nie aplikacja):
 
 ```bash
+# ZAKRES = PROJEKT, w którym stanął ruch (patrz uwaga o zakresie w części A, krok 6). Na organizacji
+# tych wpisów NIE MA i pusty wynik przeczytasz jako „to nie perimetr" — czyli odwrotnie niż jest.
 gcloud logging read 'protoPayload.metadata."@type"="type.googleapis.com/google.cloud.audit.VpcServiceControlAuditMetadata"
-  AND protoPayload.metadata.dryRun="false"' --organization=<ORG_ID> --freshness=1h \
+  AND protoPayload.metadata.dryRun="false"' --project=<PROJEKT_CZLONKA> --freshness=1h \
   --format='table(protoPayload.authenticationInfo.principalEmail, protoPayload.methodName,
                   protoPayload.metadata.violationReason)'
 ```

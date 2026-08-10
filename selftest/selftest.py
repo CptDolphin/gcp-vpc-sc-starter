@@ -85,6 +85,7 @@ def bootstrap() -> None:
         ".github/workflows/drift.yml", ".github/workflows/violations-report.yml",
         ".github/workflows/expiry-sweep.yml", ".github/workflows/break-glass.yml",
         ".github/workflows/external-intake.yml", ".github/workflows/publish-gates.yml",
+        ".github/workflows/starter-drift.yml", ".starter-sync",
         "contrib/action.yml", "contrib/validate-local.sh", "contrib/README.md",
         ".gitignore", ".pre-commit-config.yaml", ".tool-versions",
         "perimeter/policy.yaml", "perimeter/access-levels/corp.yaml", "perimeter/contributors.yaml",
@@ -1591,7 +1592,7 @@ def test_preflight() -> None:
 def test_workflows() -> None:
     print("\n== workflows ==")
     wf = sorted((ROOT / ".github/workflows").glob("*.yml"))
-    check("dziesiec workflow po rozpakowaniu", len(wf) == 10, str([f.name for f in wf]))
+    check("jedenascie workflow po rozpakowaniu", len(wf) == 11, str([f.name for f in wf]))
 
     if have("actionlint"):
         p = sh(["actionlint", *[str(f) for f in wf]])
@@ -1866,6 +1867,58 @@ def test_workflowy_wykonywalne() -> None:
     check("plan.yml i apply.yml wolaja conftest z TYMI SAMYMI argumentami (te same bramki, nie podobne)",
           bool(arg.get("plan.yml")) and arg.get("plan.yml") == arg.get("apply.yml"),
           f"plan.yml={arg.get('plan.yml')!r} apply.yml={arg.get('apply.yml')!r}")
+
+    # --- 4. starter-drift: bramka, ktora ma ZLAPAC rozjazd, musi go realnie lapac.
+    #
+    # Ta bramka istnieje, bo rozjazd materialu szablonu wystapil DWA RAZY w ciagu jednego dnia, a za
+    # drugim razem ukrywal raport meldujacy czyste okno przy 30 realnych naruszeniach — czyli dowod dla
+    # promocji. Testujemy ja tak samo jak kazda inna: uruchamiajac krok w postaci, w jakiej stoi
+    # w workflow, na atrapie `gh`. Dwa przypadki, bo bramka, ktora nigdy nie odrzuca, nie chroni niczego.
+    krok_rozjazd = next((k for k, _ in kroki_workflow(
+        yaml.safe_load((ROOT / ".github/workflows/starter-drift.yml").read_text()))
+        if "starter-sync" in str(k.get("run", ""))), None)
+    check("starter-drift.yml ma krok porownujacy wskaznik z main startera", krok_rozjazd is not None)
+    if krok_rozjazd is not None:
+        zapisany = "1" * 40
+        bin_gh = ROOT / "stub-bin-gh"
+        bin_gh.mkdir(exist_ok=True)
+
+        def uruchom_rozjazd(head: str, status: str, ahead: int) -> subprocess.CompletedProcess:
+            (bin_gh / "gh").write_text(
+                "#!/usr/bin/env bash\n"
+                "case \"$*\" in\n"
+                f"  *commits/main*) echo '{head}' ;;\n"
+                "  *compare/*) cat <<'JSON'\n"
+                + json.dumps({"status": status, "ahead_by": ahead,
+                              "commits": [{"sha": "2" * 40,
+                                           "commit": {"message": "fix(naruszenia): zly zakres logow"}}]})
+                + "\nJSON\n  ;;\nesac\n")
+            (bin_gh / "gh").chmod(0o755)
+            (ROOT / ".starter-sync").write_text(
+                f"repo: example-org/vpc-sc-perimeter-starter\ncommit: {zapisany}\n")
+            (ROOT / "missing.md").unlink(missing_ok=True)
+            return subprocess.run(
+                ["bash", "-e", "-c", krok_rozjazd["run"]], cwd=ROOT, capture_output=True, text=True,
+                env=dict(os.environ, PATH=f"{bin_gh}:{os.environ['PATH']}",
+                         GITHUB_OUTPUT=str(ROOT / "gh-output.txt"),
+                         GITHUB_STEP_SUMMARY=str(ROOT / "gh-summary.txt")))
+
+        p = uruchom_rozjazd(zapisany, "identical", 0)
+        wyjscie = (ROOT / "gh-output.txt").read_text() if (ROOT / "gh-output.txt").exists() else ""
+        check("starter-drift: wskaznik rowny main startera -> zielono",
+              p.returncode == 0 and "behind=0" in wyjscie, f"rc={p.returncode} {wyjscie} " + p.stderr[-300:])
+
+        # NEGATYW: starter poszedl do przodu. Bramka ma to zglosic i wypisac, CO trzeba przeniesc —
+        # sama informacja „jestes w tyle" nie mowi, ktory pull request wskoczyl po ostatnim syncu.
+        (ROOT / "gh-output.txt").unlink(missing_ok=True)
+        p = uruchom_rozjazd("2" * 40, "ahead", 1)
+        wyjscie = (ROOT / "gh-output.txt").read_text() if (ROOT / "gh-output.txt").exists() else ""
+        brakuje = (ROOT / "missing.md").read_text() if (ROOT / "missing.md").exists() else ""
+        check("starter-drift: starter do przodu -> ZGLASZA rozjazd i wymienia brakujace commity",
+              "behind=1" in wyjscie and "zly zakres logow" in brakuje,
+              f"rc={p.returncode} {wyjscie} {brakuje[:200]} " + p.stderr[-300:])
+        for smiec in (".starter-sync", "gh-output.txt", "gh-summary.txt", "missing.md", "compare.json"):
+            (ROOT / smiec).unlink(missing_ok=True)
 
 
 # --------------------------------------------------------------------- schematy (opcjonalnie)

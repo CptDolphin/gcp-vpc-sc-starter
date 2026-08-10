@@ -1,0 +1,120 @@
+# .github/workflows/starter-drift.yml
+# Is this repository still running the starter it says it runs?
+#
+# WHY. This repo is the starter unpacked plus environment values. Fixes are written in the starter,
+# because that is where they belong — and until somebody carries them over, the perimeter runs code that
+# is not the source. Measured: two divergences in a single day. In the second one the dry-run violations
+# report claimed a clean window while the member had 30 real violations, and that report is the EVIDENCE
+# the promotion gate reads. So the failure mode of "we'll sync it when we remember" is not an untidy repo,
+# it is a green gate built on a stale one.
+#
+# WHY A POINTER AND NOT A TREE DIFF. Comparing this repo against `install.sh` output byte for byte would
+# be red permanently and legitimately: the environment values are exactly what this repo is supposed to
+# have and the template is not. A gate that is always red teaches everyone to ignore it. So we compare the
+# ONE thing that is unambiguous — the starter commit recorded in `.starter-sync` against the starter's
+# `main` — and print the commits in between. That is the list of what has to be carried over, and nothing
+# else. The starter is public, so this needs no secret and no access to anything.
+#
+# WHY IT DOES NOT BLOCK EVERY PULL REQUEST. A pull request about an access level has nothing to do with
+# upstream moving; failing it would be noise, and noise is how gates die. This runs on a schedule and on
+# demand — and the promotion procedure requires a green run on demand BEFORE promoting a member, because
+# that is the operation whose evidence is worth nothing if the tooling is stale.
+
+name: starter-drift
+
+on:
+  schedule:
+    - cron: "0 5 * * 1" # Monday, before the week's promotion pull requests
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  starter-drift:
+    name: is the template material still current
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: compare the recorded starter commit with the starter's main
+        id: compare
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -o pipefail
+          repo=$(sed -n 's/^repo:[[:space:]]*//p' .starter-sync | head -1)
+          mine=$(sed -n 's/^commit:[[:space:]]*//p' .starter-sync | head -1)
+          # An unreadable pointer is not "in sync": it means nobody can tell what this repo runs.
+          case "$mine" in
+            [0-9a-f]*) [ "${#mine}" = 40 ] || { echo "::error::.starter-sync: commit is not a full sha"; exit 1; } ;;
+            *) echo "::error::.starter-sync: no readable commit"; exit 1 ;;
+          esac
+          [ -n "$repo" ] || { echo "::error::.starter-sync: no readable repo"; exit 1; }
+          head=$(gh api "repos/$repo/commits/main" --jq .sha)
+          echo "recorded: $mine"
+          echo "starter main: $head"
+          if [ "$mine" = "$head" ]; then
+            echo "behind=0" >> "$GITHUB_OUTPUT"
+            echo "In sync with $repo@$head" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # `compare` also tells us whether the recorded commit is an ancestor at all — a pointer that is
+          # AHEAD or unrelated means somebody edited the file by hand, which is worth failing on separately.
+          gh api "repos/$repo/compare/$mine...$head" > compare.json
+          status=$(python3 -c 'import json;print(json.load(open("compare.json"))["status"])')
+          [ "$status" = "behind" ] && { echo "::error::.starter-sync points AHEAD of the starter"; exit 1; }
+          python3 - <<'PY' >> missing.md
+          import json
+          d = json.load(open("compare.json"))
+          print(f"{d['ahead_by']} commit(s) in the starter are not in this repo:\n")
+          for c in d["commits"]:
+              print(f"- `{c['sha'][:9]}` {c['commit']['message'].splitlines()[0]}")
+          PY
+          cat missing.md >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "behind=1"
+            echo "count=$(python3 -c 'import json;print(json.load(open("compare.json"))["ahead_by"])')"
+          } >> "$GITHUB_OUTPUT"
+
+      # The issue is the artefact an operator reads before promoting. Updated in place rather than opened
+      # every Monday: a stack of identical issues is the same thing as no issue.
+      - name: open or update the drift issue
+        if: steps.compare.outputs.behind == '1'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        with:
+          script: |
+            const fs = require('fs');
+            const title = 'starter-drift: this repository is behind the starter';
+            const body = [
+              'The template material in this repository is older than the starter.',
+              '',
+              fs.readFileSync('missing.md', 'utf8'),
+              '',
+              'Carry them over with a THREE-WAY merge (see `.starter-sync` for the method) and raise',
+              '`commit:` in the same pull request. Do not promote a member to `enforced` until this is',
+              'closed: the gates that produce the evidence for that promotion are part of what is stale.',
+            ].join('\n');
+            const open = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo, state: 'open', labels: 'starter-drift',
+            });
+            const found = open.data.find(i => i.title === title);
+            if (found) {
+              await github.rest.issues.update({
+                owner: context.repo.owner, repo: context.repo.repo, issue_number: found.number, body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner, repo: context.repo.repo, title, body,
+                labels: ['starter-drift'],
+              });
+            }
+
+      # Red, not just an issue. An issue nobody assigned is a note; a red scheduled workflow is visible on
+      # the repository's front page and in the operator's notifications.
+      - name: fail when behind
+        if: steps.compare.outputs.behind == '1'
+        run: |
+          echo "::error::behind the starter by ${{ steps.compare.outputs.count }} commit(s) — see the starter-drift issue"
+          exit 1
