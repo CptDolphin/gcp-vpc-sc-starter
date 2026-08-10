@@ -110,6 +110,7 @@ def bootstrap() -> None:
         ".tflint.hcl", ".github/dependabot.yml", "tests/README.md",
         "tests/snow-approved.json", "tests/snow-not-approved.json", "tests/snow-self-approved.json",
         "tests/snow-wrong-project.json", "tests/dispatch-example.json",
+        "tests/vpcsc-violation-dryrun.json",
     }
     # Dokumentacja jedzie razem z kodem. Wyliczamy ją z katalogu startera zamiast przepisywać listę:
     # przepisana lista wywracałaby ten test przy każdym nowym dokumencie, a to uczy dopisywania nazw
@@ -1230,6 +1231,54 @@ def test_tools() -> None:
     viol = json.loads((ROOT / "violations.json").read_text()) if (ROOT / "violations.json").exists() else {}
     check("violations_report.py wypisuje wpis dla KAZDEGO czlonka", p.returncode == 0 and len(viol) == 1,
           p.stderr[-300:] + json.dumps(viol))
+
+    # ---- PRZYPISANIE DO CZŁONKA na REALNYM kształcie wpisu ------------------------------------------
+    # Powyższy test na pustym wejściu przechodził także wtedy, gdy funkcja przypisująca była całkowicie
+    # zepsuta — bo dla `[]` każdy członek ma 0 niezależnie od tego, jak liczymy. Fixture pochodzi
+    # z ANONIMIZOWANYCH wpisów zdjętych z żywej organizacji i zawiera cztery kształty, na których stara
+    # wersja rozjeżdżała się inaczej: `resourceNames[0]` dawał nazwę regionu, `project_id` zamiast numeru,
+    # numer OBCEGO projektu (egress) i `_` z aliasu `projects/_`. Członka było na żywo widać w 0 z 26 wpisów.
+    (ROOT / "violations.json").unlink(missing_ok=True)
+    p = sh([sys.executable, "tools/violations_report.py", "--logs", "tests/vpcsc-violation-dryrun.json",
+            "--declarations", "declarations.json", "--json-out", "violations.json",
+            "--markdown-out", "violations.md"], cwd=ROOT)
+    viol = json.loads((ROOT / "violations.json").read_text()) if (ROOT / "violations.json").exists() else {}
+    nazwa_czlonka = "example-division-prj-example-vertex-dev"
+    check("violations_report.py PRZYPISUJE naruszenia do wlasciwego czlonka (3 z realnego ksztaltu)",
+          p.returncode == 0 and viol.get(nazwa_czlonka) == 3,
+          p.stdout + p.stderr[-400:] + json.dumps(viol))
+
+    # NEGATYW do powyższego: czwarty wpis fixture'a dotyczy projektu SPOZA perimeter/members/. Nie wolno
+    # go doliczyć członkowi — inaczej „naruszenia" rosłyby o cudzy ruch i blokowały promocję bez powodu.
+    md = (ROOT / "violations.md").read_text()
+    check("violations_report.py NIE doklada czlonkowi naruszen obcego projektu",
+          viol.get(nazwa_czlonka) == 3 and "Naruszenia spoza listy" in md,
+          json.dumps(viol) + md[-400:])
+
+    # ---- FAIL-CLOSED: wpis, którego nie umiemy przypisać, NIE MOŻE dać zielonego raportu -------------
+    # `violations.json` jest DOWODEM dla promotion_gate. Wpis bez rozpoznanego projektu policzony jako
+    # „nie nasz" to dokładnie ten mechanizm, przez który raport meldował czyste okno przy 26 naruszeniach.
+    nieznany = json.loads((ROOT / "tests/vpcsc-violation-dryrun.json").read_text())[:1]
+    for klucz in ("ingressViolations", "egressViolations", "resourceNames"):
+        nieznany[0]["protoPayload"]["metadata"].pop(klucz, None)
+    nieznany[0]["resource"]["labels"].pop("project_id", None)
+    (ROOT / "raw-nieznany.json").write_text(json.dumps(nieznany))
+    (ROOT / "violations.json").unlink(missing_ok=True)
+    p = sh([sys.executable, "tools/violations_report.py", "--logs", "raw-nieznany.json",
+            "--declarations", "declarations.json", "--json-out", "violations.json",
+            "--markdown-out", "violations.md"], cwd=ROOT)
+    check("violations_report.py PADA na wpisie bez rozpoznanego projektu (brak dowodu != zero)",
+          p.returncode != 0 and not (ROOT / "violations.json").exists(),
+          f"rc={p.returncode} istnieje={(ROOT / 'violations.json').exists()} " + p.stderr[-300:])
+
+    # Wejście, które nie jest listą wpisów (np. obiekt błędu zapisany do pliku), też ma padać z komunikatem,
+    # a nie wywracać się tracebackiem gdzieś w środku pętli.
+    (ROOT / "raw-nie-lista.json").write_text('{"error": "PERMISSION_DENIED"}')
+    p = sh([sys.executable, "tools/violations_report.py", "--logs", "raw-nie-lista.json",
+            "--declarations", "declarations.json", "--json-out", "violations.json",
+            "--markdown-out", "violations.md"], cwd=ROOT)
+    check("violations_report.py ODRZUCA wejscie, ktore nie jest lista wpisow",
+          p.returncode != 0 and "Traceback" not in p.stderr, f"rc={p.returncode} " + p.stderr[-300:])
 
 
 # --------------------------------------------------- eksperyment wyscigu (klasyfikacja wynikow)
