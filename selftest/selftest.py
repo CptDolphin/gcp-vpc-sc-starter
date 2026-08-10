@@ -1035,18 +1035,75 @@ def test_tools() -> None:
     print("\n== narzedzia ==")
     decl = (ROOT / "declarations.json").read_text()
 
-    p = sh([sys.executable, "tools/attribute_budget.py", "--input", "declarations.json", "--format", "json"], cwd=ROOT)
-    check("attribute_budget.py liczy budzet", p.returncode == 0, p.stderr[-400:])
-    if p.returncode == 0:
-        doc = json.loads(p.stdout)
+    p_json = sh([sys.executable, "tools/attribute_budget.py", "--input", "declarations.json", "--format", "json"], cwd=ROOT)
+    check("attribute_budget.py liczy budzet", p_json.returncode == 0, p_json.stderr[-400:])
+    if p_json.returncode == 0:
+        doc = json.loads(p_json.stdout)
         check("budzet: swieze repo daleko od limitu", doc["worst_pct"] < 5, json.dumps(doc)[:300])
 
-    # NEGATYW: sztucznie zawyżone zużycie musi przekroczyć próg i zwrócić kod błędu.
+    # NEGATYW: sztucznie zaniżony limit musi przekroczyć próg i zwrócić kod błędu. Limit wyliczamy
+    # Z ZMIERZONEGO zużycia, a nie ze stałej — stała była związana z rozmiarem przykładowego repo i przy
+    # mniejszym zestawie deklaracji (jeden członek, jeden profil) nie przekraczała już progu, czyli negatyw
+    # cicho przestawał testować cokolwiek. Limit = zużycie zaokrąglone w dół gwarantuje >= 100% niezależnie
+    # od tego, jak duży jest fixture.
+    zuzycie = json.loads(p_json.stdout)["dry_run"] if p_json.returncode == 0 else 0
     over = json.loads(decl)
-    over["policy"]["attribute_budget"]["limit_per_config"] = 10
+    over["policy"]["attribute_budget"]["limit_per_config"] = max(1, zuzycie)
     (ROOT / "over-budget.json").write_text(json.dumps(over))
     p = sh([sys.executable, "tools/attribute_budget.py", "--input", "over-budget.json"], cwd=ROOT)
     check("attribute_budget.py PADA po przekroczeniu progu", p.returncode == 1, p.stdout[-300:])
+
+    # --- guard budzetu liczy TO, CO LADUJE W KONFIGURACJI --------------------------------------------
+    #
+    # Zmierzone na zywym perimetrze (#1940): narzedzie raportowalo 5 atrybutow, a `spec` w API trzymal 20.
+    # Roznica to reguly baseline — renderowane dla KAZDEGO czlonka (locals.tf: `ingress_rules_effective`),
+    # a w guardzie nieliczone. Guard, ktory zaniza, mowi „jest miejsce" dokladnie wtedy, gdy go brakuje.
+    #
+    # Ponizsze asercje sa WLASNOSCIOWE (usun skladnik -> liczba MUSI zmalec), a nie porownaniem ze stala:
+    # stala trzeba by aktualizowac przy kazdej zmianie fixture'u, a wtedy test uczy aktualizowania stalej.
+    def budzet(mutacja) -> int:
+        d = json.loads(decl)
+        mutacja(d)
+        (ROOT / "budzet-wariant.json").write_text(json.dumps(d))
+        r = sh([sys.executable, "tools/attribute_budget.py", "--input", "budzet-wariant.json",
+                "--format", "json"], cwd=ROOT)
+        return json.loads(r.stdout)["dry_run"] if r.returncode == 0 else -1
+
+    def bez_baseline(d):
+        d["policy"]["baseline_ingress"] = []
+
+    # Baseline mnozy sie przez liczbe czlonkow — to jest powod, dla ktorego jego pominiecie bolalo dopiero
+    # przy trzydziestu dywizjach. Duplikujemy czlonka i sprawdzamy, ze przyrost obejmuje takze baseline.
+    def dwaj_czlonkowie(d):
+        nazwa, czlonek = list(d["members"].items())[0]
+        d["members"][nazwa + "-kopia"] = json.loads(json.dumps(czlonek))
+
+    # `externalResources` (BigQuery Omni) API liczy do limitu wprost. Bez tego skladnika egress poza GCP
+    # bylby jedyna regula, ktora nic nie kosztuje — a to najdrozsza regula w katalogu pod wzgledem ryzyka.
+    def bez_zewnetrznych(d):
+        for czlonek in d["members"].values():
+            for wpis in czlonek.get("profiles", []):
+                wpis.get("params", {}).pop("external_resources", None)
+
+    pelny = budzet(lambda d: None)
+    goly = budzet(bez_baseline)
+    podwojony = budzet(dwaj_czlonkowie)
+    bez_s3 = budzet(bez_zewnetrznych)
+
+    check("budzet: reguly baseline_ingress SA liczone (usuniecie ich obniza wynik)", goly < pelny,
+          f"pelny={pelny} bez_baseline={goly}")
+    check("budzet: baseline mnozy sie przez liczbe czlonkow", podwojony == 2 * pelny,
+          f"jeden={pelny} dwaj={podwojony}")
+    check("budzet: zasoby zewnetrzne (s3://) sa liczone", bez_s3 < pelny,
+          f"pelny={pelny} bez_zewnetrznych={bez_s3}")
+
+    # Kontrakt musi podawac TE SAMA liczbe co guard — inaczej zespol planuje wobec innego budzetu niz ten,
+    # na ktorym pada CI. Egzekwowane strukturalnie: obie strony czytaja `local.attribute_usage_*`.
+    ct = (ROOT / "terraform/contract.tf").read_text()
+    check("kontrakt nie ma WLASNEGO wyrazenia liczacego budzet (czyta local.attribute_usage_*)",
+          "local.attribute_usage_dry_run" in ct and "local.attribute_usage_enforced" in ct
+          and "merge(local.ingress_rules_all" not in ct,
+          ct[ct.find("contract_budget"):ct.find("contract_budget") + 300])
 
     # render_member.py MUSI wymuszać dry-run niezależnie od tego, co przyszło w payloadzie.
     p = sh([sys.executable, "tools/render_member.py", "--division", "x", "--project-id", "prj-x-test",
