@@ -169,6 +169,46 @@ baseline_ingress:
       - service: aiplatform.googleapis.com
         methods: ["*"]
 
+  # Tożsamość PIPELINE'U, który produkuje DOWÓD dla bramki promocji. To nie jest „jeszcze jeden skaner":
+  # bez tej reguły system nie umie promować NIKOGO, a dowiaduje się o tym dopiero przy pierwszej promocji.
+  #
+  # ZMIERZONE na żywej organizacji (2026-08-10, 34 wpisy audytowe jednego członka w oknie 14 dni).
+  # `violations-report.yml` uwierzytelnia się jako konto PLANU i czyta audit-log KAŻDEGO projektu
+  # członkowskiego (`gcloud logging read --project=<członek>`) — bo wpis o naruszeniu VPC-SC ląduje w logu
+  # projektu będącego WŁAŚCICIELEM zasobu, nie w logu organizacji. A `logging.googleapis.com` jest w
+  # restricted_services, więc ten odczyt sam jest wywołaniem chronionej usługi spoza granicy. Skutki są dwa
+  # i oba są ciche:
+  #
+  #   * W DRY-RUN każdy przebieg raportu dopisuje członkowi naruszenie od `sa-vpcsc-plan`
+  #     (`LoggingServiceV2.ListLogEntries`) — narzędzie brudzi dokładnie ten dowód, który zbiera. Bramka
+  #     `promotion_gate` wymaga ZERA naruszeń w oknie, więc okno nie ma jak się wyczyścić, dopóki raport
+  #     chodzi. Zmierzone: 1 z 34 naruszeń członka pochodziło od konta planu, reszta od ludzi.
+  #   * PO PROMOCJI ten sam odczyt zostaje ODMÓWIONY, a workflow ma `|| exit 1` (i słusznie: `gcloud logging
+  #     read` przy odmowie wypisuje `[]` na stdout). Czyli pierwsza udana promocja zabiera dowód wszystkim
+  #     następnym — a awaria wygląda przy tym na problem z uprawnieniami IAM, nie na skutek promocji.
+  #
+  # DLACZEGO baseline, a nie profil: profil trzeba wybrać, a ten przepływ dotyczy każdego członka z definicji
+  # — jest częścią maszynerii perimetru, nie aplikacji dywizji. Ta sama argumentacja co przy skanerze.
+  #
+  # DLACZEGO tak wąsko: JEDNA metoda odczytu logów, zero zapisów, zero innych usług. Konto `apply` tej reguły
+  # NIE dostaje i nie potrzebuje — pracuje na obiekcie org-level (Access Context Manager nie jest usługą
+  # chronioną) oraz na własnym projekcie administracyjnym, który członkiem nie jest. Potwierdzone pomiarem:
+  # zero naruszeń od `sa-vpcsc-apply` w oknie obserwacji. Reguła szersza „na wszelki wypadek" oddałaby
+  # płaszczyźnie sterowania odczyt danych każdej dywizji.
+  - title: platform-violations-read
+    identities:
+      - "serviceAccount:sa-vpcsc-plan@<PROJEKT>.iam.gserviceaccount.com"
+    # Pipeline woła z runnerów GitHuba — adresy są pulą dostawcy, nie zakresem korporacyjnym, więc nie ma
+    # access levelu, który mógłby to opisać uczciwie. Autoryzacja wyłącznie tożsamością, jawnie i tylko dla
+    # odczytu (ta sama furtka i ten sam wymóg approvalu Security co przy skanerze).
+    access_levels: []
+    allow_without_access_level: true
+    operations:
+      - service: logging.googleapis.com
+        # `logging` PUBLIKUJE listę metod (99 pozycji), więc `*` jest tu zakazane i słusznie — wypisujemy
+        # dokładnie tę jedną, której używa `gcloud logging read`.
+        methods: ["LoggingServiceV2.ListLogEntries"]
+
 # Monitoring perimetru — metryki log-based i alerty (terraform/monitoring.tf).
 #
 # DLACZEGO to jest tutaj, a nie „w monitoringu": perimetr bez alertu jest granicą, o której dowiesz się od
