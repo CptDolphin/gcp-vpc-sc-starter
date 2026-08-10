@@ -189,6 +189,20 @@ def test_terraform() -> None:
     p = sh(["terraform", f"-chdir={tf}", "test"])
     check("terraform test (renderer)", p.returncode == 0 and "0 failed" in p.stdout, p.stdout[-1200:])
 
+    # Test 12 renderera porównuje LICZBĘ wyrenderowanych reguł egress z zasobem zewnętrznym z liczbą celów
+    # ZADEKLAROWANYCH przez członków. Równość jest ostra w obie strony, ale gdy przykładowe deklaracje
+    # przestaną tę ścieżkę w ogóle deklarować, obie strony spadają do zera i test przechodzi NIE BADAJĄC
+    # niczego. Materiał startera jest jedynym miejscem, w którym ta ścieżka ma prawo być uruchomiona
+    # (w prawdziwym repo nikt nie musi używać BigQuery Omni), więc tu pilnujemy, że nadal jest.
+    premisa = ("length(flatten([for mkey, m in local.members : [for p in m.profiles : "
+               "[for rule in lookup(local.profiles[p.name], \"egress\", []) : rule.title "
+               "if length(lookup(p.params, lookup(rule, \"to_external_from\", \"__none__\"), [])) > 0]]]))")
+    p = sh(["terraform", f"-chdir={tf}", "console"], input=premisa + "\n")
+    ostatnia = p.stdout.strip().splitlines()[-1].strip() if p.stdout.strip() else ""
+    check("przykladowe deklaracje uruchamiaja sciezke egressu zewnetrznego (test 12 nie jest pusty)",
+          p.returncode == 0 and ostatnia.isdigit() and int(ostatnia) > 0,
+          f"premisa={ostatnia!r} stderr={p.stderr[-300:]!r}")
+
     # Przykładowy członek jest w dry-run, więc konfiguracja EGZEKWOWANA musi być pusta. To pilnuje
     # najważniejszej własności startera: świeże repo nie blokuje nikomu ruchu.
     p = sh(["terraform", f"-chdir={tf}", "console"], input="length(local.ingress_rules_enforced)\n")
@@ -1285,16 +1299,197 @@ def test_workflows() -> None:
 
     for f in wf:
         body = f.read_text()
-        if "id-token: write" in body:
+        # Uprawnienie wykrywamy po SAMYM KODZIE. `id-token: write` to deklaracja, nie zdanie — a komentarz
+        # tłumaczący, że job tego uprawnienia NIE MA, włączał ten test i kazał szukać w nim WIF-a, którego
+        # z definicji nie ma. Test padał więc o własną dokumentację; ta sama choroba co przy strip_heredocs,
+        # tylko odwrotnym znakiem: nie fałszywe odrzucenie, lecz fałszywe WŁĄCZENIE bramki.
+        kod = "\n".join(l for l in body.splitlines() if not l.lstrip().startswith("#"))
+        if "id-token: write" in kod:
             # Warunek jest o TOŻSAMOŚCI, nie o wersji akcji: sprawdzamy, że workflow uwierzytelnia się przez
             # `auth` z `workload_identity_provider`. Wersja jest przypięta SHA-em i będzie się zmieniać
             # (Dependabot), więc wpisanie tu `@v2` robiło z tego testu detektor aktualizacji, nie bramkę.
-            uses_auth = re.search(r"uses:\s*google-github-actions/auth@", body) is not None
+            uses_auth = re.search(r"uses:\s*google-github-actions/auth@", kod) is not None
             check(f"{f.name}: uzywa WIF (bez kluczy SA)",
-                  uses_auth and "workload_identity_provider:" in body)
+                  uses_auth and "workload_identity_provider:" in kod)
     joined = "\n".join(f.read_text() for f in wf)
     check("zaden workflow nie zawiera klucza SA ani hasla",
           "private_key" not in joined and "credentials_json" not in joined)
+
+
+# ----------------------------------------------- workflowy uruchamiane TAK, JAK STOJA (nie czytane)
+#
+# DLACZEGO to nie jest duplikat test_workflows(): tamten czyta workflowy jak tekst, a caly selftest
+# uruchamia bramki WLASNA komenda i we WLASNYM srodowisku. W tej szczelinie przezyly komplet 179 zielonych
+# testow dwa defekty, ktore wywrocily PIERWSZY PR w wygenerowanym repo perimetru (#1933):
+#   * `terraform test` w validate.yml padal na braku tozsamosci — provider `google` odmawia INICJALIZACJI
+#     bez zadnych credentiali. Lokalnie i w selftescie bylo zielono, bo deweloper ma ADC, a selftest.yml
+#     startera podaje atrape tokenu na poziomie JOBA. Szablon, ktory realnie jedzie u odbiorcy, jej nie mial;
+#   * `> plan.json` w plan.yml zapisywalo plan w korzeniu repo (przekierowanie robi powloka), a conftest
+#     czytal `terraform/plan.json` — bramki OPA na planie nie wykonaly sie ani razu.
+# Oba widac wylacznie wtedy, gdy wykona sie DOKLADNIE to, co pojedzie w CI: ta komenda i to srodowisko.
+
+# Atrapa terraforma dla testu sciezek: odtwarza SKUTKI komend na PLIKACH, nie planuje niczego. Badany jest
+# rozjazd „gdzie plik powstaje" kontra „skad jest czytany", a bierze sie on stad, ze `-chdir` przenosi
+# katalog roboczy TERRAFORMOWI, a przekierowanie `>` wykonuje POWLOKA w katalogu joba. Prawdziwy terraform
+# potrzebowalby do tego poswiadczen i polaczenia z chmura; atrapa odwzorowuje sama te wlasnosc.
+ATRAPA_TERRAFORM = '''#!/usr/bin/env python3
+"""Atrapa terraforma na potrzeby selftestu — patrz komentarz przy ATRAPA_TERRAFORM."""
+import pathlib
+import sys
+
+argv = sys.argv[1:]
+chdir, reszta = "", []
+for a in argv:
+    if a.startswith("-chdir="):
+        chdir = a[len("-chdir="):]
+    else:
+        reszta.append(a)
+baza = pathlib.Path(chdir) if chdir else pathlib.Path(".")
+polecenie = reszta[0] if reszta else ""
+
+if polecenie == "plan":
+    for a in reszta:
+        if a.startswith("-out="):
+            (baza / a[len("-out="):]).write_text("atrapa-planu")
+elif polecenie == "show":
+    plik = baza / reszta[-1]
+    if not plik.exists():
+        sys.stderr.write("atrapa: nie ma pliku planu %s\\n" % plik)
+        sys.exit(1)
+    if "-json" in reszta:
+        sys.stdout.write('{"format_version": "1.2", "atrapa": true}\\n')
+    else:
+        sys.stdout.write("atrapa: podsumowanie planu\\n")
+sys.exit(0)
+'''
+
+
+def kroki_workflow(wf: dict):
+    """Splaszcza workflow do par (krok, env), scalajac env z poziomu workflow -> job -> krok.
+
+    Env bierzemy WYLACZNIE z badanego pliku, nigdy ze srodowiska procesu: harness selftestu dostaje
+    `GOOGLE_OAUTH_ACCESS_TOKEN` ze swojego wlasnego workflowa i przekazuje go dalej dzieciom. Test, ktory
+    by z tego korzystal, zielenilby sie CUDZA konfiguracja — i to jest dokladnie ten mechanizm, ktory ukryl
+    brak atrapy w szablonie validate.yml.
+    """
+    for job in (wf.get("jobs") or {}).values():
+        for krok in job.get("steps") or []:
+            env = {}
+            env.update(wf.get("env") or {})
+            env.update(job.get("env") or {})
+            env.update(krok.get("env") or {})
+            yield krok, env
+
+
+def srodowisko_bez_tozsamosci_google() -> dict:
+    """Kopia srodowiska z WYCIETYMI wszystkimi kanalami poswiadczen Google.
+
+    Provider `google` czyta tozsamosc ze zmiennych `GOOGLE_*`/`GCLOUD_*`/`CLOUDSDK_*`, a na koncu z pliku
+    ADC. Runner GitHuba nie ma zadnego z tych zrodel, deweloper ma ADC prawie zawsze — i cala roznica
+    miedzy „zielono lokalnie" a czerwonym CI siedzi w tym jednym pliku.
+
+    HOME MUSI byc podmieniony, nie tylko `CLOUDSDK_CONFIG`: biblioteka, z ktorej korzysta provider, szuka
+    ADC pod `$HOME/.config/gcloud/application_default_credentials.json` i `CLOUDSDK_CONFIG` (zmiennej gcloud)
+    NIE HONORUJE. Zmierzone: przy samym `CLOUDSDK_CONFIG` test przechodzil takze z ROZBROJONA poprawka,
+    czyli nie badal niczego — dokladnie ta klasa bledu, ktora ten plik tropi gdzie indziej. Rozpakowana
+    kopia jest juz zainicjalizowana (`.terraform/` lezy w katalogu modulu), wiec przeniesienie HOME nie
+    odbiera terraformowi providerow.
+    """
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(("GOOGLE_", "GCLOUD_", "GCP_", "CLOUDSDK_"))}
+    pusty = tempfile.mkdtemp(prefix="vpcsc-bez-adc-")
+    env["HOME"] = pusty
+    env["CLOUDSDK_CONFIG"] = pusty
+    return env
+
+
+def konsumenci_planu(kroki):
+    """Sciezki, ktore kroki PO planie czytaja — wyciagane z pliku, nie wpisane w test.
+
+    Wpisanie ich na sztywno zrobiloby z tego kopie workflowa: zmiana sciezki w JEDNYM miejscu przestalaby
+    byc wykrywalna, a badanym trybem awarii jest wlasnie rozjazd producenta z konsumentem.
+    """
+    for krok in kroki:
+        run = str(krok.get("run", ""))
+        m = re.search(r"conftest test\b[^\n]*?(\S+\.json)", run)
+        if m:
+            yield "bramki OPA na planie (conftest)", m.group(1)
+        m = re.search(r"sha256sum\s+(\S+)", run)
+        if m:
+            yield "przypiecie planu (sha256sum)", m.group(1)
+        if "upload-artifact" in str(krok.get("uses", "")):
+            sciezka = (krok.get("with") or {}).get("path")
+            if sciezka:
+                yield "artefakt dla apply (upload-artifact)", sciezka
+
+
+def test_workflowy_wykonywalne() -> None:
+    print("\n== workflowy uruchamiane tak, jak stoja ==")
+    walidacja = yaml.safe_load((ROOT / ".github/workflows/validate.yml").read_text())
+
+    # --- 1. guard na pinowanie akcji: uruchamiamy JEGO WLASNY kod na wejsciu, ktorego jeszcze nie widzial.
+    # Dotad guard istnial tylko jako tekst w workflowie, a selftest sprawdzal pinowanie WLASNYM wyrazeniem
+    # w Pythonie — czyli druga implementacja tej samej reguly. Zgodnosc dwoch niezaleznych regexow nikt nie
+    # mierzyl, wiec pierwszy bump Dependabota (`SHA` + `# vX.Y.Z`) byl pierwszym realnym wejsciem guardu.
+    guard = next((k["run"] for k, _ in kroki_workflow(walidacja)
+                  if "pinned to a SHA" in str(k.get("name", ""))), None)
+    check("validate.yml ma krok guardu na pinowanie akcji", guard is not None)
+    if guard:
+        sha = "3d3c42e5aac5ba805825da76410c181273ba90b1"  # realny SHA actions/checkout v7.0.1
+        przypadki = [
+            ("format Dependabota (SHA + komentarz z tagiem)", f"      - uses: actions/checkout@{sha} # v7.0.1", 0),
+            ("goly SHA bez komentarza", f"      - uses: actions/checkout@{sha}", 0),
+            ("akcja lokalna (./contrib) nie jest third-party", "      - uses: ./contrib", 0),
+            ("ruchomy tag @v4 ODRZUCONY", "      - uses: actions/checkout@v4", 1),
+            ("skrocony SHA (7 znakow) ODRZUCONY", f"      - uses: actions/checkout@{sha[:7]}", 1),
+            ("branch @main ODRZUCONY", "      - uses: actions/checkout@main", 1),
+        ]
+        for opis, linia, oczekiwany in przypadki:
+            piaskownica = pathlib.Path(tempfile.mkdtemp(prefix="vpcsc-guard-"))
+            (piaskownica / ".github/workflows").mkdir(parents=True)
+            (piaskownica / "contrib").mkdir()
+            (piaskownica / ".github/workflows/probka.yml").write_text(
+                "on: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n" + linia + "\n")
+            (piaskownica / "contrib/action.yml").write_text("runs:\n  using: composite\n  steps: []\n")
+            p = sh(["bash", "-e", "-c", guard], cwd=piaskownica)
+            check(f"guard pinowania na zywym wejsciu: {opis}",
+                  p.returncode == oczekiwany,
+                  f"rc={p.returncode}, oczekiwano {oczekiwany}; {(p.stdout + p.stderr)[-300:]}")
+
+    # --- 2. `terraform test` musi przejsc z tozsamoscia, ktora deklaruje SAM workflow — i tylko z nia.
+    krok_test, env_test = next(((k, e) for k, e in kroki_workflow(walidacja)
+                                if re.search(r"terraform\s+(-chdir=\S+\s+)?test\b", str(k.get("run", "")))),
+                               (None, None))
+    check("validate.yml ma krok `terraform test`", krok_test is not None)
+    if krok_test is not None and have("terraform"):
+        env = srodowisko_bez_tozsamosci_google()
+        env.update({k: str(v) for k, v in env_test.items()})
+        p = subprocess.run(["bash", "-e", "-c", krok_test["run"]],
+                           cwd=ROOT, env=env, capture_output=True, text=True)
+        check("validate.yml: `terraform test` przechodzi BEZ ADC (tak jak na runnerze)",
+              p.returncode == 0 and "0 failed" in p.stdout, (p.stdout + p.stderr)[-900:])
+
+    # --- 3. plan.yml: plik, ktory krok planu ZAPISUJE, musi byc tym, ktory czytaja kroki nizej.
+    planwf = yaml.safe_load((ROOT / ".github/workflows/plan.yml").read_text())
+    kroki = [k for k, _ in kroki_workflow(planwf)]
+    krok_planu = next((k for k in kroki if "-out=" in str(k.get("run", ""))), None)
+    check("plan.yml ma krok produkujacy plan (-out=)", krok_planu is not None)
+    if krok_planu is not None:
+        katalog_atrapy = pathlib.Path(tempfile.mkdtemp(prefix="vpcsc-atrapa-tf-"))
+        (katalog_atrapy / "terraform").write_text(ATRAPA_TERRAFORM)
+        (katalog_atrapy / "terraform").chmod(0o755)
+        env = {**os.environ, "PATH": f"{katalog_atrapy}{os.pathsep}{os.environ['PATH']}"}
+        p = subprocess.run(["bash", "-e", "-c", krok_planu["run"]],
+                           cwd=ROOT, env=env, capture_output=True, text=True)
+        check("plan.yml: krok planu wykonuje sie (na atrapie terraforma)",
+              p.returncode == 0, (p.stdout + p.stderr)[-500:])
+        powstalo = sorted(str(x.relative_to(ROOT)) for x in ROOT.glob("*.json")) + \
+            sorted(str(x.relative_to(ROOT)) for x in (ROOT / "terraform").glob("*.json"))
+        for opis, sciezka in konsumenci_planu(kroki):
+            check(f"plan.yml: {opis} czyta plik, ktory krok planu naprawde tworzy ({sciezka})",
+                  (ROOT / sciezka).exists(), f"krok planu zostawil: {powstalo}")
+        for smiec in ("terraform/plan.json", "plan.json", "terraform/tfplan.binary", "tfplan.binary"):
+            (ROOT / smiec).unlink(missing_ok=True)
 
 
 # --------------------------------------------------------------------- schematy (opcjonalnie)
@@ -1390,6 +1585,7 @@ def main() -> int:
     test_preflight()
     test_eksperyment_wyscigu()
     test_workflows()
+    test_workflowy_wykonywalne()
     test_schemas()
 
     ok = sum(1 for _, c, _ in results if c)

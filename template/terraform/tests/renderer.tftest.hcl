@@ -224,11 +224,25 @@ run "monitoring_alerty_maja_procedure" {
 run "egress_zewnetrzny_renderuje_sie_i_ma_poprawny_format" {
   command = plan
 
+  # Liczba wyrenderowanych reguł z zasobem zewnętrznym MUSI się zgadzać z liczbą takich celów ZADEKLAROWANYCH
+  # przez członków. Warunek był wcześniej zapisany jako „> 0" i mierzył nie renderer, lecz obecność
+  # PRZYKŁADOWEGO członka: pierwsze prawdziwe wdrożenie (które przykłady kasuje i wstawia swoich członków)
+  # dostawało czerwony test mówiący „profil przestał się renderować", choć nikt go po prostu nie używa.
+  # Premisę liczymy z WEJŚCIA (deklaracje + profile), nigdy z wyjścia renderera — inaczej asercja brzmiałaby
+  # „skoro nic nie powstało, to dobrze, że nic nie powstało" i nie badałaby niczego. Równość zamiast „> 0"
+  # jest przy tym OSTRZEJSZA w obie strony: łapie i regułę zgubioną, i wymyśloną z niczego.
   assert {
     condition = length([
       for k, r in local.egress_rules_all : k if length(r.external_resources) > 0
-    ]) > 0
-    error_message = "Żadna reguła egress nie ma zasobów zewnętrznych — profil bq-omni-external-read przestał się renderować."
+      ]) == length(flatten([
+        for mkey, m in local.members : [
+          for p in m.profiles : [
+            for rule in lookup(local.profiles[p.name], "egress", []) :
+            rule.title if length(lookup(p.params, lookup(rule, "to_external_from", "__none__"), [])) > 0
+          ]
+        ]
+    ]))
+    error_message = "Liczba reguł egress z zasobem zewnętrznym nie zgadza się z liczbą celów zadeklarowanych przez członków — renderer gubi albo dokłada reguły."
   }
 
   # Format narzuca API: s3://BUCKET albo azure://ACCOUNT.blob.core.windows.net/CONTAINER. ARN przechodzi
