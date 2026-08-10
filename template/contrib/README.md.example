@@ -19,7 +19,7 @@ musiałoby dostać prawo zmiany granicy **całej firmy**, bo uprawnień ACM nie 
 
 | Co | Po co |
 |---|---|
-| token GitHub App z `contents: read` + `pull_requests: write` na repo perimetru | pobranie **kontraktu** i **paczki bramek** z release'ów oraz otwarcie PR |
+| token GitHub App z `contents: write` na repo perimetru (i niczym więcej) | pobranie **kontraktu** i **paczki bramek** z release'ów oraz wysłanie zgłoszenia; dlaczego akurat tyle — §„Zakres tokenu" niżej |
 
 **To wszystko.** Zero uprawnień do Access Context Managera, zero dostępu do stanu Terraform, zero tożsamości
 w Google Cloud.
@@ -114,8 +114,30 @@ jobs:
 ```
 
 `GITHUB_TOKEN` **nie zadziała** — jest zawężony do repozytorium, w którym powstał. Potrzebna jest GitHub App
-zainstalowana na obu repozytoriach, z `contents: read` (release'y: kontrakt i bramki) oraz
-`pull_requests: write` na repo perimetru — i niczym więcej.
+zainstalowana na obu repozytoriach.
+
+### Zakres tokenu — zmierzony, nie wywnioskowany
+
+Skoro kanał kończy się pull requestem, wydaje się, że token potrzebuje `pull_requests: write`. Pomiar
+(`GITHUB_TOKEN` z `permissions:` zawężonym per job — ten sam model uprawnień co instalacja Appa) mówi
+odwrotnie, i to w obie strony:
+
+| Uprawnienia tokenu | Wywołanie | HTTP |
+|---|---|---|
+| `contents: read` + `pull-requests: write` | `POST /repos/{o}/{r}/dispatches` | **403** `Resource not accessible by integration` |
+| `contents: write` | `POST /repos/{o}/{r}/dispatches` | **204** |
+| `actions: write` | `POST /repos/{o}/{r}/actions/workflows/{plik}/dispatches` | **204** |
+| `contents: write` **bez** `actions` | `POST /repos/{o}/{r}/actions/workflows/{plik}/dispatches` | **403** |
+
+- **`repository_dispatch` wymaga `contents: write`** — bez tego ostatni krok akcji `contrib` pada na 403.
+- **`pull_requests` nie jest potrzebne w ogóle** — PR-a otwiera po swojej stronie `external-intake.yml`,
+  własnym `GITHUB_TOKEN`-em repozytorium perimetru.
+
+`contents: write` to prawo zapisu do repozytorium perimetru, czyli **więcej niż „otworzyć PR"**. GitHub nie
+ma uprawnienia o ziarnie „wyślij zdarzenie", więc kanału nie ogranicza zakres tokenu, tylko: mapowanie
+`contributors.yaml` po tamtej stronie, payload traktowany jako dane (a nie autoryzacja) i apply wyłącznie
+z gałęzi domyślnej. Wariant węższy — `workflow_dispatch` na `actions: write`, które **nie daje zapisu do
+kodu** — jest zmierzony w wierszach 3–4 i wymaga zmiany po obu stronach kanału.
 
 **Bramki przypinasz, kontraktu NIE.** To nie jest niekonsekwencja: bramki są **regułami**, więc pin daje
 powtarzalną walidację. Kontrakt jest **stanem świata** — przypięty pokazywałby profile i access levels,
@@ -157,5 +179,6 @@ konfiguracją egzekwowaną (czyli innym perimetrem — to odczyt z żywego GCP) 
 | `projekt … jest już członkiem perimetru (… stage: …)` | to nie jest onboarding — projekt już jest w granicy. Zmiana profili albo promocja do `enforced` idzie PR-em na **istniejącym** pliku w repo perimetru; kanał zgłoszeniowy nie nadpisuje wpisów, bo zapisałby `stage: dry-run` na członku, który jest chroniony |
 | `profil … nie istnieje` | literówka albo profil, którego nie ma; `jq '.profiles[].name' contract.json` |
 | `access level … nie istnieje` | `jq '.access_levels' contract.json` — wskazujesz nazwę, nie zakres IP |
-| `brak kontraktu` | apply perimetru jeszcze nie przeszedł (release `contract` nie istnieje) albo twój token nie ma `contents: read` na repo perimetru |
+| `brak kontraktu` | apply perimetru jeszcze nie przeszedł (release `contract` nie istnieje) albo twój token nie ma dostępu do release'ów repo perimetru |
+| `Resource not accessible by integration` (HTTP 403) na wysyłce zgłoszenia | token ma `contents: read` zamiast `contents: write` — `repository_dispatch` wymaga zapisu (§„Zakres tokenu") |
 | `profil … wymaga parametru …` | profil deklaruje parametr, którego nie podałeś — parametry są w pliku profilu |

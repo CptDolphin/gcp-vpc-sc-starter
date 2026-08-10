@@ -26,12 +26,51 @@ examples/division-repo/
 | **wglądu w `perimeter/access-levels/`** | korporacyjne zakresy IP i polityki urządzeń. Ty wskazujesz **nazwę** access levelu; jego treść jest implementacją, nie interfejsem |
 | **prawa apply** | apply jest jeden, na jednym stanie, za środowiskiem z wymaganymi recenzentami |
 
-**Jedno prawo, które dostajesz: otworzyć pull request** (przez GitHub App, `pull_requests: write` na repo
-perimetru). Plus `contents: read` na tym samym repo — na release'y z kontraktem i bramkami.
+**Jedno prawo, które dostajesz: doprowadzić do powstania pull requesta** — przez GitHub App na repo
+perimetru. Zakres tego tokenu jest zmierzony i wychodzi inaczej, niż podpowiada intuicja: patrz sekcja
+[Zakres tokenu](#zakres-tokenu--zmierzony-nie-wywnioskowany) niżej.
 
 Co dostajesz w zamian za to, czego nie dostajesz: **walidację u siebie**. Twój pipeline mówi „ten profil
 nie istnieje", „brakuje parametru", „ten projekt już jest w perimetrze" w kilka sekund — bez czekania
 na czyjeś review i bez dostępu do czegokolwiek.
+
+## Zakres tokenu — zmierzony, nie wywnioskowany
+
+Intuicja podpowiada, że skoro kanał kończy się pull requestem, to token potrzebuje `pull_requests: write`.
+Jest odwrotnie, w obie strony. Pomiar: `GITHUB_TOKEN` z `permissions:` zawężonym per job (ten sam model
+uprawnień co instalacja GitHub Appa), cztery wywołania:
+
+| Uprawnienia tokenu | Wywołanie | HTTP |
+|---|---|---|
+| `contents: read` + `pull-requests: write` | `POST /repos/{o}/{r}/dispatches` | **403** `Resource not accessible by integration` |
+| `contents: write` | `POST /repos/{o}/{r}/dispatches` | **204** |
+| `actions: write` | `POST /repos/{o}/{r}/actions/workflows/{plik}/dispatches` | **204** |
+| `contents: write` **bez** `actions` | `POST /repos/{o}/{r}/actions/workflows/{plik}/dispatches` | **403** |
+
+Czyli:
+
+- **`repository_dispatch` wymaga `contents: write`** na repo perimetru. To jest ostatni krok akcji `contrib`
+  i bez tego uprawnienia kończy się 403 — kanał nie działa.
+- **`pull_requests` nie jest potrzebne w ogóle.** Pull requesta otwiera po swojej stronie
+  `external-intake.yml`, własnym `GITHUB_TOKEN`-em repozytorium perimetru. Token dywizji nie woła ani
+  jednego endpointu PR-owego.
+
+**To jest niewygodne i lepiej to napisać, niż przemilczeć:** `contents: write` znaczy prawo zapisu do
+repozytorium perimetru — więcej niż „otworzyć PR". Uprawnienia GitHuba nie mają ziarna „wyślij zdarzenie",
+więc granica nie stoi na zakresie tokenu, tylko na trzech rzeczach poza nim:
+
+1. `perimeter/contributors.yaml` **leży po tamtej stronie** — repozytorium dywizji nie może rozszerzyć
+   własnej listy dozwolonych projektów, bo nie ma jej u siebie.
+2. Payload dispatcha jest **danymi, nie autoryzacją**: repo perimetru konfrontuje `change_ref` z nadawcą
+   zdarzenia i odrzuca rozjazd.
+3. Apply wychodzi wyłącznie z gałęzi domyślnej repozytorium perimetru, przez environment `perimeter-apply`
+   z polityką gałęzi.
+
+Wiersze 3–4 tabeli pokazują wariant **węższy**, który istnieje: `workflow_dispatch` chodzi po osi `actions`,
+a `actions` i `contents` są rozłączne w obie strony — token wysyłający zgłoszenie nie miałby wtedy prawa
+zapisu do kodu. Kosztuje to zmianę po OBU stronach kanału (`contrib/action.yml` i `external-intake.yml`)
+i ograniczenie payloadu do `inputs` workflowa, więc nie jest to poprawka w tym pliku. Zapisane jako
+świadomy dług, nie przeoczenie.
 
 ## Dlaczego to NIE jest moduł Terraform wołany z waszego stanu
 
@@ -93,7 +132,7 @@ kontrolujesz, wpisywane „żeby przeszło", są dokładnie tymi, których nikt 
 
 | Co | Gdzie | Kto ustawia |
 |---|---|---|
-| GitHub App zainstalowana na obu repozytoriach (`contents: read` + `pull_requests: write` na repo perimetru) | `vars.VPCSC_APP_ID`, `secrets.VPCSC_APP_KEY` | ty, raz |
+| GitHub App zainstalowana na obu repozytoriach (`contents: write` na repo perimetru — patrz §„Zakres tokenu"; `pull_requests` NIE jest potrzebne) | `vars.VPCSC_APP_ID`, `secrets.VPCSC_APP_KEY` | ty, raz, **przez interfejs GitHuba** — aplikacji nie da się utworzyć przez API |
 | wpis w `perimeter/contributors.yaml`: to repozytorium → twoja dywizja → dozwolone projekty | repo perimetru | **zespół sieciowy**, PR z approvalem |
 | podmiana `ORG/gcp-vpc-sc` i `<SHA_WYDANIA>` w workflow | ten przykład | ty |
 
