@@ -117,7 +117,9 @@ Następne kroki w docelowym repo (kolejność ma znaczenie — patrz docs/1-wdro
      .github/workflows/*.yml (WIF_PROVIDER, TF_SA, BACKEND_BUCKET, SNOW_INSTANCE).
   2. terraform -chdir=terraform init && terraform -chdir=terraform validate
   3. pre-commit install && pre-commit run --all-files
-  4. Ustaw ochronę gałęzi + environment `perimeter-apply` z required reviewers (README.md tego startera).
+  4. Ustaw ochronę gałęzi + environment `perimeter-apply`: polityka gałęzi ograniczona do gałęzi domyślnej
+     (działa na każdym planie) ORAZ required reviewers (funkcja płatna). Potem ODCZYTAJ oba z API — samo
+     wysłanie ustawienia niczego nie dowodzi (`tools/bootstrap_github.sh` robi jedno i drugie).
   5. Perimetr powstaje PUSTY i w dry-run. Dopiero po pierwszym czystym oknie obserwacji promujesz członka
      do enforced — nigdy odwrotnie (docs/3-runbook-promocja-i-break-glass.md).
 NEXT

@@ -11,7 +11,7 @@ perimetru działa samo, a ten katalog rusza się tylko przy zmianie modelu dost�
 | Zasób | Po co |
 |---|---|
 | `sa-vpcsc-plan` | read-only; uruchamiane przez **każdy** pull request |
-| `sa-vpcsc-apply` | jedyna tożsamość modyfikująca perimetr; tylko z `main` + environment z reviewerami |
+| `sa-vpcsc-apply` | jedyna tożsamość modyfikująca perimetr; wyłącznie token z environment `perimeter-apply` — a to, że pochodzi z `main`, wymusza polityka gałęzi tego environment, nie ten stack |
 | custom rola `vpcScPerimeterWriter` | `servicePerimeters.get/list/**update**` + access levels — **bez** create/delete |
 | 4 role read-only na org dla `plan` | `policyReader` (plan), `cloudasset.viewer` + `compute.networkViewer` + `dns.reader` (pre-flight) |
 | `storage.objectAdmin` na **prefiksie** stanu | backend GCS bierze blokadę (`.tflock`), sam odczyt nie wystarcza nawet dla `plan` |

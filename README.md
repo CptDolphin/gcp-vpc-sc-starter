@@ -19,7 +19,7 @@ Osiem decyzji, na których to stoi — wraz z odrzuconymi wariantami — jest w
 ./install.sh /sciezka/do/nowego/repo          # rozpakuj wszystko
 ./install.sh /sciezka --dry-run               # tylko pokaż mapowanie nazw
 ./install.sh /sciezka --only validate.yml     # jeden plik — wdrożenie etapami
-python3 selftest/selftest.py                  # dowód, że to działa (179 testów)
+python3 selftest/selftest.py                  # dowód, że to działa (184 testy)
 ```
 
 Po rozpakowaniu podmień placeholdery (`<ORG_ID>`, `<ACCESS_POLICY_NUMBER>`, `<STATE_BUCKET>`,
@@ -39,7 +39,7 @@ i przeczytaj [`docs/1-wdrozenie.md`](docs/1-wdrozenie.md) — kolejność krokó
 | `policy.yaml` §`baseline_ingress` | reguły dla **każdego** członka: skanery, backup, monitoring | jako profil per-member pierwsza dywizja, która zapomni go wybrać, wypada ze skanowania w momencie promocji |
 | `policy.yaml` §`control_plane_projects` | lista projektów, w których leży maszyneria perimetru (stan Terraform, kontrakty, monitoring); bramka OPA odrzuca członka wskazującego którykolwiek z nich | **jedyny tryb awarii tego repo, którego `git revert` nie cofa**: projekt z bucketem stanu w konfiguracji egzekwowanej odcina konto apply od własnego stanu (apply woła spoza granicy), a apply rewertu też potrzebuje stanu — wyjście tylko przez człowieka z uprawnieniami org-level. Furtka `control_plane_exception` w pliku członka zamiast wyłączania bramki |
 | `tools/` | budżet atrybutów · pre-flight · weryfikacja ticketu · raport naruszeń · render członka · **zgodność baseline z żywą listą usług VPC-SC** | każdy zamyka konkretny tryb awarii (opisany w nagłówku pliku) |
-| `.github/workflows/` (10) | intake · external-intake · validate · plan · apply · drift · violations-report · expiry-sweep · break-glass · **publish-gates** | apply jest jedynym mutatorem: WIF keyless, environment z reviewerami, single-flight |
+| `.github/workflows/` (10) | intake · external-intake · validate · plan · apply · drift · violations-report · expiry-sweep · break-glass · **publish-gates** | apply jest jedynym mutatorem: WIF keyless, environment z polityką gałęzi (i z recenzentami tam, gdzie plan GitHuba je ma), single-flight |
 | `contrib/` + `perimeter/contributors.yaml` | trzeci kanał wejścia: repo zespołu waliduje u siebie i prosi o PR | zespół dostaje prawo „otwórz PR", a nie `servicePerimeters.update` na organizacji (DEC-7) |
 | `terraform/contract.tf` + `publish-gates.yml` | publikuje wąski JSON (~4 KB) **w dwóch miejscach z jednego kroku apply** (bucket + asset release'u) i paczkę bramek | submodule oddawał `members/` wszystkich dywizji i zakresy IP, żeby zwalidować jeden plik; sam bucket kosztował dywizję tożsamość w GCP i grant IAM po to, by przeczytać 4 KB (DEC-8) |
 | `.tflint.hcl` + job `tflint` | statyczna analiza HCL: martwe zmienne, brak pinów providerów, literówki w atrybutach Google | `validate` przechodzi na konfiguracji z martwym knobem i niepinowanym providerem — jedno i drugie boli na obiekcie org-plane |
@@ -100,7 +100,7 @@ sprzątanie. Uruchom, zanim ktoś podejmie decyzję na podstawie opinii — kosz
 ## Dowód, że działa
 
 `python3 selftest/selftest.py` rozpakowuje starter do katalogu tymczasowego i uruchamia na nim realne bramki —
-**179/179** przy ostatnim przebiegu: `terraform fmt`/`validate`/**`test`** (14 przypadków renderera),
+**184/184** przy ostatnim przebiegu: `terraform fmt`/`validate`/**`test`** (14 przypadków renderera),
 `conftest verify` (47 testów reguł), **`tflint`** na obu stackach, narzędzia na realnych deklaracjach
 (w tym cztery fixture'y kanału ticketowego), `actionlint` na dziesięciu workflow **i na workflow przykładu
 dywizji**, realny `validate-local.sh` uruchomiony na `examples/division-repo/vpc-sc/request.yaml`, guardy
@@ -117,6 +117,12 @@ wszystko wyglądałaby na działającą.
 
 Czego selftest **nie** sprawdza: mechaniki GitHuba (environments, OIDC, required reviewers) ani realnego API
 Google — pierwszą warstwę pokrywa `actionlint`, drugą dopiero pierwszy apply na środowisku docelowym.
+
+Skoro nie potrafi sprawdzić, czy bramka po stronie GitHuba **istnieje**, sprawdza to, co da się sprawdzić:
+że `tools/bootstrap_github.sh` **odczytuje ustawienia z powrotem z API** zamiast wnioskować z wysłanego
+PUT-a, i że brak bramki ludzkiej wymaga jawnego odstępstwa. Wymagani recenzenci na environment i ochrona
+gałęzi prywatnego repo bywają funkcjami płatnymi — na planie bez nich API odrzuca żądanie, a environment
+zostaje bez ani jednej reguły ochrony, opisany w dokumentacji jako bramka. To jest ten tryb awarii.
 
 ## Świadome pominięcia (znamy, nie renderujemy)
 

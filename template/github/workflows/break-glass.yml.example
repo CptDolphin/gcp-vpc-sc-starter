@@ -10,6 +10,22 @@
 # What it deliberately does NOT do: it does not remove the member from the dry-run configuration. The
 # incident does not delete our knowledge of that project's traffic — after the fix, promotion needs the
 # same evidence as the first time.
+#
+# THE AUDIT TRAIL, in the three questions somebody will ask afterwards:
+#   * WHO — the run metadata knows, but git does not: the commit below is authored by a bot. So the actor
+#     and the run URL are written INTO the commit message and into the postmortem issue. The repository is
+#     what gets cloned, mirrored and read a year later; a trace that exists only in the Actions UI is a
+#     trace with a retention policy attached.
+#   * WHEN — commit timestamp and issue creation time, both in the repository, both from the same run.
+#   * FOR HOW LONG — there is no timer, and pretending otherwise would be the dangerous part. The member
+#     stays OUT of the enforced configuration until somebody re-promotes it through the normal path, and
+#     nothing here will remind you. That sentence is in the postmortem issue on purpose: an emergency
+#     measure with no visible end date quietly becomes the new normal.
+#
+# On the human gate: this environment is separate from `perimeter-apply` so that the emergency does not wait
+# for the same people the routine path waits for. Whether it waits for ANYBODY is a repository setting, not
+# a property of this file — see the header of `apply.yml`. An emergency procedure blocked on a reviewer who
+# is not there at 03:00 is worse than no procedure, because it looks like one.
 
 name: break-glass
 
@@ -40,7 +56,7 @@ jobs:
   break_glass:
     name: demote a member to dry-run
     runs-on: ubuntu-latest
-    environment: break-glass # required reviewers: two people, and they are NOT the same list as apply
+    environment: break-glass # deliberately NOT `perimeter-apply` — see header for what the separation buys
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
@@ -58,6 +74,9 @@ jobs:
           print(f"demoted {f}")
           PY
 
+      # The commit is the DURABLE half of the audit trail, so it carries the actor and the run URL. The
+      # author is a bot and cannot be anything else (the workflow, not a person, holds the token), which is
+      # exactly why "who" has to be in the message body rather than left to `git log --format=%an`.
       - name: commit
         run: |
           git config user.name "vpc-sc-break-glass"
@@ -68,6 +87,9 @@ jobs:
           ${{ github.event.inputs.reason }}
 
           Applied outside the normal review path under the break-glass procedure.
+          Pulled by: @${{ github.actor }}
+          Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          The member is NOT protected from now on, with no automatic expiry, until it is re-promoted.
           Postmortem issue is opened automatically by this workflow."
           git push
 
@@ -99,8 +121,13 @@ jobs:
               body: [
                 '**What happened:** ${{ github.event.inputs.reason }}',
                 '',
+                '**Pulled by:** @${{ github.actor }} · **run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}',
+                '',
                 'The member was demoted to the dry-run configuration and is currently **not protected**.',
                 'It stays in dry-run, so its traffic is still being recorded.',
+                '',
+                '**There is no timer on this.** Nothing re-promotes the member automatically and nothing will',
+                'remind you; it is unprotected until the checklist below is done and a promotion PR is merged.',
                 '',
                 '### Before re-promoting',
                 '- [ ] which flow was blocked, and why was it missing from the rules?',

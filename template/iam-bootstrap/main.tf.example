@@ -259,9 +259,18 @@ resource "google_service_account_iam_member" "plan_wif" {
   member             = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github.name}/attribute.repository/${var.github_repository}"
 }
 
-# apply: WYŁĄCZNIE token niosący environment `perimeter-apply`. Token z pull requesta go nie ma, więc tą
-# tożsamością nie da się posłużyć z PR-a — nawet gdyby ktoś dopisał ją do workflow.
-# (Environment ma required reviewers, więc jest to jednocześnie bramka ludzka.)
+# apply: WYŁĄCZNIE token niosący environment `perimeter-apply`.
+#
+# CZEGO TU NIE MA, a bywa tu doczytywane: gałęzi. Warunek jest o JEDNYM atrybucie — nazwie environment —
+# więc sam z siebie nie odróżnia gałęzi domyślnej od dowolnej innej. Token z pull requesta nie niesie tej
+# nazwy tylko dopóty, dopóki żaden job na tamtym refie jej nie zadeklaruje; job z `environment:
+# perimeter-apply` na gałęzi roboczej dostanie dokładnie ten sam token. Ref odcina dopiero POLITYKA GAŁĘZI
+# environment (`deployment_branch_policy`) — ustawia ją `tools/bootstrap_github.sh` i to ona, a nie ten
+# `principalSet`, jest zdaniem „perimetr zmienia się wyłącznie z gałęzi domyślnej".
+#
+# Wymagani recenzenci na tym environment to WARSTWA OSOBNA i płatna: gdy plan GitHuba jej nie ma, ta
+# konstrukcja stoi dalej, ale bez pary oczu między merge'em a mutacją granicy. Nie zakładaj jej istnienia —
+# skrypt bootstrapu czyta ją z API i odmawia zgłoszenia sukcesu, gdy jej nie ma.
 resource "google_service_account_iam_member" "apply_wif" {
   service_account_id = google_service_account.apply.name
   role               = "roles/iam.workloadIdentityUser"

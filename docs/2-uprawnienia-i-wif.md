@@ -33,7 +33,7 @@ próba zawężenia zakresu — a tu zawęża się uprawnienia, nie zasięg.
 | Tożsamość | Kiedy działa | Czego dotyka |
 |---|---|---|
 | `sa-vpcsc-plan` | każdy PR (read-only) | czyta perimetr i inwentarz, nic nie zmienia |
-| `sa-vpcsc-apply` | tylko `main` + environment z reviewerami | modyfikuje zawartość perimetru |
+| `sa-vpcsc-apply` | tylko environment `perimeter-apply`, a ten — tylko z gałęzi domyślnej (§5.1) | modyfikuje zawartość perimetru |
 | człowiek (break-glass) | incydent, przez PAM/JIT | wyjęcie członka z konfiguracji egzekwowanej |
 
 **DLACZEGO rozdzielone:** plan jest uruchamiany przez każdy PR, także z forka czy z gałęzi, której nikt nie
@@ -337,12 +337,28 @@ Wiązanie po stronie SA (kto może impersonować):
 sa-vpcsc-plan   ← roles/iam.workloadIdentityUser dla
   principalSet://iam.googleapis.com/projects/<NUM>/locations/global/workloadIdentityPools/github-actions/attribute.repository/ORG/gcp-vpc-sc
 sa-vpcsc-apply  ← roles/iam.workloadIdentityUser dla tej samej puli,
-                  ale ścieżkę zawęża attribute_condition providera (ref + environment)
+                  ale ścieżkę zawęża principalSet po attribute.environment (perimeter-apply)
 ```
 
-Po stronie GitHuba: environment `perimeter-apply` z **required reviewers** (zespół sieciowy + security).
-To bramka niezależna od CODEOWNERS — nawet zmergowany PR nie zaaplikuje się, dopóki człowiek nie zatwierdzi
-uruchomienia w tym environment.
+**Uwaga na to, czego w tym warunku NIE MA — gałęzi.** `attribute_condition` providera pinuje repozytorium,
+a `principalSet` konta apply pinuje nazwę environment. Ani jedno, ani drugie nie mówi „`refs/heads/main`",
+więc job z `environment: perimeter-apply` uruchomiony na **dowolnej** gałęzi wymienia token na to samo
+konto. Ref odcina dopiero **polityka gałęzi environment** (`deployment_branch_policy`) po stronie GitHuba —
+i to ona, a nie warunek WIF, jest zdaniem „perimetr zmienia się wyłącznie z gałęzi domyślnej". Ustawia ją
+`tools/bootstrap_github.sh`; działa na każdym planie GitHuba.
+
+Druga warstwa po stronie GitHuba: environment `perimeter-apply` z **required reviewers** (zespół sieciowy +
+security). To bramka niezależna od CODEOWNERS — nawet zmergowany PR nie zaaplikuje się, dopóki człowiek nie
+zatwierdzi uruchomienia. **Jest to funkcja płatna**: na planach, które jej nie mają, API odrzuca ustawienie
+(`Please ensure the billing plan supports the required reviewers protection rule`), a environment zostaje
+bez ani jednej reguły ochrony — wyglądając w kodzie na bramkę. Odczytaj stan, zanim uznasz, że istnieje:
+
+```bash
+gh api repos/<ORG>/<REPO>/environments/perimeter-apply --jq '.protection_rules'
+```
+
+Pusta tablica = bramki ludzkiej nie ma. Wtedy zapisz to jako świadome odstępstwo z powodem i z listą
+kontroli, które ją zastępują (`docs/1`, etap 4) — nie zostawiaj rozjazdu między dokumentacją a stanem.
 
 ### 5.2 „Skoro mamy WIF, po co jeszcze konta serwisowe?"
 

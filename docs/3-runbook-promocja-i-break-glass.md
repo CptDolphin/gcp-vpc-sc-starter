@@ -127,10 +127,17 @@ gh workflow run break-glass.yml \
   -f reason="scoring API returns 403 for the payments service"
 ```
 
-3. Dwóch approverów zatwierdza environment `break-glass`. Workflow demotuje członka, applikuje i **sam
-   otwiera issue postmortem**.
+3. Approverzy zatwierdzają environment `break-glass` — **jeśli** ten environment ma wymaganych recenzentów
+   (funkcja płatna, sprawdź `gh api repos/<ORG>/<REPO>/environments/break-glass --jq '.protection_rules'`).
+   Gdy ich nie ma, workflow rusza od razu; to nie jest awaria procedury, ale ma być zapisane jako
+   odstępstwo (`docs/1`, etap 4), a nie odkryte w trakcie incydentu.
 
-4. Zweryfikuj, że ruch wrócił (ta sama komenda z kroku 1 — ma być pusta).
+4. Workflow demotuje członka, applikuje i **sam otwiera issue postmortem**. Ślad audytowy zostaje w
+   repozytorium, nie tylko w interfejsie Actions: kto uruchomił i odsyłacz do przebiegu idą do **treści
+   commita** oraz do issue. Tam też stoi zdanie, o którym najłatwiej zapomnieć — **nie ma żadnego timera**:
+   członek jest niechroniony do momentu ponownej promocji i nic mu o tym nie przypomni.
+
+5. Zweryfikuj, że ruch wrócił (ta sama komenda z kroku 1 — ma być pusta).
 
 ### Po incydencie
 

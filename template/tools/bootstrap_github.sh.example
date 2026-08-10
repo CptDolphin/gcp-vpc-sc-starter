@@ -6,17 +6,24 @@
 # Environment z reviewerami to jedyna bramka niezależna od CODEOWNERS — wyklikana ręcznie bywa pominięta
 # przy odtwarzaniu repo i nikt tego nie zauważy, dopóki apply nie pojedzie bez zatwierdzenia.
 #
-#   ./bootstrap-github.sh --org <ORG> --repo gcp-vpc-sc \
+# DLACZEGO SKRYPT CZYTA WYNIK Z POWROTEM: samo wysłanie PUT-a niczego nie dowodzi. Część reguł ochrony
+# environment to funkcje płatne — na planie, który ich nie ma, API odpowiada 422 i environment zostaje
+# BEZ ANI JEDNEJ reguły, wyglądając w kodzie i w dokumentacji na bramkę. Skrypt, który by to przemilczał,
+# byłby dokładnie tym trybem awarii, przed którym ma chronić: kontrolą istniejącą wyłącznie w komentarzu.
+#
+#   ./bootstrap_github.sh --org <ORG> --repo gcp-vpc-sc \
 #       --net-team network-team --sec-team security-team \
 #       --wif "projects/123/locations/global/workloadIdentityPools/github-actions/providers/github" \
 #       --sa-plan sa-vpcsc-plan@proj.iam.gserviceaccount.com \
 #       --sa-apply sa-vpcsc-apply@proj.iam.gserviceaccount.com \
 #       --org-id 123456789012
 #
-#   ...--dry-run   # pokaż, co zostanie wykonane, bez wykonywania
+#   ...--dry-run                     # pokaż, co zostanie wykonane, bez wykonywania
+#   ...--no-human-gate "<powód>"     # świadome odstępstwo: plan bez required reviewers (patrz krok 3)
 set -euo pipefail
 
 ORG="" REPO="gcp-vpc-sc" NET_TEAM="" SEC_TEAM="" WIF="" SA_PLAN="" SA_APPLY="" ORG_ID="" DRY=0
+NO_HUMAN_GATE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --org) shift; ORG="${1:-}" ;;
@@ -27,6 +34,7 @@ while [ $# -gt 0 ]; do
     --sa-plan) shift; SA_PLAN="${1:-}" ;;
     --sa-apply) shift; SA_APPLY="${1:-}" ;;
     --org-id) shift; ORG_ID="${1:-}" ;;
+    --no-human-gate) shift; NO_HUMAN_GATE="${1:-}" ;;
     --dry-run) DRY=1 ;;
     *) echo "nieznany argument: $1" >&2; exit 2 ;;
   esac
@@ -57,9 +65,58 @@ run gh variable set PLAN_SERVICE_ACCOUNT --repo "$SLUG" --body "$SA_PLAN"
 run gh variable set APPLY_SERVICE_ACCOUNT --repo "$SLUG" --body "$SA_APPLY"
 run gh variable set ORG_ID --repo "$SLUG" --body "$ORG_ID"
 
-# 3. Environments z wymaganymi reviewerami.
+# 3. Environments. DWIE WARSTWY o różnej naturze — mylenie ich to najczęstszy sposób, w jaki ta bramka
+#    okazuje się nie istnieć:
+#
+#    (a) POLITYKA GAŁĘZI (`deployment_branch_policy`) — które refy w ogóle mogą sięgnąć po environment.
+#        Działa na każdym planie, także w repozytorium prywatnym bez ochrony gałęzi. I to ONA, nie
+#        reviewer, sprawia, że tożsamości apply nie da się wziąć z dowolnej gałęzi: `principalSet` puli
+#        WIF pinuje samo `attribute.environment`, więc bez niej DOWOLNY ref, którego job deklaruje
+#        `environment: perimeter-apply`, wymienia token na to samo konto. Ustawiamy ZAWSZE i jako
+#        pierwszą — to podłoga, nie ozdoba.
+#
+#    (b) WYMAGANI RECENZENCI — bramka ludzka, funkcja PŁATNA. Na planie bez niej API odrzuca żądanie
+#        („Please ensure the billing plan supports the required reviewers protection rule"), a environment
+#        zostaje bez ani jednej reguły ochrony. Dlatego po ustawieniu CZYTAMY STAN Z POWROTEM: różnica
+#        między „wysłaliśmy PUT" a „bramka istnieje" jest dokładnie tą, na której cała konstrukcja traci
+#        sens po cichu.
+#
 #    perimeter-apply → sieć + security; break-glass → INNY zestaw (ta sama lista znosi sens rozdzielenia).
 echo "== environments =="
+
+# Polityka gałęzi jako JAWNA LISTA NAZW, nie `protected_branches: true`. Ten drugi wariant jest odesłaniem
+# do innego ustawienia (ochrony gałęzi), więc dopóki tamtego nie ma — a w tym skrypcie powstaje dopiero
+# w kroku 4, i na części planów nie powstanie wcale — znaczy „wolno wszystkim". Jawna nazwa nie ma takiego
+# stanu pośredniego: albo ref jest na liście, albo deploy jest odrzucany.
+polityka_galezi() {
+  local env="$1" branch="$2"
+  printf '{"deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}' \
+    | gh api --method PUT "repos/$SLUG/environments/$env" --input - >/dev/null
+  # POST jest nieidempotentny (drugi przebieg = 422 duplicate), więc najpierw pytamy o stan.
+  if ! gh api "repos/$SLUG/environments/$env/deployment-branch-policies" \
+       --jq '.branch_policies[].name' 2>/dev/null | grep -qx -- "$branch"; then
+    printf '{"name":"%s","type":"branch"}' "$branch" \
+      | gh api --method POST "repos/$SLUG/environments/$env/deployment-branch-policies" --input - >/dev/null
+  fi
+}
+
+# Odczyt zwrotny: czy environment NAPRAWDĘ ma regułę wymaganych recenzentów. Pytamy API o stan, nie
+# sprawdzamy kodu wyjścia PUT-a — bo bramki brakuje także wtedy, gdy PUT przeszedł, a regułę ktoś zdjął.
+ma_reviewerow() {
+  gh api "repos/$SLUG/environments/$1" \
+    --jq '[.protection_rules[].type] | index("required_reviewers") != null' 2>/dev/null | grep -qx true
+}
+
+GALAZ_DOMYSLNA="$(gh api "repos/$SLUG" --jq .default_branch 2>/dev/null || echo main)"
+for env in perimeter-apply break-glass; do
+  if [ "$DRY" -eq 1 ]; then
+    echo "  [dry-run] PUT environments/$env  deployment_branch_policy=[$GALAZ_DOMYSLNA]"
+  else
+    polityka_galezi "$env" "$GALAZ_DOMYSLNA"
+    echo "  $env: do deployu dopuszczona wyłącznie gałąź $GALAZ_DOMYSLNA"
+  fi
+done
+
 # UWAGA: `gh api` przy 404 wypisuje treść błędu na STDOUT, więc sprawdzenie "czy pusto" NIE wystarcza —
 # do payloadu trafiłby wtedy JSON błędu zamiast ID. Wymagamy liczby (wykryte na dry-run).
 team_id() {
@@ -77,12 +134,15 @@ if ! net_id="$(team_id "$NET_TEAM")" || ! sec_id="$(team_id "$SEC_TEAM")"; then
   exit 1
 fi
 
+# `deployment_branch_policy` powtórzone w tym payloadzie CELOWO: PUT opisuje environment w całości, więc
+# pominięcie pola grozi cofnięciem trybu ustawionego wyżej. Nazwane gałęzie żyją w osobnym podzasobie
+# i ten PUT ich nie dotyka (sprawdzone odczytem po obu żądaniach).
 env_payload() {
   python3 -c "
 import json,sys
 ids = [int(x) for x in sys.argv[1:]]
 print(json.dumps({'wait_timer': 0, 'reviewers': [{'type': 'Team', 'id': i} for i in ids],
-                  'deployment_branch_policy': {'protected_branches': True, 'custom_branch_policies': False}}))
+                  'deployment_branch_policy': {'protected_branches': False, 'custom_branch_policies': True}}))
 " "$@"
 }
 
@@ -90,9 +150,38 @@ if [ "$DRY" -eq 1 ]; then
   echo "  [dry-run] PUT repos/$SLUG/environments/perimeter-apply  reviewers=[$net_id,$sec_id]"
   echo "  [dry-run] PUT repos/$SLUG/environments/break-glass      reviewers=[$sec_id]  <-- podmień na własny zestaw"
 else
-  env_payload "$net_id" "$sec_id" | gh api --method PUT "repos/$SLUG/environments/perimeter-apply" --input -
+  # `|| true`: 422 z powodu planu NIE MA tu przerywać skryptu — wynik i tak rozstrzyga odczyt niżej,
+  # a przerwanie w tym miejscu zostawiłoby repo bez ochrony gałęzi z kroku 4.
+  env_payload "$net_id" "$sec_id" | gh api --method PUT "repos/$SLUG/environments/perimeter-apply" --input - >/dev/null || true
   # break-glass: świadomie WĄSKI i INNY zestaw — dostosuj do waszego on-call, nie zostawiaj domyślnego.
-  env_payload "$sec_id" | gh api --method PUT "repos/$SLUG/environments/break-glass" --input -
+  env_payload "$sec_id" | gh api --method PUT "repos/$SLUG/environments/break-glass" --input - >/dev/null || true
+
+  brak=""
+  for env in perimeter-apply break-glass; do
+    ma_reviewerow "$env" || brak="$brak $env"
+  done
+  if [ -n "$brak" ]; then
+    {
+      echo
+      echo "  BRAMKA LUDZKA NIE ISTNIEJE dla:$brak"
+      echo "  Nieważne, czy PUT zwrócił błąd — odczyt z API mówi, że reguły 'required_reviewers' tam nie ma."
+      echo "  Najczęstsza przyczyna: plan GitHuba bez tej funkcji dla repozytoriów prywatnych."
+      echo "  Co zostaje i jest realne: polityka gałęzi (wyżej), warunek na environment w puli WIF, IAM Deny"
+      echo "  na kasowaniu perimetru i bramki OPA uruchamiane PONOWNIE na planie w apply. Wszystkie maszynowe;"
+      echo "  żadna nie zastępuje pary oczu na tym, CO wchodzi do granicy."
+    } >&2
+    if [ -z "$NO_HUMAN_GATE" ]; then
+      {
+        echo "  Skrypt kończy się BŁĘDEM celowo: brak bramki, o której mówią komentarze w repo, ma być"
+        echo "  decyzją zapisaną z powodem, nie przeoczeniem odkrytym po pierwszym apply bez zatwierdzenia."
+        echo "  Świadome odstępstwo: --no-human-gate \"<powód>\"."
+      } >&2
+      exit 1
+    fi
+    echo "  ODSTĘPSTWO ŚWIADOME: $NO_HUMAN_GATE" >&2
+  else
+    echo "  wymagani recenzenci potwierdzeni odczytem: perimeter-apply, break-glass"
+  fi
 fi
 
 # 4. Ochrona main. `validate` i `plan` jako wymagane statusy — bez nich merge nie wie, czy zmiana jest legalna.
@@ -108,15 +197,48 @@ protection='{
 if [ "$DRY" -eq 1 ]; then
   echo "  [dry-run] PUT repos/$SLUG/branches/main/protection (status checks + CODEOWNERS + no force-push)"
 else
-  printf '%s' "$protection" | gh api --method PUT "repos/$SLUG/branches/main/protection" --input -
+  # Ochrona gałęzi w repozytorium PRYWATNYM też bywa funkcją płatną (odpowiedź 403 „Upgrade to ... or make
+  # this repository public"). To samo traktowanie co wyżej: nie przerywamy, tylko czytamy stan i mówimy głośno.
+  printf '%s' "$protection" | gh api --method PUT "repos/$SLUG/branches/main/protection" --input - >/dev/null || true
+  if gh api "repos/$SLUG/branches/$GALAZ_DOMYSLNA/protection" >/dev/null 2>&1; then
+    echo "  ochrona $GALAZ_DOMYSLNA potwierdzona odczytem"
+  else
+    {
+      echo "  OCHRONA GAŁĘZI $GALAZ_DOMYSLNA NIE ISTNIEJE — odczyt z API jej nie widzi."
+      echo "  Skutek: do gałęzi domyślnej można wypchnąć commit z pominięciem PR-a, bramek i CODEOWNERS,"
+      echo "  a apply rusza z pushem na tę gałąź. Upublicznienie repo perimetru NIE jest obejściem:"
+      echo "  jego treść to mapa tego, co i skąd sięga po wasze dane."
+    } >&2
+  fi
 fi
+
+echo
+echo "== stan faktyczny (odczytany, nie założony) =="
+for env in perimeter-apply break-glass; do
+  # `join` na pustej liście daje "" — a "" w jq jest PRAWDĄ, więc `// "BRAK"` nigdy by nie zadziałało.
+  # Stąd jawne `if length == 0`. Pusta lista gałęzi przy trybie „lista jawna" znaczy, że deployu nie zrobi
+  # ŻADEN ref — odwrotnie niż brak polityki, przy którym może każdy. Te dwa stany trzeba rozróżnić w druku.
+  reguly="$(gh api "repos/$SLUG/environments/$env" \
+    --jq '[.protection_rules[].type] | if length == 0 then "BRAK" else join(",") end' 2>/dev/null || echo "?")"
+  tryb="$(gh api "repos/$SLUG/environments/$env" \
+    --jq 'if .deployment_branch_policy == null then "KAZDA GALAZ" else "lista jawna" end' 2>/dev/null || echo "?")"
+  galezie="$(gh api "repos/$SLUG/environments/$env/deployment-branch-policies" \
+    --jq '[.branch_policies[].name] | join(",")' 2>/dev/null || echo "")"
+  printf '  %s: reguly ochrony=%s | polityka galezi=%s %s\n' \
+    "$env" "$reguly" "$tryb" "${galezie:+($galezie)}"
+done
 
 cat <<'NEXT'
 
-Gotowe. Weryfikacja (uruchom i przeczytaj wynik, nie zakładaj):
-  gh api repos/<ORG>/<REPO>/environments --jq '.environments[].name'
+Gotowe. Weryfikacja końcowa (uruchom i przeczytaj wynik, nie zakładaj):
+  gh api repos/<ORG>/<REPO>/environments/perimeter-apply --jq '.protection_rules'
   gh api repos/<ORG>/<REPO>/branches/main/protection --jq '.required_pull_request_reviews'
   git push origin main            # ma zostać ODRZUCONE — jeśli przeszło, ochrona nie działa
+
+Test NEGATYWNY polityki gałęzi (jedyny dowód, że działa): na gałęzi roboczej dodaj workflow z jobem
+`environment: perimeter-apply` i jednym `echo`, wypchnij ją i sprawdź, że przebieg zostaje ODRZUCONY
+z „Branch ... is not allowed to deploy to perimeter-apply due to environment protection rules".
+Job, który wystartował, znaczy, że każda gałąź sięga po tożsamość apply.
 
 Dopiero potem: pierwszy PR z bramkami bez chmury, a po nim plan na żywej organizacji.
 NEXT

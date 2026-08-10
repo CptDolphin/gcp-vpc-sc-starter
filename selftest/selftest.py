@@ -1241,7 +1241,11 @@ def test_workflows() -> None:
     # Trzy własności apply, których utrata jest cicha i kosztowna.
     check("apply: single-flight concurrency (bez cancel-in-progress)",
           "group: vpc-sc-apply" in apply_yml and "cancel-in-progress: false" in apply_yml)
-    check("apply: environment z reviewerami", "environment: perimeter-apply" in apply_yml)
+    # NAZWA TEJ ASERCJI JEST WAŻNA. Brzmiała kiedyś „environment z reviewerami" i to było kłamstwo tej samej
+    # klasy, przed jaką broni reszta pliku: sprawdzamy obecność JEDNEJ LINIJKI w workflow, a nie istnienie
+    # bramki ludzkiej — ta jest ustawieniem repozytorium, płatnym, poza zasięgiem selftestu. Zielona asercja
+    # o nazwie „z reviewerami" czytałaby się jako dowód na coś, czego ten test nie potrafi zobaczyć.
+    check("apply: job deklaruje environment perimeter-apply", "environment: perimeter-apply" in apply_yml)
     check("apply: bramki OPA uruchamiane PONOWNIE przed apply",
           "conftest test" in apply_yml and apply_yml.index("conftest test") < apply_yml.index("terraform -chdir=terraform apply"))
 
@@ -1258,6 +1262,26 @@ def test_workflows() -> None:
     # dry-run po sprawdzeniu istnienia jest bezpieczne, przed nim byłoby cichą degradacją członka `enforced`.
     check("external-intake: nie nadpisuje istniejacego czlonka",
           "if out.exists():" in ext and ext.index("if out.exists():") < ext.index('member["stage"] = "dry-run"'))
+
+    # Bramki po stronie GitHuba selftest sprawdzić nie może — nie ma API. Może za to sprawdzić, czy skrypt,
+    # który je zakłada, ROZRÓŻNIA wysłanie ustawienia od jego istnienia. Cała ta trójka pilnuje jednego
+    # trybu awarii: environment bez ani jednej reguły ochrony, opisany w komentarzach jako bramka.
+    boot = (ROOT / "tools/bootstrap_github.sh").read_text()
+    check("bootstrap: polityka galezi environment ustawiana zawsze (dziala na kazdym planie)",
+          "deployment-branch-policies" in boot and "custom_branch_policies" in boot)
+    check("bootstrap: wymagani recenzenci ODCZYTYWANI z API, nie zakladani po PUT",
+          "required_reviewers" in boot and "protection_rules" in boot)
+    check("bootstrap: brak bramki ludzkiej wymaga jawnego odstepstwa (--no-human-gate)",
+          "--no-human-gate" in boot and "NO_HUMAN_GATE" in boot)
+
+    # Ślad audytowy break-glassa musi być w REPOZYTORIUM, nie tylko w metadanych przebiegu: commit jest
+    # autorstwa bota, więc „kto" musi stać w treści commita i w issue postmortem. Dzielimy plik na krok
+    # commitujący i krok otwierający issue, bo obecność `github.actor` w jednym z nich nic nie mówi o drugim.
+    bg = (ROOT / ".github/workflows/break-glass.yml").read_text()
+    przed_issue, _, po_issue = bg.partition("open the postmortem issue")
+    check("break-glass: commit niesie, KTO uruchomil procedure", "github.actor" in przed_issue)
+    check("break-glass: issue postmortem niesie autora i odsylacz do przebiegu",
+          "github.actor" in po_issue and "github.run_id" in po_issue)
 
     for f in wf:
         body = f.read_text()
