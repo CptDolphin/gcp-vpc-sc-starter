@@ -48,7 +48,13 @@ gh workflow run violations-report.yml -f days=14
    naruszenia — to nie jest „szum", tylko lista wywołań, które przestaną działać.
 
 3. Otwórz PR promocyjny: w pliku członka zmień **wyłącznie** `stage: dry-run` → `stage: enforced`.
-   Dołącz `violations.json` (artefakt) i wypełnij sekcję *Evidence* w szablonie PR-a.
+   Wypełnij sekcję *Evidence* w szablonie PR-a.
+
+   `violations.json` **dołącza się sam**: `validate.yml` pobiera artefakt `violations` z ostatniego udanego
+   przebiegu `violations-report.yml` na gałęzi domyślnej i podaje go regułom OPA. Dlatego krok 1 nie jest
+   formalnością — bez świeżego raportu (starszego niż `clean_window_days` też nie licząc) bramka odrzuci
+   promocję na „brak raportu naruszeń dla okna obserwacji". **Ręcznie dopisanego pliku bramka nie przyjmie
+   i przyjąć nie może**: dowód, który promujący sam sobie pisze, mierzy jego zdanie, nie ruch.
 
 4. Bramki muszą przejść. Jeśli `promotion_gate` odrzuca — nie obchodź go zmianą `dry_run_since`. To pole jest
    datą wejścia do dry-run, nie parametrem do dostrojenia.

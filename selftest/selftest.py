@@ -1752,6 +1752,25 @@ def test_workflows() -> None:
           "violations-report czyta logi czlonka kontem planu, a baseline_ingress nie ma dla niego reguly "
           "na logging.googleapis.com/LoggingServiceV2.ListLogEntries")
 
+    # `promotion_gate` odrzuca `stage: enforced` bez wpisu w `violations_last_window`. Ta mapa ma dokładnie
+    # jedno źródło — artefakt `violations-report.yml` — więc jeśli `validate.yml` go nie pobiera i nie podaje
+    # do `collect_declarations.py`, bramka nie jest bramką, tylko ŚCIANĄ: przepuścić się jej nie da NIGDY,
+    # niezależnie od tego, jak czyste jest okno. Ściana, przez którą trzeba przejść, żeby wykonać robotę,
+    # kończy się usunięciem reguły — i wtedy nie ma ani ściany, ani bramki.
+    walid = (ROOT / ".github/workflows/validate.yml").read_text()
+    check("validate: bramka promocji ma skad wziac dowod (--violations)",
+          "--violations" in walid and "gh run download" in walid,
+          "brak sciezki artefakt raportu -> collect_declarations.py --violations")
+    check("validate: uprawnienie do odczytu artefaktow zadeklarowane",
+          re.search(r"^\s*actions:\s*read\s*$", walid, re.M) is not None)
+    # Producent i konsument artefaktu muszą mówić o TEJ SAMEJ nazwie. Nazwy czytamy z obu plików, nie
+    # z listy w teście — ten sam rozjazd producent/konsument wywrócił już raz bramki OPA na planie.
+    nazwa_up = re.search(r"upload-artifact@[^\n]*\n(?:.*\n)*?\s*with:\s*\n\s*name:\s*(\S+)", raport)
+    nazwa_down = re.search(r"gh run download[^\n]*--name\s+(\S+)", walid)
+    check("validate: nazwa pobieranego artefaktu = nazwa publikowanej przez raport",
+          nazwa_up is not None and nazwa_down is not None and nazwa_up.group(1) == nazwa_down.group(1),
+          f"upload={nazwa_up and nazwa_up.group(1)} download={nazwa_down and nazwa_down.group(1)}")
+
     ext = (ROOT / ".github/workflows/external-intake.yml").read_text()
     # Kanał zewnętrzny ma dwa niezbywalne zabezpieczenia: change_ref musi wskazywać repozytorium, które
     # NAPRAWDĘ wysłało dispatch, a stage jest nadpisywany na dry-run niezależnie od treści payloadu.
