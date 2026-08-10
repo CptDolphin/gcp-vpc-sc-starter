@@ -22,8 +22,8 @@
         <mxCell id="wfpr" value="&lt;b&gt;workflow: plan&lt;/b&gt;&lt;br&gt;runs on every pull request&lt;br&gt;&lt;i&gt;including branches nobody reviewed yet&lt;/i&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E1D5E7;strokeColor=#9673A6;fontSize=12;spacing=6;" vertex="1" parent="ghbox">
           <mxGeometry x="30" y="50" width="320" height="80" as="geometry"/>
         </mxCell>
-        <mxCell id="wfapply" value="&lt;b&gt;workflow: apply&lt;/b&gt;&lt;br&gt;only on main + environment &lt;b&gt;perimeter-apply&lt;/b&gt;&lt;br&gt;required reviewers: networking + security&lt;br&gt;single-flight: one writer at a time" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E1D5E7;strokeColor=#9673A6;fontSize=12;spacing=6;" vertex="1" parent="ghbox">
-          <mxGeometry x="30" y="170" width="320" height="100" as="geometry"/>
+        <mxCell id="wfapply" value="&lt;b&gt;workflow: apply&lt;/b&gt;&lt;br&gt;environment &lt;b&gt;perimeter-apply&lt;/b&gt;; only the default branch may deploy to it — that comes from the environment's &lt;i&gt;deployment branch policy&lt;/i&gt;, not from the token&lt;br&gt;required reviewers: paid feature — read it back, do not assume&lt;br&gt;single-flight: one writer at a time" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E1D5E7;strokeColor=#9673A6;fontSize=12;spacing=6;" vertex="1" parent="ghbox">
+          <mxGeometry x="30" y="170" width="320" height="130" as="geometry"/>
         </mxCell>
         <mxCell id="oidc" value="OIDC token&#10;(short-lived, minted per run)&#10;NO service-account keys anywhere" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F5F5;strokeColor=#666666;fontSize=11;fontStyle=2;spacing=6;" vertex="1" parent="ghbox">
           <mxGeometry x="30" y="310" width="320" height="70" as="geometry"/>
@@ -32,14 +32,14 @@
         <mxCell id="wifbox" value="Workload Identity Federation — the gate, not the permission" style="rounded=1;whiteSpace=wrap;html=1;container=1;collapsible=0;fillColor=none;strokeColor=#4285F4;dashed=1;verticalAlign=top;align=left;spacingLeft=10;fontStyle=1;fontSize=13;fontColor=#1A73E8;spacingTop=4;" vertex="1" parent="1">
           <mxGeometry x="480" y="220" width="440" height="420" as="geometry"/>
         </mxCell>
-        <mxCell id="cond1" value="&lt;b&gt;attribute_condition (plan)&lt;/b&gt;&lt;br&gt;repository == 'ORG/gcp-vpc-sc'&lt;br&gt;AND event_name == 'pull_request'" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=12;spacing=6;" vertex="1" parent="wifbox">
+        <mxCell id="cond1" value="&lt;b&gt;attribute_condition — ONE, on the provider&lt;/b&gt;&lt;br&gt;repository == 'ORG/gcp-vpc-sc'&lt;br&gt;&lt;i&gt;that is the whole condition; there is no second one&lt;/i&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=12;spacing=6;" vertex="1" parent="wifbox">
           <mxGeometry x="30" y="50" width="380" height="80" as="geometry"/>
         </mxCell>
-        <mxCell id="cond2" value="&lt;b&gt;attribute_condition (apply)&lt;/b&gt;&lt;br&gt;repository == 'ORG/gcp-vpc-sc'&lt;br&gt;AND ref == 'refs/heads/main'&lt;br&gt;AND environment == 'perimeter-apply'" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=12;spacing=6;" vertex="1" parent="wifbox">
-          <mxGeometry x="30" y="170" width="380" height="100" as="geometry"/>
+        <mxCell id="cond2" value="&lt;b&gt;principalSet — where plan and apply part ways&lt;/b&gt;&lt;br&gt;plan → attribute.repository (ANY workflow of this repo, pull requests included — hence read-only)&lt;br&gt;apply → attribute.environment == 'perimeter-apply'&lt;br&gt;&lt;i&gt;no ref in either: the branch is enforced by the environment's deployment branch policy&lt;/i&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=12;spacing=6;" vertex="1" parent="wifbox">
+          <mxGeometry x="30" y="150" width="380" height="140" as="geometry"/>
         </mxCell>
         <mxCell id="wifwarn" value="&lt;b&gt;Without this condition&lt;/b&gt; (or with `true`): ANY workflow in ANY repository of your GitHub org can exchange its token for access to the perimeter of the whole GCP organization. This is the single most common real-world WIF misconfiguration." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F8CECC;strokeColor=#B85450;fontSize=11;align=left;spacing=8;" vertex="1" parent="wifbox">
-          <mxGeometry x="30" y="300" width="380" height="90" as="geometry"/>
+          <mxGeometry x="30" y="310" width="380" height="90" as="geometry"/>
         </mxCell>
 
         <mxCell id="gcpbox" value="Google Cloud — organization scope" style="rounded=1;whiteSpace=wrap;html=1;container=1;collapsible=0;fillColor=none;strokeColor=#D79B00;verticalAlign=top;align=left;spacingLeft=10;fontStyle=1;fontSize=13;fontColor=#B26B00;spacingTop=4;" vertex="1" parent="1">
