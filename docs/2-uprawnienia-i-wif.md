@@ -319,12 +319,14 @@ mapowanie atrybutów:
   attribute.environment = assertion.environment
 ```
 
-Dwa osobne warunki wejścia — to jest **najważniejszy guardrail całej konstrukcji**:
+**Jeden warunek na providerze, granica plan/apply na wiązaniach `principalSet`** — i to rozróżnienie jest
+ważniejsze, niż wygląda. Tabela opisująca „dwa warunki wejścia" wymieniała ograniczenia, których w kodzie
+nie ma (`event_name`, `ref`), więc czytelnik brał za bramkę coś, czego nikt nie egzekwuje. Stan faktyczny:
 
-| Ścieżka | `attribute_condition` | Impersonuje |
+| Ścieżka | Co realnie odcina dostęp do konta | Impersonuje |
 |---|---|---|
-| plan (PR) | `assertion.repository == 'ORG/gcp-vpc-sc' && assertion.event_name == 'pull_request'` | `sa-vpcsc-plan` |
-| apply | `assertion.repository == 'ORG/gcp-vpc-sc' && assertion.ref == 'refs/heads/main' && assertion.environment == 'perimeter-apply'` | `sa-vpcsc-apply` |
+| plan (PR) | `attribute_condition` providera: `assertion.repository == 'ORG/gcp-vpc-sc'`, plus `principalSet` po `attribute.repository`. To jest **każdy** workflow z tego repozytorium, także z pull requesta — i dlatego to konto jest read-only. | `sa-vpcsc-plan` |
+| apply | ten sam `attribute_condition`, plus `principalSet` po `attribute.environment/perimeter-apply`. **Gałęzi w tym warunku NIE MA** — ref odcina dopiero polityka gałęzi environment (§5.1). | `sa-vpcsc-apply` |
 
 **Bez `attribute_condition` (albo z warunkiem `true`):** dowolny workflow w **dowolnym repozytorium waszej
 organizacji GitHub** może wymienić swój token OIDC na dostęp do perimetru całej organizacji GCP. To nie jest
@@ -412,8 +414,9 @@ Prosimy o (środowisko: <org GCP>, repozytorium: ORG/gcp-vpc-sc):
    accesscontextmanager.servicePerimeters.delete, accesscontextmanager.policies.delete
 
 4. Workload Identity Pool `github-actions` + provider OIDC GitHub z attribute_condition
-   ograniczającym do repozytorium ORG/gcp-vpc-sc (plan: event_name==pull_request;
-   apply: ref==refs/heads/main && environment==perimeter-apply)
+   ograniczającym do repozytorium ORG/gcp-vpc-sc; rozdział plan/apply na wiązaniach principalSet
+   (plan: attribute.repository; apply: attribute.environment==perimeter-apply — BEZ warunku o gałęzi,
+   ten daje polityka gałęzi environment po stronie GitHuba)
 
 5. Bucket stanu Terraform: versioning + soft-delete, BEZ retention-lock
    (WORM na aktywnie nadpisywanym stanie łamie backend).
