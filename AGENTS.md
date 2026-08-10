@@ -103,10 +103,10 @@ python3 selftest/selftest.py          # rozpakowuje starter do katalogu tymczaso
 ```
 
 Wymaga na PATH: `terraform` (1.15.5), `conftest`, `tflint`, `python3` z `pyyaml`; opcjonalnie `actionlint`
-i `check-jsonschema` (ich brak daje SKIP z nazwą, nigdy ciche zielone). Oczekiwany wynik: **269/269**.
+i `check-jsonschema` (ich brak daje SKIP z nazwą, nigdy ciche zielone). Oczekiwany wynik: **270/270**.
 
-Bez `tflint` na PATH przebieg kończy się na **266/266** i wypisuje SKIP z nazwą — trzy asercje
-(`--init` plus lint obu stacków) po prostu się nie wykonują. Liczba niższa niż 269 nie jest błędem
+Bez `tflint` na PATH przebieg kończy się na **267/267** i wypisuje SKIP z nazwą — trzy asercje
+(`--init` plus lint obu stacków) po prostu się nie wykonują. Liczba niższa niż 270 nie jest błędem
 startera, tylko informacją, czego w tym środowisku nie sprawdzono.
 
 Sam skan samodzielności (bez terraforma i conftesta, sam Python) da się uruchomić na dowolnej ścieżce —

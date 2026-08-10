@@ -2174,8 +2174,15 @@ def test_boundary_probe() -> None:
     check("boundary-probe woła tożsamością planu (read-only), nie apply",
           "PLAN_SERVICE_ACCOUNT" in tresc and "APPLY_SERVICE_ACCOUNT" not in tresc)
 
+    # Sonda musi tez powiedziec, W JAKIEJ konfiguracji stoi projekt w chwili pomiaru — odczytany Z API,
+    # nie z gita. Git opisuje stan ZAMIERZONY; gdyby apply nie doszedl albo promocja wciagnela wiecej
+    # czlonkow niz mowil diff, sonda zmierzylaby prawde, ale nikt by nie wiedzial, o czym ona jest.
+    check("boundary-probe czyta stan granicy z API (status i spec), nie z gita",
+          "perimeters describe" in tresc and "status" in tresc and "spec" in tresc)
+
     # Wyciagamy kod werdyktu z pliku i uruchamiamy go na wejsciach, ktorych nigdy nie widzial.
-    kod = re.search(r"python3 - <<'PY'[^\n]*\n(.*?)\n\s*PY\n", tresc, re.S)
+    # `[-1]` — bierzemy OSTATNI heredok python3 tego pliku (werdykt), nie pierwszy (odczyt stanu granicy).
+    kod = re.search(r"python3 - <<'PY'[^\n]*\n(.*?)\n\s*PY\n", tresc[tresc.index("- name: sondy"):], re.S)
     check("boundary-probe: da sie wyodrebnic kod werdyktu", kod is not None)
     if not kod:
         return

@@ -79,6 +79,29 @@ jobs:
 
       - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
 
+      # Stan granicy ODCZYTANY Z API, zanim cokolwiek zasondujemy. Bez tego wynik sondy trzeba zestawiać
+      # z tym, co stoi w gicie — a git opisuje stan ZAMIERZONY. Gdyby apply nie doszedł, gdyby ktoś zmienił
+      # perimetr w konsoli albo gdyby promocja wciągnęła więcej członków, niż mówił diff, sonda i tak
+      # zmierzyłaby prawdę, tylko nikt by nie wiedział, o czym ona jest. Ten krok przypina pomiar do
+      # rzeczywistości: KTO jest w konfiguracji egzekwowanej, a kto tylko w dry-run, w chwili sondowania.
+      - name: stan granicy w chwili pomiaru
+        env:
+          PROJEKT: ${{ github.event.inputs.project }}
+        run: |
+          POLITYKA=$(python3 -c 'import yaml;print(yaml.safe_load(open("perimeter/policy.yaml"))["organization"]["access_policy_name"])')
+          NAZWA=$(python3 -c 'import yaml;print(yaml.safe_load(open("perimeter/policy.yaml"))["perimeter"]["name"])')
+          gcloud access-context-manager perimeters describe "$NAZWA" --policy="$POLITYKA" --format=json > perimetr.json
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json, os, pathlib
+          d = json.loads(pathlib.Path("perimetr.json").read_text())
+          egz = d.get("status", {}).get("resources") or []
+          dry = d.get("spec", {}).get("resources") or []
+          print("### stan granicy odczytany z API\n")
+          print(f"- konfiguracja EGZEKWOWANA (`status.resources`): {egz or 'PUSTA'}")
+          print(f"- konfiguracja DRY-RUN (`spec.resources`): {dry or 'PUSTA'}")
+          print(f"- sondowany projekt: `{os.environ['PROJEKT']}`\n")
+          PY
+
       - name: sondy
         id: sondy
         env:
