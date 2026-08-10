@@ -81,6 +81,11 @@ locals {
     # zmienia. `viewer`, nie `editor`: czytanie do planu, zapisywanie zostaje przy `apply`. (Issue #1904)
     "roles/monitoring.viewer",
   ]
+
+  # Nazwa polityki deny (sekcja 5b) mieszka TUTAJ, a nie przy zasobie, bo używa jej też polecenie
+  # weryfikacyjne z `outputs.tf`. Rozjazd tych dwóch miejsc dałby operatorowi komendę pytającą o politykę
+  # o innej nazwie niż ta, którą stack tworzy — czyli stabilne `NOT_FOUND` na działającym guardrailu.
+  deny_policy_name = "vpcsc-ci-no-destroy"
 }
 
 resource "google_organization_iam_member" "plan" {
@@ -335,15 +340,82 @@ resource "google_service_account_iam_member" "apply_wif" {
   member             = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github.name}/attribute.environment/${var.apply_environment}"
 }
 
-# --- 5. IAM Deny ------------------------------------------------------------------------------------
+# --- 5. warstwa IAM Deny ----------------------------------------------------------------------------
 # DLACZEGO mimo wąskiej custom roli: role bywają podmieniane w pośpiechu („dajmy na chwilę policyEditor,
 # żeby odblokować release"). Deny jest oceniane PRZED rolami i takiej podmiany nie da się nim obejść.
+#
+# TA WARSTWA MA WŁASNY TRYB AWARII, KTÓRY NIE RZUCA BŁĘDU: jest niewidoczna dla właściciela tego stacku.
+# `iam.denypolicies.*` nie należy do żadnej z ról org-admina, a API odpowiada na brak uprawnienia tym
+# samym, czym na brak zasobu — `403 denypolicies.get denied` pada zarówno wtedy, gdy polityki nie ma, jak
+# i wtedy, gdy jest, ale nie wolno jej zobaczyć. Terraform dostaje to samo `403`, więc `plan` pokazuje
+# `1 to add` niezależnie od stanu faktycznego, a `import` nie przechodzi. Stack, którego właściciel nie
+# umie odczytać własnego guardrailu, OPISUJE ochronę zamiast jej dawać.
+#
+# ZMIERZONA ASYMETRIA TEJ WARSTWY (przemiał wszystkich ról predefiniowanych przez `roles?view=FULL`
+# + `gcloud iam list-testable-permissions` na organizacji):
+#
+#   iam.denypolicies.get / .list                → rola WŁASNA: TAK. Ról predefiniowanych z tym prawem: 12,
+#                                                 najwęższa `roles/iam.denyReviewer` (dokładnie te dwa).
+#   iam.denypolicies.create / .update / .delete → rola WŁASNA: NIE (`customRolesSupportLevel`
+#                                                 = `NOT_SUPPORTED`). Ról predefiniowanych z tym prawem:
+#                                                 DOKŁADNIE JEDNA — `roles/iam.denyAdmin`.
+#
+# Skutek, z którym trzeba świadomie coś zrobić, a nie odkryć go przy apply: ODCZYT tej warstwy da się
+# zawęzić do minimum (5a), ZAPIS — nie. Kto ma nią zarządzać, dostaje `roles/iam.denyAdmin`, czyli prawo
+# skasowania KAŻDEJ polityki deny w organizacji, także takiej, która chroni coś zupełnie innego i nie ma
+# z tym repozytorium nic wspólnego. Dlatego zapis stoi za flagą (5b): wdrożenie, które tego grantu nie
+# chce albo jeszcze go nie ma, wyłącza zasób ŚWIADOMIE i widzi to w kodzie — zamiast zostawiać deklarację,
+# której nikt nigdy nie zastosował, wyglądającą w repo dokładnie tak samo jak warstwa wdrożona.
+
+# --- 5a. kto może CZYTAĆ warstwę deny ---------------------------------------------------------------
+# Rola WŁASNA, choć `roles/iam.denyReviewer` niesie dziś dokładnie te same dwa uprawnienia i nic ponadto.
+# Powód nie jest kosmetyczny: to jest rola, na której opiera się ODPOWIEDŹ na pytanie „czy guardrail stoi",
+# a treść roli predefiniowanej zmienia dostawca, bez naszego diffu. Dowód, że te role rosną, jest w tym
+# samym pomiarze: `roles/iam.denyAdmin` niesie 11 uprawnień, z czego 6 spoza rodziny `denypolicies`
+# (`cloudasset`, `policyanalyzer`, `policysimulator`). Rola własna kosztuje dwie linijki i jest widoczna
+# w tym pliku; `roles/iam.denyReviewer` zostaje poprawnym zamiennikiem tam, gdzie organizacja zabrania
+# ról własnych — wtedy podmienia się `role` w przypisaniu niżej i nic więcej.
+resource "google_organization_iam_custom_role" "deny_reader" {
+  org_id      = var.org_id
+  role_id     = "vpcScDenyReader"
+  title       = "VPC-SC deny policy reader"
+  description = "Odczyt polityk IAM Deny na organizacji. Rozstrzyga, czy guardrail perimetru istnieje — bez prawa zmiany czegokolwiek."
+  stage       = "GA"
+
+  permissions = [
+    "iam.denypolicies.get",
+    "iam.denypolicies.list",
+  ]
+
+  # ŚWIADOMIE POMINIĘTE — i tu nie chodzi o powściągliwość, tylko o to, że Google na to nie pozwala:
+  #   iam.denypolicies.create / .update / .delete  →  `customRolesSupportLevel = NOT_SUPPORTED`
+  # Dopisanie ich tutaj nie da zapisu, tylko wywróci apply komunikatem o nieobsługiwanym uprawnieniu.
+  # Zapis do tej warstwy niesie WYŁĄCZNIE `roles/iam.denyAdmin` — patrz `manage_deny_policy`.
+}
+
+# Odczyt jest funkcją audytu, więc principale są wejściem, nie stałą. Pusta lista jest dopuszczalna
+# i domyślna, ale znaczy tyle, że nikt w organizacji nie odpowie na pytanie z nagłówka sekcji 5.
+resource "google_organization_iam_member" "deny_reader" {
+  for_each = toset(var.deny_reader_principals)
+
+  org_id = var.org_id
+  role   = google_organization_iam_custom_role.deny_reader.id
+  member = each.value
+}
+
+# --- 5b. sama polityka -------------------------------------------------------------------------------
 
 resource "google_iam_deny_policy" "vpcsc_guardrail" {
+  # Wyłączenie jest ŚWIADOME i widoczne (`manage_deny_policy = false` w tfvars z komentarzem WHY), a nie
+  # milczące. Alternatywa — zostawić zasób bez flagi u wdrożenia, które nie ma `roles/iam.denyAdmin` —
+  # daje stan najgorszy z możliwych: `plan` w nieskończoność mówi „1 to add", nikt tego nie applikuje,
+  # a diagram architektury i README dalej twierdzą, że warstwa stoi.
+  count = var.manage_deny_policy ? 1 : 0
+
   provider = google-beta
 
   parent       = urlencode("cloudresourcemanager.googleapis.com/organizations/${var.org_id}")
-  name         = "vpcsc-ci-no-destroy"
+  name         = local.deny_policy_name
   display_name = "VPC-SC CI — zakaz kasowania perimetru i polityki"
 
   rules {

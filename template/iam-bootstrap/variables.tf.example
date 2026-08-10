@@ -112,6 +112,40 @@ variable "grant_logging_viewer" {
   default     = true
 }
 
+variable "manage_deny_policy" {
+  description = "Czy TEN stack tworzy politykę IAM Deny (sekcja 5b main.tf). `true` wymaga, żeby tożsamość applikująca miała `roles/iam.denyAdmin` — JEDYNĄ rolę w Google Cloud niosącą `iam.denypolicies.create`, a przy okazji `.delete` na każdej polityce deny w organizacji; roli własnej z tymi uprawnieniami zbudować się nie da (`NOT_SUPPORTED`). `false` = warstwa zostaje poza tym stackiem świadomie i przestaje udawać wdrożoną."
+  type        = bool
+  default     = true
+
+  # DLACZEGO DOMYŚLNIE `true`, skoro część wdrożeń tego grantu nie dostanie: domyślna wartość ma opisywać
+  # stan POŻĄDANY, nie najczęstszy. Guardrail ma istnieć; rezygnacja z niego jest decyzją, więc ma
+  # kosztować jedną linijkę w tfvars i zostawiać ślad w diffie — a nie być stanem, w który wchodzi się
+  # przez nieuzupełnienie pliku.
+}
+
+variable "deny_reader_principals" {
+  description = "Kto może ODCZYTAĆ polityki deny na organizacji (rola własna `vpcScDenyReader`, sekcja 5a). Pełne principale IAM, np. `group:grp-example-iam@example.com`. Pusta lista jest dopuszczalna, ale znaczy, że NIKT nie odpowie na pytanie „czy guardrail stoi”: odmowa odczytu jest w tym API nieodróżnialna od braku zasobu — jedno i drugie to `403`."
+  type        = list(string)
+  default     = []
+
+  validation {
+    # Pełny principal, nie sam adres — ODWROTNIE niż `contract_reader_groups` niżej, i to jest świadome.
+    # Tamta zmienna karmi JEDEN zasób, który potrafi zbudować wyłącznie grupę, więc prefiks jest tam
+    # niewyrażalny z definicji. Odczyt warstwy deny bierze trzy różne typy tożsamości (człowiek dyżurny,
+    # grupa audytu, konto skanera), więc typ MUSI być widoczny w wartości — inaczej ta sama linijka
+    # znaczyłaby co innego zależnie od tego, co domyśli się sobie main.tf.
+    #
+    # `domain:` i `allUsers` odrzucone osobno: obie formy PRZESZŁYBY IAM i dały odczyt mapy guardraili
+    # całej domenie albo internetowi. Polityka deny wymienia z nazwy konta, które mają być zablokowane,
+    # i uprawnienia, o które toczy się gra — to instrukcja obejścia dla kogoś, kto jej nie powinien znać.
+    condition = alltrue([
+      for p in var.deny_reader_principals :
+      can(regex("^(user|group|serviceAccount):[^:@\\s]+@[^:@\\s]+\\.[a-zA-Z]{2,}$", p))
+    ])
+    error_message = "deny_reader_principals: pełny principal IAM z adresem — `user:…@…`, `group:…@…` albo `serviceAccount:…@…`. Bez `domain:` i bez allUsers/allAuthenticatedUsers."
+  }
+}
+
 variable "monitoring_project_id" {
   description = "Projekt, w którym repozytorium perimetru tworzy metryki i alerty — musi zgadzać się z `monitoring.project_id` w perimeter/policy.yaml. Puste = sekcja `monitoring` wyłączona, żaden grant nie powstaje (bezpieczna degradacja)."
   type        = string

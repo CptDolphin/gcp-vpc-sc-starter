@@ -43,6 +43,7 @@ a nie HCL.
 | Obie publikacje kontraktu (bucket + asset release'u) wychodzą z **jednego kroku apply** | `test_kontrakt_dwie_publikacje` w selfteście (parsuje kroki `apply.yml`) | dwa kroki = dwa wyzwalacze i dwa odczyty stanu, więc dwie kopie cicho się rozjadą, a konsument nie ma jak zauważyć, że czyta starszą (DEC-8) |
 | Zakaz komendy commitującej całą konfigurację dry-run | guard w `validate.yml` | promocja WSZYSTKICH członków jednym wywołaniem, bez czego cofnąć (`docs/3` §A) |
 | Akcje przypięte 40-znakowym SHA | guard w `validate.yml` + Dependabot | kto kontroluje tag, kontroluje pipeline mający prawo zmieniać granicę organizacji |
+| Warstwa IAM Deny jest **odczytywana**, nie zakładana | rola `vpcScDenyReader` + `manage_deny_policy` w `iam-bootstrap`, `tools/deny_check.sh`, testy trzech werdyktów w selfteście | `iam.denypolicies.*` nie należy do żadnej roli org-admina, a API na brak uprawnienia odpowiada tym samym `403` co na brak zasobu — więc bez tej roli zdanie „guardrail stoi" jest nieweryfikowalne, a `terraform plan` pokazuje `1 to add` niezależnie od stanu faktycznego. Zapisu tej warstwy **nie da się** zawęzić: `create`/`update`/`delete` mają `customRolesSupportLevel = NOT_SUPPORTED` i niesie je wyłącznie `roles/iam.denyAdmin` |
 
 ## Placeholdery — wszystko, co trzeba podmienić
 

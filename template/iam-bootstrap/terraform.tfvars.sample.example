@@ -19,6 +19,19 @@ state_bucket        = "bkt-tf-state-vpcsc"  # versioning + soft-delete, BEZ rete
 # grant_logging_viewer = true               # false = brak raportu naruszeń ORAZ (przy włączonym monitoringu)
 #                                           #         czerwony plan: to ta sama rola daje logMetrics.get
 
+# Warstwa IAM Deny — jedyne miejsce w tym stacku, gdzie ODCZYT i ZAPIS mają różnych właścicieli.
+#
+# deny_reader_principals: kto dostaje `vpcScDenyReader`, czyli kto w ogóle UMIE sprawdzić, czy guardrail
+# stoi. Pusta lista przechodzi walidację i jest domyślna — ale wtedy `403` z API zostaje jedyną odpowiedzią
+# na to pytanie, a `403` nie odróżnia „nie ma" od „nie widzę". Wpisz tu grupę dyżurną, nie osobę.
+# deny_reader_principals = ["group:grp-example-iam@example.com"]
+#
+# manage_deny_policy: `false` TYLKO wtedy, gdy tożsamość applikująca ten stack nie ma `roles/iam.denyAdmin`
+# (jedyna rola z `iam.denypolicies.create`; roli własnej z tym uprawnieniem zbudować się NIE DA). Ustawienie
+# na `false` znaczy „świadomie nie mamy tej warstwy", a nie „może gdzieś jest" — odnotuj to tam, gdzie
+# opisujecie architekturę, bo diagram z Deny i wdrożenie bez Deny wyglądają w repo identycznie.
+# manage_deny_policy = false
+
 # Kanał zewnętrzny (repozytoria zespołów) — puste = nieaktywny:
 # contracts_bucket       = "bkt-tf-contracts"          # MUSI być inny niż state_bucket
 # contract_reader_groups = ["grp-example-division-cloud@example.com"]  # SAM adres grupy — prefiks `group:` dokłada main.tf
