@@ -1,0 +1,227 @@
+# .github/workflows/boundary-probe.yml
+# Czy ta granica cokolwiek BLOKUJE — jedyny dowód, którego nie da się wyprodukować bramką offline.
+#
+# PO CO. Reszta tego repozytorium udowadnia, że umiemy zapisać regułę do API: plan jest zielony, apply
+# przechodzi, `describe` pokazuje treść, którą wysłaliśmy. Żadne z tych zdań nie mówi, że wywołanie spoza
+# granicy zostanie odrzucone — a to jest jedyna własność, dla której perimetr istnieje. Zdanie „mamy VPC-SC"
+# bez zaobserwowanej odmowy jest deklaracją o konfiguracji, nie o ochronie.
+#
+# DLACZEGO TO NIE WYMAGA ANI JEDNEJ MASZYNY. VPC-SC odmawia na płaszczyźnie API, przy wywołaniu — nie na
+# pakiecie. Wystarczy więc zawołać chronione API na chronionym projekcie tożsamością, której żadna reguła
+# ingress nie wymienia. Runner GitHuba jest spoza granicy z definicji, więc jest do tego właściwym miejscem.
+#
+# ============================================================================================
+# PUŁAPKA, PRZEZ KTÓRĄ TEN TEST POTRAFI UDOWODNIĆ NIEPRAWDĘ — i dlatego werdykt NIE idzie z kodu błędu
+# ============================================================================================
+# Chroniona usługa z WYŁĄCZONYM API zwraca `PERMISSION_DENIED`. Brak roli IAM zwraca `PERMISSION_DENIED`.
+# Odmowa VPC-SC zwraca `PERMISSION_DENIED`. Trzy różne stany świata, jeden kod. Kto zobaczy `PERMISSION_DENIED`
+# po promocji i nie doczyta treści, policzy awarię środowiska jako dowód działania granicy.
+#
+# Dlatego ten workflow:
+#   * wymaga przelotu `expect: open` PRZED promocją — jeśli wywołanie nie działa już wtedy, wynik „po"
+#     nie znaczy nic i workflow mówi to wprost, zamiast zaliczyć sukces;
+#   * werdykt „to była odmowa VPC-SC" stawia z TREŚCI odpowiedzi (`vpcServiceControlsUniqueIdentifier`),
+#     nigdy z samego kodu;
+#   * ma KONTROLĘ NEGATYWNĄ — usługę spoza `restricted_services`, która po promocji ma NADAL działać.
+#     Bez niej nie odróżnisz działającej granicy od zepsutego projektu, bo w obu odmawia „wszystko";
+#   * ma KONTROLĘ POZYTYWNĄ — wywołanie DOZWOLONE regułą ingress, które po promocji ma NADAL przechodzić.
+#     Bez niej nie odróżnisz granicy od odcięcia całego projektu.
+#
+# CZYM SONDUJEMY. Tożsamością `plan` — read-only, bez prawa zmiany czegokolwiek, i to ta sama tożsamość,
+# którą po promocji musi nadal działać pipeline. Sonda odpowiada więc przy okazji na drugie pytanie:
+# czy promocja nie odcięła własnej maszynerii. Czwórka sond jest dobrana tak, żeby RÓŻNIŁA SIĘ JEDNĄ RZECZĄ:
+#
+#   1. logging / ListLogEntries  — usługa chroniona, metoda WYMIENIONA w baseline_ingress  -> ma przejść ZAWSZE
+#   2. logging / ListBuckets     — TA SAMA usługa, metoda spoza reguły                     -> ma paść po enforce
+#   3. monitoring / dashboards   — INNA usługa chroniona, bez reguły                       -> ma paść po enforce
+#   4. cloudasset / search       — usługa SPOZA restricted_services                        -> ma przejść ZAWSZE
+#
+# Para 1–2 izoluje SELEKTOR METOD: ta sama usługa, ta sama tożsamość, ten sam projekt, różnica wyłącznie
+# w tym, czy metoda stoi w regule. Sonda 3 pokazuje, że odmowa jest własnością perimetru, a nie dziwactwem
+# jednego API. Sonda 4 jest tą, która odróżnia „granica działa" od „projekt jest zepsuty".
+
+name: boundary-probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      project:
+        description: "projekt członkowski do sondowania (project_id)"
+        required: true
+      expect:
+        description: "open = przed promocją, wszystko ma przejść | blocked = po promocji, chronione bez reguły mają paść"
+        required: true
+        default: "open"
+        type: choice
+        options: ["open", "blocked"]
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: boundary-probe-${{ github.event.inputs.project }}
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    name: czy granica odmawia
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # Tożsamość PLANU: read-only. Sonda nie ma prawa niczego zmienić — także wtedy, gdy ktoś ją później
+      # rozbuduje. To jest ta sama tożsamość, którą po promocji musi działać `terraform plan`.
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v2.1.9
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.PLAN_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+
+      - name: sondy
+        id: sondy
+        env:
+          PROJEKT: ${{ github.event.inputs.project }}
+          OCZEKIWANIE: ${{ github.event.inputs.expect }}
+        run: |
+          mkdir -p sondy
+          # Każda sonda zapisuje stdout+stderr do pliku i kod wyjścia obok. Sklejamy strumienie celowo:
+          # marker VPC-SC przychodzi na stderr, a treść odpowiedzi na stdout — werdykt potrzebuje obu.
+          sonda() { # $1 = nazwa, reszta = komenda
+            n="$1"; shift
+            set +e
+            "$@" > "sondy/$n.out" 2>&1
+            echo $? > "sondy/$n.rc"
+            set -e
+            echo "--- $n (rc=$(cat "sondy/$n.rc"))"
+            sed -n '1,12p' "sondy/$n.out"
+          }
+          sonda chroniona-z-regula \
+            gcloud logging read 'timestamp>="1970-01-01T00:00:00Z"' --project="$PROJEKT" --limit=1 --format=json
+          sonda chroniona-bez-reguly \
+            gcloud logging buckets list --location=global --project="$PROJEKT" --format=json
+          sonda chroniona-inna-usluga \
+            gcloud monitoring dashboards list --project="$PROJEKT" --format=json
+          sonda spoza-granicy \
+            gcloud asset search-all-resources --scope="projects/$PROJEKT" --limit=1 --format=json
+
+      # Werdykt liczony w Pythonie, nie w `grep`: różnica między „odmowa VPC-SC", „brak roli" i „wyłączone
+      # API" musi być wypowiedziana jako trzy różne stany, a nie zwinięta do „padło".
+      - name: werdykt
+        env:
+          OCZEKIWANIE: ${{ github.event.inputs.expect }}
+          PROJEKT: ${{ github.event.inputs.project }}
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import os, pathlib, sys
+
+          # Marker odmowy VPC-SC w ODPOWIEDZI API. `vpcServiceControlsUniqueIdentifier` jest jedynym polem,
+          # które niesie wyłącznie ta jedna przyczyna — komunikat tekstowy bywa przepisywany między wersjami
+          # gcloud, a kod błędu jest wspólny dla trzech różnych stanów świata.
+          MARKERY_VPCSC = ("vpcServiceControlsUniqueIdentifier", "VPC_SERVICE_CONTROLS",
+                           "Request is prohibited by organization's policy")
+          # Te dwa stany NIE są dowodem na granicę i muszą zostać nazwane osobno, bo wyglądają identycznie.
+          MARKERY_API_WYLACZONE = ("has not been used in project", "it is disabled",
+                                   "SERVICE_DISABLED", "API has not been used")
+          MARKERY_BRAK_ROLI = ("does not have permission", "Permission denied on resource",
+                               "IAM_PERMISSION_DENIED", "caller does not have permission")
+
+          # nazwa -> (czy ma przejsc przy expect=open, czy ma przejsc przy expect=blocked, po co ta sonda)
+          PLAN = {
+              "chroniona-z-regula":   (True,  True,  "KONTROLA POZYTYWNA: metoda wymieniona w baseline_ingress"),
+              "chroniona-bez-reguly": (True,  False, "DOWOD BLOKADY: ta sama usluga, metoda spoza reguly"),
+              "chroniona-inna-usluga": (True, False, "DOWOD BLOKADY: druga chroniona usluga, bez reguly"),
+              "spoza-granicy":        (True,  True,  "KONTROLA NEGATYWNA: usluga spoza restricted_services"),
+          }
+
+          oczekiwanie = os.environ["OCZEKIWANIE"]
+          if oczekiwanie not in ("open", "blocked"):
+              sys.exit(f"nieznane oczekiwanie: {oczekiwanie}")
+
+          def klasyfikuj(tresc: str, rc: int) -> str:
+              if rc == 0:
+                  return "PRZESZLO"
+              if any(m in tresc for m in MARKERY_VPCSC):
+                  return "ODMOWA VPC-SC"
+              if any(m in tresc for m in MARKERY_API_WYLACZONE):
+                  return "API WYLACZONE"          # NIE jest dowodem na granice
+              if any(m in tresc for m in MARKERY_BRAK_ROLI):
+                  return "BRAK ROLI"              # NIE jest dowodem na granice
+              return "PADLO Z INNEGO POWODU"
+
+          print(f"## boundary-probe — {os.environ['PROJEKT']}, oczekiwanie `{oczekiwanie}`\n")
+          print("| sonda | rc | werdykt | po co |")
+          print("|---|---|---|---|")
+          bledy = []
+          for nazwa, (ma_przejsc_open, ma_przejsc_blocked, po_co) in PLAN.items():
+              out = pathlib.Path(f"sondy/{nazwa}.out")
+              rc = int(pathlib.Path(f"sondy/{nazwa}.rc").read_text().strip())
+              tresc = out.read_text() if out.exists() else ""
+              werdykt = klasyfikuj(tresc, rc)
+              ma_przejsc = ma_przejsc_open if oczekiwanie == "open" else ma_przejsc_blocked
+              print(f"| `{nazwa}` | {rc} | {werdykt} | {po_co} |")
+              if ma_przejsc and werdykt != "PRZESZLO":
+                  bledy.append(f"{nazwa}: mialo PRZEJSC, jest `{werdykt}`")
+              # Tu siedzi cala wartosc tego workflowa: przy `blocked` NIE wystarczy, ze padlo — musi paść
+              # DOKLADNIE z powodu VPC-SC. Kazdy inny powod znaczy, ze mierzymy awarie srodowiska.
+              if not ma_przejsc and werdykt != "ODMOWA VPC-SC":
+                  bledy.append(f"{nazwa}: mialo byc ODMOWA VPC-SC, jest `{werdykt}` "
+                               f"— to NIE jest dowod na granice")
+
+          print()
+          if oczekiwanie == "open":
+              print("> Przelot `open` jest WARUNKIEM KONIECZNYM przelotu `blocked`. Bez niego odmowa po "
+                    "promocji moze pochodzic z braku roli albo z wylaczonego API, a nie z granicy.")
+          if bledy:
+              print("\n**NIEZGODNOSCI:**")
+              for b in bledy:
+                  print(f"- {b}")
+              sys.exit(1)
+          print("\n**Wszystkie sondy zgodne z oczekiwaniem.**")
+          PY
+
+      # Drugi, NIEZALEŻNY dowód: wpis w audit-logu. Odpowiedź API i log powstają w dwóch różnych miejscach,
+      # więc zgodność między nimi jest mocniejsza niż każde z osobna. `dryRun="false"` = odmowa egzekwowana.
+      # ZAKRES = PROJEKT CZŁONKA: wpis ląduje w logu projektu-właściciela zasobu, nie organizacji.
+      - name: odmowa w audit-logu
+        if: ${{ github.event.inputs.expect == 'blocked' }}
+        env:
+          PROJEKT: ${{ github.event.inputs.project }}
+        run: |
+          gcloud logging read \
+            'protoPayload.metadata."@type"="type.googleapis.com/google.cloud.audit.VpcServiceControlAuditMetadata"
+             AND protoPayload.metadata.dryRun="false"' \
+            --project="$PROJEKT" --freshness=1h --limit=5 --format=json > odmowy.json || {
+              echo "::error::nie udalo sie przeczytac audit-logu — brak drugiego dowodu"
+              exit 1
+            }
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json, pathlib
+          w = json.loads(pathlib.Path("odmowy.json").read_text() or "[]")
+          print(f"\n### wpisy audytowe (dryRun=false, 1 h): {len(w)}\n")
+          for e in w:
+              p = e.get("protoPayload", {})
+              md = p.get("metadata", {})
+              # `violationReason` bywa polem wpisu ALBO polem elementu `ingressViolations`/`egressViolations`
+              # — zaleznie od kierunku ruchu. Czytamy oba, bo brak powodu w wypisie wyglada jak jego brak
+              # w logu, a to jest dokladnie ta roznica, ktora ma tu byc widoczna.
+              powody = [md.get("violationReason")] if md.get("violationReason") else []
+              for klucz in ("ingressViolations", "egressViolations"):
+                  powody += [v.get("violationReason") for v in md.get(klucz, []) if v.get("violationReason")]
+              print(f"- `{p.get('methodName')}` · {powody or 'BRAK POWODU W WPISIE'} · "
+                    f"id `{md.get('vpcServiceControlsUniqueId')}`")
+          if not w:
+              # Brak wpisu przy zaobserwowanej odmowie oznacza, ze jeden z dwoch dowodow nie istnieje —
+              # a wtedy nie wiadomo, ktory z nich klamie. To jest niezgodnosc, nie drobiazg.
+              raise SystemExit("brak wpisu audytowego przy odmowie — dowody sie nie zgadzaja")
+          PY
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: boundary-probe-${{ github.event.inputs.expect }}
+          path: |
+            sondy/
+            odmowy.json
+          retention-days: 30
