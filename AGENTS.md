@@ -81,7 +81,10 @@ guard `test_samodzielnosc` w selfteście pilnuje tego przy każdym przebiegu.
 - **Reguły `baseline_ingress` nie są profilem.** Profil trzeba wybrać; baseline obowiązuje każdego. Pierwszy
   zespół, który zapomniałby wybrać profil skanera, wypadłby ze skanowania dokładnie w momencie promocji.
 - **`iam-bootstrap/` to osobny stack z osobnym stanem.** Applikuje go zespół IAM, nie ten pipeline: kod
-  nadający uprawnienia nie może być stosowany przez tożsamość, która z nich korzysta.
+  nadający uprawnienia nie może być stosowany przez tożsamość, która z nich korzysta. „Osobny stan" znaczy
+  **zdalny backend pod własnym prefiksem**, rozłącznym z tym, który `main.tf` oddaje kontom CI: warunek IAM
+  na buckecie to `startsWith`, więc wspólny (albo tylko *prawie* rozłączny) prefiks daje pipeline'owi
+  perimetru prawo zapisu do stanu, z którego biorą się jego własne uprawnienia.
 - **Testy są w połowie negatywne.** Bramka, która nigdy nie odrzuca, przechodzi każdy test pozytywny
   i nie chroni niczego. Dodając bramkę, dodaj też przypadek, w którym ma PAŚĆ.
 - **Bramka ludzka na apply jest opisana jako warstwa OSOBNA i warunkowa, a nie jako fundament.** Kusi, żeby

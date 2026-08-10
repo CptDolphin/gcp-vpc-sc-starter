@@ -13,6 +13,36 @@ terraform {
       version = "~> 7.0"
     }
   }
+
+  # Backend GCS — stan warstwy TOŻSAMOŚCI. Bez tego bloku stan jest LOKALNY, czyli w praktyce nie istnieje:
+  # klon na maszynie kolejnej osoby (albo świeży klon tej samej) nie zna ani jednego zasobu, a `apply`
+  # próbuje utworzyć od zera konta, role i pulę WIF, które stoją na organizacji od miesięcy. Część takich
+  # prób pada na „already exists", część przechodzi — i wtedy warstwa uprawnień jest w stanie, którego nikt
+  # nie opisał. Zmierzone na wdrożeniu tego materiału: `plan` ze świeżego klonu pokazywał 23 zasoby do
+  # utworzenia przy dwóch zamierzonych; odzyskanie kontroli kosztowało 20 pojedynczych `terraform import`.
+  #
+  # DLACZEGO PREFIKS INNY NIŻ U PERIMETRU (`vpc-sc/perimeter` w terraform/versions.tf), skoro bucket ten
+  # sam: to jest granica uprawnień, nie porządki w nazewnictwie. `main.tf` daje kontom `plan` i `apply`
+  # rolę `storage.objectAdmin` na buckecie stanu z warunkiem IAM
+  # `resource.name.startsWith(".../objects/<state_prefix>")`. Wspólny prefiks znaczyłby, że pipeline
+  # perimetru ma prawo ZAPISU do stanu stacku, który nadaje mu uprawnienia — a wtedy ta tożsamość może
+  # jednym pull requestem poszerzyć własne role. Ten sam powód, dla którego katalog i właściciel są osobne;
+  # prefiks domyka to po stronie danych.
+  #
+  # UWAGA NA KSZTAŁT NAZWY: warunek IAM to `startsWith`, nie równość. Prefiks zaczynający się od wartości
+  # `state_prefix` (np. `vpc-sc/perimeter-iam` przy domyślnym `vpc-sc/perimeter`) wpadłby POD ten warunek
+  # i po cichu oddał ten stan pipeline'owi perimetru. Rozłączność pilnuje selftest.
+  #
+  # Ten stan czyta i pisze WYŁĄCZNIE człowiek z uprawnieniami org-admin (patrz nagłówek main.tf) — konta CI
+  # nie mają do niego dostępu i mieć nie mają. `storage.legacyBucketReader` z main.tf daje im listowanie
+  # bucketa (backend GCS wylicza workspace'y), czyli metadane obiektu; treści stanu nie odczytają.
+  #
+  # Bucket może być ten sam co dla perimetru albo osobny — jeśli osobny, konta CI tracą nawet listowanie,
+  # co jest ściślejsze, ale kosztuje drugi bucket do utrzymania i backupu. Tu domyślnie ten sam.
+  backend "gcs" {
+    bucket = "<STATE_BUCKET>"
+    prefix = "vpc-sc/iam-bootstrap"
+  }
 }
 
 provider "google" {}

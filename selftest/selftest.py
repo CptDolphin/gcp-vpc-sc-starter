@@ -258,6 +258,15 @@ def test_iam_bootstrap() -> None:
     p = sh(["terraform", f"-chdir={d}", "validate"])
     check("iam-bootstrap: validate", p.returncode == 0, p.stdout + p.stderr)
 
+    # Guardy niżej liczą `terraform plan`, a ten wymaga ZAINICJALIZOWANEGO backendu — startowy jest GCS
+    # z placeholderem, więc podmieniamy go na lokalny plikiem `*_override.tf`. Zabieg wyłącznie testowy,
+    # w rozpakowanej kopii; `versions.tf` zostaje nietknięty i to on jest badany przez guard backendu niżej.
+    # Ten sam mechanizm co w `test_terraform()` — patrz komentarz tam.
+    (d / "zz_selftest_override.tf").write_text('terraform {\n  backend "local" {}\n}\n')
+    p = sh(["terraform", f"-chdir={d}", "init", "-reconfigure", "-input=false"])
+    check("iam-bootstrap: init z lokalnym backendem (override na czas testu)",
+          p.returncode == 0, p.stdout[-500:] + p.stderr[-500:])
+
     body = (d / "main.tf").read_text()
     # NAJGROŹNIEJSZY footgun tego stacku: *_iam_binding jest authoritative dla roli na CAŁEJ organizacji
     # i przy pierwszym apply usunąłby wszystkie inne jej przypisania w firmie.
@@ -407,6 +416,56 @@ def test_iam_bootstrap() -> None:
         check(f"iam-bootstrap: warunek IAM `{zasob}` niesie prefiks z {zmienna} (nie konczy sie na /objects/)",
               bool(wyrazenia) and all(w.endswith(koncowka) for w in wyrazenia),
               f"expressions={wyrazenia!r}, oczekiwana koncowka={koncowka!r}")
+
+    # --- backend: stan tego stacku NIE MOZE byc zapisywalny przez pipeline perimetru -----------------
+    # DLACZEGO TEN GUARD ISTNIEJE: `iam-bootstrap/versions.tf` przez caly czas nie mial bloku `backend`,
+    # wiec stan byl lokalny — czyli w praktyce zaden. Na wdrozeniu tego materialu `plan` ze swiezego klonu
+    # pokazal 23 zasoby DO UTWORZENIA przy dwoch zamierzonych: Terraform nie znal ani jednego z zywych kont,
+    # rol i puli WIF. `apply` z takiego klonu tworzy warstwe uprawnien od nowa, czesciowo padajac na
+    # „already exists". Cala reszta selftestu byla wtedy zielona, bo `init -backend=false` (potrzebny, zeby
+    # bramki chodzily bez chmury) nie odroznia „backend zdalny" od „backendu nie ma".
+    #
+    # DRUGA POLOWA GUARDU JEST WAZNIEJSZA OD PIERWSZEJ. Sam zdalny backend nie wystarczy: prefiks musi byc
+    # ROZLACZNY z tym, ktory `main.tf` oddaje kontom CI. Konta `plan`/`apply` maja `storage.objectAdmin`
+    # z warunkiem `resource.name.startsWith(".../objects/<state_prefix>")` — wspolny prefiks znaczy, ze
+    # pipeline perimetru moze NADPISAC stan stacku, ktory nadaje mu uprawnienia. Warunek to `startsWith`,
+    # nie rownosc, wiec „prawie rozlaczny" (`vpc-sc/perimeter-iam` przy `vpc-sc/perimeter`) jest po cichu
+    # NIEROZLACZNY i to jest realny tryb awarii, nie teoria.
+    #
+    # Porownujemy z warunkiem WYRENDEROWANYM przez plan (`warunki["state"]` wyzej), a nie z tekstem
+    # variables.tf: mierzymy to, co realnie wyladuje w IAM.
+    def backend_gcs(plik: pathlib.Path) -> dict | None:
+        m = re.search(r'backend\s+"gcs"\s*\{(.*?)\n\s*\}', plik.read_text(), re.S)
+        return dict(re.findall(r'(\w+)\s*=\s*"([^"]*)"', m.group(1))) if m else None
+
+    be = backend_gcs(d / "versions.tf")
+    check("iam-bootstrap: ma ZDALNY backend gcs (stan lokalny = stanu nie ma)", be is not None,
+          "brak bloku backend \"gcs\" w iam-bootstrap/versions.tf")
+    # Prefiks oddany kontom CI czytamy z wyrenderowanego warunku IAM, nie z pliku zmiennych.
+    nadany = next((re.search(r'/objects/(.*)"\)$', w).group(1) for w in warunki.get("state", [])
+                   if re.search(r'/objects/(.*)"\)$', w)), None)
+    check("iam-bootstrap: znany prefiks oddany kontom CI (z warunku IAM, nie z tekstu)", nadany is not None)
+    if be is not None and nadany is not None:
+        check("iam-bootstrap: prefiks stanu ROZLACZNY z tym, ktory maja konta CI perimetru",
+              not be.get("prefix", "").startswith(nadany),
+              f"backend prefix={be.get('prefix')!r} wpada pod warunek IAM startsWith({nadany!r})")
+
+    # ANTY-TAUTOLOGIA: guard musi PASC po rozbrojeniu. Bez tego „rozlaczny" przechodziloby takze wtedy,
+    # gdyby regex nic nie znajdowal — a to jest dokladnie ten sposob, w jaki bramka staje sie ozdoba.
+    oryginal_versions = (d / "versions.tf").read_text()
+    if be is not None and nadany is not None:
+        kolizja = oryginal_versions.replace(f'prefix = "{be["prefix"]}"', f'prefix = "{nadany}-iam"')
+        (d / "versions.tf").write_text(kolizja)
+        zly = backend_gcs(d / "versions.tf")
+        check("iam-bootstrap: guard rozlacznosci PADA na prefiksie wpadajacym pod warunek (anty-tautologia)",
+              zly is not None and zly.get("prefix", "").startswith(nadany),
+              f"po podmianie prefix={zly and zly.get('prefix')!r} — guard nie zauwazylby kolizji")
+        (d / "versions.tf").write_text(re.sub(r'\n\s*backend\s+"gcs"\s*\{.*?\n\s*\}\n', "\n",
+                                              oryginal_versions, flags=re.S))
+        check("iam-bootstrap: guard backendu PADA po usunieciu bloku (anty-tautologia)",
+              backend_gcs(d / "versions.tf") is None,
+              "regex znalazl backend w pliku, z ktorego zostal usuniety")
+        (d / "versions.tf").write_text(oryginal_versions)
 
     # --- monitoring: konto apply musi UMIEC ODCZYTAC to, czym zarzadza -------------------------------
     # DLACZEGO TEN GUARD ISTNIEJE: `terraform apply` zaczyna od REFRESHU, wiec apply jest nadzbiorem planu
@@ -1721,27 +1780,55 @@ def test_workflowy_wykonywalne() -> None:
         check("validate.yml: `terraform test` przechodzi BEZ ADC (tak jak na runnerze)",
               p.returncode == 0 and "0 failed" in p.stdout, (p.stdout + p.stderr)[-900:])
 
-    # --- 3. plan.yml: plik, ktory krok planu ZAPISUJE, musi byc tym, ktory czytaja kroki nizej.
-    planwf = yaml.safe_load((ROOT / ".github/workflows/plan.yml").read_text())
-    kroki = [k for k, _ in kroki_workflow(planwf)]
-    krok_planu = next((k for k in kroki if "-out=" in str(k.get("run", ""))), None)
-    check("plan.yml ma krok produkujacy plan (-out=)", krok_planu is not None)
-    if krok_planu is not None:
+    # --- 3. plik, ktory krok planu ZAPISUJE, musi byc tym, ktory czytaja kroki nizej.
+    #
+    # OBA WORKFLOWY, NIE JEDEN. Ten test powstal dla `plan.yml` i przez ten czas `apply.yml` — z DOKLADNIE
+    # ta sama para producent/konsument — nie byl badany wcale. Defekt przezyl tam poprawke o rok: `apply`
+    # padal wczesniej, na uprawnieniach, wiec krok bramek nie wykonal sie ANI RAZU i nie mial jak zglosic
+    # `stat terraform/plan.json: no such file or directory`. Test dopisany wylacznie dla jednego z pary
+    # workflowow odtwarza dokladnie te asymetrie, ktora defekt wpuscila — stad petla, nie kopia.
+    wf_kroki = {}
+    for nazwa in ("plan.yml", "apply.yml"):
+        wf = yaml.safe_load((ROOT / f".github/workflows/{nazwa}").read_text())
+        kroki = [k for k, _ in kroki_workflow(wf)]
+        wf_kroki[nazwa] = kroki
+        krok_planu = next((k for k in kroki if "-out=" in str(k.get("run", ""))), None)
+        check(f"{nazwa} ma krok produkujacy plan (-out=)", krok_planu is not None)
+        if krok_planu is None:
+            continue
         katalog_atrapy = pathlib.Path(tempfile.mkdtemp(prefix="vpcsc-atrapa-tf-"))
         (katalog_atrapy / "terraform").write_text(ATRAPA_TERRAFORM)
         (katalog_atrapy / "terraform").chmod(0o755)
         env = {**os.environ, "PATH": f"{katalog_atrapy}{os.pathsep}{os.environ['PATH']}"}
         p = subprocess.run(["bash", "-e", "-c", krok_planu["run"]],
                            cwd=ROOT, env=env, capture_output=True, text=True)
-        check("plan.yml: krok planu wykonuje sie (na atrapie terraforma)",
+        check(f"{nazwa}: krok planu wykonuje sie (na atrapie terraforma)",
               p.returncode == 0, (p.stdout + p.stderr)[-500:])
         powstalo = sorted(str(x.relative_to(ROOT)) for x in ROOT.glob("*.json")) + \
             sorted(str(x.relative_to(ROOT)) for x in (ROOT / "terraform").glob("*.json"))
         for opis, sciezka in konsumenci_planu(kroki):
-            check(f"plan.yml: {opis} czyta plik, ktory krok planu naprawde tworzy ({sciezka})",
+            check(f"{nazwa}: {opis} czyta plik, ktory krok planu naprawde tworzy ({sciezka})",
                   (ROOT / sciezka).exists(), f"krok planu zostawil: {powstalo}")
         for smiec in ("terraform/plan.json", "plan.json", "terraform/tfplan.binary", "tfplan.binary"):
             (ROOT / smiec).unlink(missing_ok=True)
+
+    # --- 3b. bramki na PR i bramki na granicy musza byc TYMI SAMYMI bramkami.
+    # `apply.yml` obiecuje w naglowku, ze reguly uruchamiaja sie PONOWNIE na planie z galezi domyslnej.
+    # Obietnica jest prawdziwa tylko wtedy, gdy wywolanie ma te same argumenty: `plan.yml` podawal
+    # `--data perimeter/policy.yaml`, `apply.yml` nie. To wejscie mowi regulom, dla ktorych uslug API nie
+    # publikuje metod — bez niego zbior jest pusty i kazda regula z `"*"` jest odrzucana. Rozjazd wychodzi
+    # dopiero PO review, na granicy, czyli w miejscu, w ktorym najdrozej go zauwazyc.
+    def wywolania_conftest(kroki):
+        for krok in kroki:
+            for linia in str(krok.get("run", "")).splitlines():
+                if "conftest test" in linia:
+                    # sam plik planu wycinamy: rozni sie miedzy workflowami legalnie (artefakt vs re-plan)
+                    yield tuple(a for a in linia.split() if not a.endswith(".json"))
+
+    arg = {n: sorted(wywolania_conftest(k)) for n, k in wf_kroki.items()}
+    check("plan.yml i apply.yml wolaja conftest z TYMI SAMYMI argumentami (te same bramki, nie podobne)",
+          bool(arg.get("plan.yml")) and arg.get("plan.yml") == arg.get("apply.yml"),
+          f"plan.yml={arg.get('plan.yml')!r} apply.yml={arg.get('apply.yml')!r}")
 
 
 # --------------------------------------------------------------------- schematy (opcjonalnie)

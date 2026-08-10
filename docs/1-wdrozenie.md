@@ -15,7 +15,7 @@ Podmień (grep po `<` znajdzie wszystkie):
 |---|---|---|
 | `<ORG_ID>` | `perimeter/policy.yaml` | numer organizacji GCP |
 | `<ACCESS_POLICY_NUMBER>` | `perimeter/policy.yaml` | numer org-level access policy (`gcloud access-context-manager policies list`) |
-| `<STATE_BUCKET>` | `terraform/versions.tf` | bucket stanu (versioning + soft-delete, **bez** retention-lock) |
+| `<STATE_BUCKET>` | `terraform/versions.tf` **oraz** `iam-bootstrap/versions.tf` | bucket stanu (versioning + soft-delete, **bez** retention-lock). Ta sama nazwa w obu miejscach, ale **prefiksy różne** (`vpc-sc/perimeter` vs `vpc-sc/iam-bootstrap`) — konta CI perimetru mają zapis wyłącznie na swoim prefiksie i nie mogą nadpisać stanu stacku, który nadaje im uprawnienia |
 | `@your-org/*` | `.github/CODEOWNERS` | realne zespoły GitHub |
 | zakresy IP | `perimeter/access-levels/corp.yaml` | korporacyjne zakresy (w szablonie są adresy TEST-NET z RFC 5737) |
 
