@@ -10,12 +10,36 @@ Wynik służy dwóm rzeczom naraz:
   * plik violations.json dla reguły OPA promotion_gate — czyli DOWÓD, że okno było czyste.
     Brak wpisu dla członka reguła traktuje jako brak dowodu, nie jako zero.
 
-Wejście: `gcloud logging read` w formacie JSON (organizacja, okno N dni):
+GDZIE W LOGU JEST NUMER CZŁONKA — i dlaczego nie tam, gdzie się wydaje
+----------------------------------------------------------------------
+To jest miejsce, w którym ta funkcja była zepsuta, dopóki nie zobaczyła pierwszego prawdziwego naruszenia.
+`metadata.resourceNames` NIE niesie numeru projektu-członka. Na 26 realnych wpisach zmierzonych na żywej
+organizacji ostatni segment `resourceNames[0]` był kolejno: numerem OBCEGO projektu (10×), nazwą REGIONU
+`…/locations/europe-west4` (8×), `project_id` zamiast numeru (4×) oraz `_` z aliasu `projects/_` (4×).
+Zero trafień w członka. Kolejność `resourceNames` przy egressie bywa przy tym różna dla tego samego
+kształtu wywołania, więc nawet indeks `[0]` jest losowaniem.
 
+Numer członka mieszka w rekordzie naruszenia i zależy od KIERUNKU:
+
+    ingressViolations[].targetResource  → projects/<numer>   członek, DO którego ktoś wchodzi
+    egressViolations[].source           → projects/<numer>   członek, Z którego coś wychodzi
+
+Kierunku nie wolno mylić: przy egressie `resourceNames`/`targetResource` wskazują zasób POZA perimetrem,
+więc przypisanie po nich obwinia stronę wołaną zamiast członka, którego dane wychodzą.
+
+CZEGO TEN RAPORT NIE OBIECUJE: `principalEmail` w logach `cloudaudit.googleapis.com/policy` bywa przez
+GCP zredagowany (`m...@ra...m`) i wtedy raport nie nazwie wołającego. Do namierzenia wywołania służy
+`vpcServiceControlsUniqueId` — dlatego trafia do raportu markdown.
+
+Wejście: `gcloud logging read` w formacie JSON (organizacja, okno N dni). Sprawdź kod wyjścia — przy
+odmowie `gcloud logging read` i tak wypisuje na stdout `[]`, więc samo przekierowanie do pliku zamienia
+„nie wolno mi było przeczytać" w „nie było naruszeń":
+
+  set -o pipefail
   gcloud logging read \\
     'protoPayload.metadata."@type"="type.googleapis.com/google.cloud.audit.VpcServiceControlAuditMetadata"
      AND protoPayload.metadata.dryRun="true"' \\
-    --organization=<ORG_ID> --freshness=14d --format=json > raw.json
+    --organization=<ORG_ID> --freshness=14d --format=json > raw.json || exit 1
 
 Użycie:
     python3 tools/violations_report.py --logs raw.json --declarations declarations.json \\
@@ -25,6 +49,46 @@ import argparse
 import collections
 import json
 import pathlib
+import re
+import sys
+
+NUMER_PROJEKTU = re.compile(r"^projects/(\d+)$")
+
+
+def numery_z_naruszen(meta: dict) -> set:
+    """Numery projektów-CZŁONKÓW implikowanych przez ten wpis, czytane po KIERUNKU naruszenia.
+
+    Rekordy `ingressViolations`/`egressViolations` są źródłem autorytatywnym: mówią wprost, którego
+    członka dotyczy naruszenie. Dopiero ich brak uzasadnia sięganie po dane poglądowe (niżej).
+    """
+    numery = set()
+    for v in meta.get("ingressViolations", []) or []:
+        m = NUMER_PROJEKTU.match(str(v.get("targetResource", "")))
+        if m:
+            numery.add(m.group(1))
+    for v in meta.get("egressViolations", []) or []:
+        m = NUMER_PROJEKTU.match(str(v.get("source", "")))
+        if m:
+            numery.add(m.group(1))
+    return numery
+
+
+def identyfikatory_zapasowe(meta: dict, entry: dict) -> set:
+    """Identyfikatory poglądowe — używane WYŁĄCZNIE, gdy wpis nie ma rekordów naruszeń.
+
+    Nowa usługa albo nowy kształt wpisu nie może cicho wypaść z rachunku, więc bierzemy stąd wszystko,
+    co w ogóle wygląda na projekt: każdy `projects/<numer>` z `resourceNames` (nie tylko `[0]`) oraz
+    `project_id` z etykiet zasobu — mapa członków jest kluczowana i numerem, i identyfikatorem.
+    """
+    ident = set()
+    for rn in meta.get("resourceNames", []) or []:
+        m = NUMER_PROJEKTU.match(str(rn))
+        if m:
+            ident.add(m.group(1))
+    project_id = str(entry.get("resource", {}).get("labels", {}).get("project_id", ""))
+    if project_id:
+        ident.add(project_id)
+    return ident
 
 
 def main() -> int:
@@ -35,34 +99,60 @@ def main() -> int:
     ap.add_argument("--markdown-out", default="violations.md")
     args = ap.parse_args()
 
-    logs = json.loads(pathlib.Path(args.logs).read_text())
+    surowe = json.loads(pathlib.Path(args.logs).read_text())
+    if not isinstance(surowe, list):
+        sys.exit(f"{args.logs}: oczekiwano listy wpisów z `gcloud logging read --format=json`")
     decl = json.loads(pathlib.Path(args.declarations).read_text())
 
-    # Numer projektu → nazwa pliku członka. Log niesie numery, repo operuje nazwami plików.
-    by_number = {str(m["project_number"]): name for name, m in decl["members"].items()}
+    # Log niesie numery, czasem samo `project_id`; repo operuje nazwami plików członków. Mapa przyjmuje
+    # oba klucze, żeby wpis bez rekordu naruszenia dało się jeszcze przypisać po identyfikatorze.
+    po_identyfikatorze = {}
+    for name, m in decl["members"].items():
+        po_identyfikatorze[str(m["project_number"])] = name
+        po_identyfikatorze[str(m["project_id"])] = name
 
     counts = collections.Counter()
     detail = collections.defaultdict(collections.Counter)
-    unmapped = collections.Counter()
+    namiar = {}  # członek → jeden vpcServiceControlsUniqueId, gdy principal jest zredagowany
+    obce = collections.Counter()
+    nierozpoznane = []
 
-    for entry in logs:
-        meta = entry.get("protoPayload", {}).get("metadata", {})
-        principal = entry.get("protoPayload", {}).get("authenticationInfo", {}).get("principalEmail", "?")
-        method = entry.get("protoPayload", {}).get("methodName", "?")
-        reason = ""
-        for viol in meta.get("violationReason", []) if isinstance(meta.get("violationReason"), list) else [meta.get("violationReason")]:
-            reason = viol or ""
+    for entry in surowe:
+        pp = entry.get("protoPayload", {})
+        meta = pp.get("metadata", {})
+        principal = pp.get("authenticationInfo", {}).get("principalEmail", "?")
+        method = pp.get("methodName", "?")
+        reason = meta.get("violationReason") or ""
+        if isinstance(reason, list):
+            reason = ", ".join(str(r) for r in reason if r)
+        unikat = meta.get("vpcServiceControlsUniqueId", "")
 
-        # Numer projektu, którego dotyczy naruszenie — bywa w kilku miejscach zależnie od usługi.
-        number = str(meta.get("resourceNames", [""])[0]).split("/")[-1] if meta.get("resourceNames") else ""
-        number = number or str(entry.get("resource", {}).get("labels", {}).get("project_id", ""))
-
-        member = by_number.get(number)
-        if member is None:
-            unmapped[f"{principal} → {method}"] += 1
+        identyfikatory = numery_z_naruszen(meta) or identyfikatory_zapasowe(meta, entry)
+        if not identyfikatory:
+            # Wpisu nie zrozumieliśmy. Policzenie go jako „nie nasz" jest dokładnie tym błędem, przez
+            # który 26 naruszeń członka raportowało się jako czyste okno — więc raport pada, patrz niżej.
+            nierozpoznane.append(f"{method} ({reason}) [{unikat or 'brak id'}]")
             continue
-        counts[member] += 1
-        detail[member][f"{principal} → {method} ({reason})"] += 1
+
+        czlonkowie = {po_identyfikatorze[i] for i in identyfikatory if i in po_identyfikatorze}
+        if not czlonkowie:
+            obce[f"{principal} → {method} ({reason})"] += 1
+            continue
+        for member in czlonkowie:  # jeden wpis może dotyczyć dwóch członków — liczy się obu raz
+            counts[member] += 1
+            detail[member][f"{principal} → {method} ({reason})"] += 1
+            if unikat:
+                namiar.setdefault(member, unikat)
+
+    # FAIL-CLOSED. `violations.json` JEST dowodem dla bramki promocji, więc nie wolno go wystawić na
+    # podstawie wpisów, których nie umiemy przypisać: „nie rozumiem" zapisane jako 0 to zielona bramka
+    # zbudowana na nieodczytanym stanie. Brak pliku = brak dowodu = promotion_gate blokuje.
+    if nierozpoznane:
+        print(f"BŁĄD: {len(nierozpoznane)} wpisów bez rozpoznanego projektu — raport NIE powstał "
+              f"(brak dowodu ≠ zero naruszeń). Przykłady:", file=sys.stderr)
+        for opis in nierozpoznane[:5]:
+            print(f"  - {opis}", file=sys.stderr)
+        return 2
 
     # KLUCZOWE: wypisujemy 0 dla KAŻDEGO członka, nie tylko dla tych z naruszeniami. Inaczej „brak wpisu"
     # byłoby nieodróżnialne od „raport nie objął tego członka", a na tej różnicy stoi bramka promocji.
@@ -81,14 +171,19 @@ def main() -> int:
             for what, n in detail[name].most_common(10):
                 lines.append(f"- `{what}` × {n}")
             lines.append("")
+            if name in namiar:
+                # GCP redaguje `principalEmail` w logach policy, więc powyższa lista bywa bez nazwiska.
+                # Ten identyfikator jest tym, po czym da się odszukać konkretne wywołanie w Troubleshooterze.
+                lines.append(f"namiar na wywołanie (`vpcServiceControlsUniqueId`): `{namiar[name]}`")
+                lines.append("")
             lines.append("Napraw przepływ albo poproś o profil, który go pokrywa (nie o surową regułę).")
         lines.append("")
 
-    if unmapped:
+    if obce:
         lines.append("## Naruszenia spoza listy członków")
         lines.append("Dotyczą projektów, których nie ma w perimeter/members/ — zwykle znaczy to, że ktoś")
         lines.append("woła chroniony zasób z projektu, o którego dołączenie nikt nie wystąpił.")
-        for what, n in unmapped.most_common(10):
+        for what, n in obce.most_common(10):
             lines.append(f"- `{what}` × {n}")
 
     pathlib.Path(args.markdown_out).write_text("\n".join(lines) + "\n")

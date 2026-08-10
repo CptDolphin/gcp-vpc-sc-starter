@@ -34,15 +34,24 @@ jobs:
 
       # dryRun=true is the whole filter: these are the calls that WOULD have been blocked. After a member is
       # promoted the same calls appear with dryRun=false and an actual denial — which is what we are avoiding.
+      #
+      # The explicit `|| exit 1` is not belt-and-braces. Measured: on a denied read `gcloud logging read`
+      # prints `[]` on STDOUT and the error only on stderr, so the redirect below turns "I was not allowed
+      # to read the logs" into "there were no violations" — a clean window manufactured from a permission
+      # failure. The exit code is the only signal that tells those two apart, so it has to be checked.
       - name: read audit logs
         env:
           ORG_ID: ${{ vars.ORG_ID }}
           DAYS: ${{ github.event.inputs.days || '14' }}
         run: |
+          set -o pipefail
           gcloud logging read \
             'protoPayload.metadata."@type"="type.googleapis.com/google.cloud.audit.VpcServiceControlAuditMetadata"
              AND protoPayload.metadata.dryRun="true"' \
-            --organization="$ORG_ID" --freshness="${DAYS}d" --format=json > raw.json
+            --organization="$ORG_ID" --freshness="${DAYS}d" --format=json > raw.json || {
+              echo "::error::gcloud logging read failed — no report, no evidence, promotion stays blocked"
+              exit 1
+            }
           echo "entries: $(python3 -c 'import json,sys;print(len(json.load(open("raw.json"))))')"
 
       - name: build the report

@@ -11,6 +11,7 @@ jest nieprawdziwa, a plik, którego nikt nie widzi, nie jest dokumentacją forma
 | `snow-self-approved.json` | zatwierdzony przez grupę wnioskodawcy | **PADA** — samo-zatwierdzenie |
 | `snow-wrong-project.json` | ticket dotyczy innego projektu niż payload | **PADA** — podmiana celu po approvalu |
 | `dispatch-example.json` | kompletny payload `repository_dispatch` | wejście dla `gh api …/dispatches` |
+| `vpcsc-violation-dryrun.json` | 4 naruszenia dry-run w kształcie zwracanym przez `gcloud logging read` | `violations_report.py` przypisuje **3** członkowi, 4. trafia do „spoza listy członków" |
 
 ```bash
 python3 tools/snow_verify.py --ticket RITM0000001 --expect-project prj-x-test \
@@ -21,3 +22,19 @@ python3 tools/snow_verify.py --ticket RITM0000001 --expect-project prj-x-test \
 
 Trzy z pięciu plików opisują przypadki **negatywne** i to jest sedno: bramka, która nigdy nie odrzuca,
 przechodzi każdy test pozytywny i nie chroni niczego.
+
+## `vpcsc-violation-dryrun.json` — kształt zdjęty z żywej organizacji, nie wymyślony
+
+Ten fixture powstał z **anonimizowanych** wpisów audytowych żywego perimetru (podmienione numery projektów,
+identyfikatory i tokeny; `principalEmail` GCP redaguje sam). Wymyślony fixture był tu wcześniej problemem,
+nie ułatwieniem: raport przez cały czas testowano na pustym wejściu `[]`, gdzie każdy członek ma 0 niezależnie
+od tego, czy funkcja przypisująca w ogóle działa — i nie działała.
+
+Cztery wpisy to cztery różne sposoby, na jakie `metadata.resourceNames[0]` **nie jest** numerem członka:
+
+| Wpis | `resourceNames[0]` kończy się na | Gdzie naprawdę jest członek |
+|---|---|---|
+| ingress, Vertex AI | `…/locations/europe-west4` → **nazwa regionu** | `ingressViolations[].targetResource` |
+| ingress, Logging | `prj-example-vertex-dev` → **`project_id`, nie numer** | `ingressViolations[].targetResource` |
+| egress, Cloud Storage | numer **obcego** projektu (kolejność listy bywa różna) | `egressViolations[].source` |
+| ingress, projekt spoza `members/` | `prj-not-a-member` | — (poprawnie „spoza listy") |
