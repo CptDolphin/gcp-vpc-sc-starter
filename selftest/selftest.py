@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
 
 try:
     import yaml
@@ -86,6 +87,7 @@ def bootstrap() -> None:
         ".github/workflows/expiry-sweep.yml", ".github/workflows/break-glass.yml",
         ".github/workflows/external-intake.yml", ".github/workflows/publish-gates.yml",
         ".github/workflows/starter-drift.yml", ".starter-sync",
+        ".github/workflows/boundary-probe.yml",
         "contrib/action.yml", "contrib/validate-local.sh", "contrib/README.md",
         ".gitignore", ".pre-commit-config.yaml", ".tool-versions",
         "perimeter/policy.yaml", "perimeter/access-levels/corp.yaml", "perimeter/contributors.yaml",
@@ -1703,7 +1705,7 @@ def test_preflight() -> None:
 def test_workflows() -> None:
     print("\n== workflows ==")
     wf = sorted((ROOT / ".github/workflows").glob("*.yml"))
-    check("jedenascie workflow po rozpakowaniu", len(wf) == 11, str([f.name for f in wf]))
+    check("dwanascie workflow po rozpakowaniu", len(wf) == 12, str([f.name for f in wf]))
 
     if have("actionlint"):
         p = sh(["actionlint", *[str(f) for f in wf]])
@@ -2152,6 +2154,110 @@ def test_samodzielnosc() -> None:
           not skan.skanuj_tekst("Zwykly akapit o perimetrze i regulach ingress. Projekt 123456789012."))
 
 
+def test_boundary_probe() -> None:
+    """Sonda blokady — jedyny workflow, ktorego wynik jest ZDANIEM O SWIECIE, a nie o konfiguracji.
+
+    Dlatego jest testowana inaczej niz reszta: nie czytamy, czy w pliku stoja wlasciwe slowa, tylko
+    URUCHAMIAMY jej logike werdyktu na spreparowanych wynikach sond. Badany tryb awarii jest jeden i jest
+    kosztowny: chroniona usluga z WYLACZONYM API oraz brak roli IAM zwracaja ten SAM `PERMISSION_DENIED`
+    co odmowa VPC-SC. Sonda, ktora liczy kod bledu, zamienia awarie srodowiska w dowod dzialania granicy.
+    """
+    print("\n== sonda blokady (boundary-probe) ==")
+    wf = ROOT / ".github/workflows/boundary-probe.yml"
+    check("boundary-probe istnieje po rozpakowaniu", wf.exists())
+    if not wf.exists():
+        return
+    tresc = wf.read_text()
+
+    # Sonda ma czytac WYLACZNIE. Prawo zapisu w tym workflow oznaczaloby narzedzie, ktore w trakcie
+    # dowodzenia potrafi zmienic to, co dowodzi.
+    check("boundary-probe woła tożsamością planu (read-only), nie apply",
+          "PLAN_SERVICE_ACCOUNT" in tresc and "APPLY_SERVICE_ACCOUNT" not in tresc)
+
+    # Wyciagamy kod werdyktu z pliku i uruchamiamy go na wejsciach, ktorych nigdy nie widzial.
+    kod = re.search(r"python3 - <<'PY'[^\n]*\n(.*?)\n\s*PY\n", tresc, re.S)
+    check("boundary-probe: da sie wyodrebnic kod werdyktu", kod is not None)
+    if not kod:
+        return
+    kod_werdyktu = textwrap.dedent(kod.group(1))
+
+    def przelot(oczekiwanie: str, sondy: dict) -> tuple[int, str]:
+        kat = pathlib.Path(tempfile.mkdtemp(prefix="vpcsc-probe-"))
+        (kat / "sondy").mkdir()
+        for nazwa, (rc, out) in sondy.items():
+            (kat / "sondy" / f"{nazwa}.rc").write_text(str(rc))
+            (kat / "sondy" / f"{nazwa}.out").write_text(out)
+        (kat / "werdykt.py").write_text(kod_werdyktu)
+        p = sh([sys.executable, "werdykt.py"], cwd=kat,
+               env={**os.environ, "OCZEKIWANIE": oczekiwanie, "PROJEKT": "prj-example-vertex-dev"})
+        return p.returncode, p.stdout + p.stderr
+
+    ODMOWA_VPCSC = ('ERROR: (gcloud.logging.buckets.list) PERMISSION_DENIED: Request is prohibited by '
+                    "organization's policy. vpcServiceControlsUniqueIdentifier: AbCdEf123")
+    API_WYLACZONE = ('ERROR: PERMISSION_DENIED: Cloud Monitoring API has not been used in project '
+                     "000000000000 before or it is disabled.")
+    BRAK_ROLI = ('ERROR: PERMISSION_DENIED: The caller does not have permission')
+
+    # 1. Przelot PRZED promocja: wszystko przechodzi -> zielono.
+    rc, out = przelot("open", {n: (0, "[]") for n in
+                               ("chroniona-z-regula", "chroniona-bez-reguly",
+                                "chroniona-inna-usluga", "spoza-granicy")})
+    check("boundary-probe: `open` z czterema przelotami -> zgodne", rc == 0, out[-600:])
+
+    # 2. Przelot PO promocji, uczciwy: chronione bez reguly odmowione PRZEZ VPC-SC, kontrole przechodza.
+    rc, out = przelot("blocked", {
+        "chroniona-z-regula": (0, "[]"),
+        "chroniona-bez-reguly": (1, ODMOWA_VPCSC),
+        "chroniona-inna-usluga": (1, ODMOWA_VPCSC),
+        "spoza-granicy": (0, "[]"),
+    })
+    check("boundary-probe: `blocked` z odmowa VPC-SC -> zgodne", rc == 0, out[-600:])
+
+    # 3. PULAPKA. Ten sam kod bledu, inna przyczyna: API wylaczone. Sonda MUSI to odrzucic — inaczej
+    #    policzylaby awarie srodowiska jako dowod dzialania granicy (dokladnie ten blad zepsul juz raz
+    #    eksperyment w tym materiale).
+    rc, out = przelot("blocked", {
+        "chroniona-z-regula": (0, "[]"),
+        "chroniona-bez-reguly": (1, API_WYLACZONE),
+        "chroniona-inna-usluga": (1, ODMOWA_VPCSC),
+        "spoza-granicy": (0, "[]"),
+    })
+    check("boundary-probe: wylaczone API NIE jest liczone jako dowod blokady",
+          rc != 0 and "API WYLACZONE" in out, out[-600:])
+
+    # 4. Druga postac tej samej pulapki: brak roli IAM.
+    rc, out = przelot("blocked", {
+        "chroniona-z-regula": (0, "[]"),
+        "chroniona-bez-reguly": (1, BRAK_ROLI),
+        "chroniona-inna-usluga": (1, ODMOWA_VPCSC),
+        "spoza-granicy": (0, "[]"),
+    })
+    check("boundary-probe: brak roli IAM NIE jest liczony jako dowod blokady",
+          rc != 0 and "BRAK ROLI" in out, out[-600:])
+
+    # 5. KONTROLA NEGATYWNA musi miec zeby: gdy po promocji odmawia takze usluga SPOZA granicy, to znaczy,
+    #    ze zepsulismy projekt, a nie ze granica dziala. Sonda ma to zglosic, nie przemilczec.
+    rc, out = przelot("blocked", {
+        "chroniona-z-regula": (0, "[]"),
+        "chroniona-bez-reguly": (1, ODMOWA_VPCSC),
+        "chroniona-inna-usluga": (1, ODMOWA_VPCSC),
+        "spoza-granicy": (1, ODMOWA_VPCSC),
+    })
+    check("boundary-probe: odmowa uslugi SPOZA granicy lamie przelot (projekt zepsuty, nie granica)",
+          rc != 0, out[-600:])
+
+    # 6. KONTROLA POZYTYWNA musi miec zeby: gdy odmowa dotyka takze ruchu DOZWOLONEGO regula ingress,
+    #    to nie jest dzialajaca granica, tylko odciety projekt.
+    rc, out = przelot("blocked", {
+        "chroniona-z-regula": (1, ODMOWA_VPCSC),
+        "chroniona-bez-reguly": (1, ODMOWA_VPCSC),
+        "chroniona-inna-usluga": (1, ODMOWA_VPCSC),
+        "spoza-granicy": (0, "[]"),
+    })
+    check("boundary-probe: odmowa ruchu DOZWOLONEGO regula lamie przelot",
+          rc != 0, out[-600:])
+
+
 def main() -> int:
     bootstrap()
     test_samodzielnosc()
@@ -2172,6 +2278,7 @@ def main() -> int:
     test_eksperyment_wyscigu()
     test_workflows()
     test_workflowy_wykonywalne()
+    test_boundary_probe()
     test_schemas()
 
     ok = sum(1 for _, c, _ in results if c)

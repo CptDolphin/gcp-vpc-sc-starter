@@ -38,6 +38,17 @@ gh workflow run starter-drift.yml && gh run watch
    dziś wiadomo, że kłamał. **Czerwony `starter-drift` = promocja czeka**, bo narzędzia produkujące dowód
    są częścią tego, co jest przestarzałe.
 
+0b. **Zmierz, że wywołanie DZIAŁA, zanim je zablokujesz** — inaczej krok 6 nie ma z czym porównać:
+
+```bash
+gh workflow run boundary-probe.yml -f project=<PROJEKT_CZLONKA> -f expect=open && gh run watch
+```
+
+   Przelot musi być ZIELONY. Chroniona usługa z wyłączonym API i brak roli IAM zwracają ten sam
+   `PERMISSION_DENIED`, co odmowa VPC-SC — bez tego pomiaru „przed" nie da się odróżnić granicy, która
+   zadziałała, od projektu, który i tak był zepsuty. Sonda nazywa te trzy stany osobno i nie zaliczy
+   dwóch pierwszych jako dowodu.
+
 1. Uruchom raport za pełne okno:
 
 ```bash
@@ -61,7 +72,20 @@ gh workflow run violations-report.yml -f days=14
 
 5. Merge → apply czeka na zatwierdzenie w environment `perimeter-apply`.
 
-6. **Zmierz po apply** (done = zmierzone):
+6. **Zmierz po apply** (done = zmierzone). Najpierw ta sama sonda co w kroku 0b, tylko z drugim
+   oczekiwaniem — to jest **jedyny** dowód, że granica cokolwiek blokuje:
+
+```bash
+gh workflow run boundary-probe.yml -f project=<PROJEKT_CZLONKA> -f expect=blocked && gh run watch
+```
+
+   Zielony przelot znaczy komplet czterech rzeczy naraz: chronione wywołanie bez reguły zostało odmówione
+   **z powodem VPC-SC** (nie z braku roli, nie z wyłączonego API), ruch dozwolony regułą ingress NADAL
+   przechodzi, usługa spoza `restricted_services` NADAL działa (czyli projekt nie jest po prostu zepsuty),
+   a odmowa ma niezależny drugi dowód we wpisie audytowym. Czerwony przelot mówi, KTÓRA z tych czterech
+   nie zaszła.
+
+   Reszta pomiaru:
 
 ```bash
 terraform -chdir=terraform output members_enforced        # członek na liście
