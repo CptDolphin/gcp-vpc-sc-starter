@@ -32,12 +32,28 @@ jobs:
 
       - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2.2.1
 
+      # The declarations are built BEFORE the logs are read, because they decide WHERE to read from.
+      - name: collect declarations
+        run: |
+          pip install --quiet pyyaml
+          python3 tools/collect_declarations.py > declarations.json
+
       # dryRun=true is the whole filter: these are the calls that WOULD have been blocked. After a member is
       # promoted the same calls appear with dryRun=false and an actual denial — which is what we are avoiding.
       #
+      # WHY EVERY MEMBER PROJECT IS READ SEPARATELY, and not just the organization. A VPC-SC audit entry is
+      # written to the log bucket of the project that OWNS the protected resource — i.e. the member — not to
+      # the organization's. `--organization=` reads `organizations/<id>/logs/…` and nothing below it, so the
+      # scope that looks the most complete is the one that sees the least. Measured on the live perimeter:
+      # organization scope returned 0 entries while the single member project held 30 for the same filter
+      # and the same 14-day window. That zero is indistinguishable from a clean window, and a clean window
+      # is exactly what promotion_gate accepts as proof — so the wrong scope alone was enough to promote a
+      # member with 30 violations. The organization scope stays in the list because org-level resources do
+      # log there; it is added to the member scopes, not chosen instead of them.
+      #
       # The explicit `|| exit 1` is not belt-and-braces. Measured: on a denied read `gcloud logging read`
-      # prints `[]` on STDOUT and the error only on stderr, so the redirect below turns "I was not allowed
-      # to read the logs" into "there were no violations" — a clean window manufactured from a permission
+      # prints `[]` on STDOUT and the error only on stderr, so a bare redirect turns "I was not allowed to
+      # read the logs" into "there were no violations" — a clean window manufactured from a permission
       # failure. The exit code is the only signal that tells those two apart, so it has to be checked.
       - name: read audit logs
         env:
@@ -45,19 +61,42 @@ jobs:
           DAYS: ${{ github.event.inputs.days || '14' }}
         run: |
           set -o pipefail
-          gcloud logging read \
-            'protoPayload.metadata."@type"="type.googleapis.com/google.cloud.audit.VpcServiceControlAuditMetadata"
-             AND protoPayload.metadata.dryRun="true"' \
-            --organization="$ORG_ID" --freshness="${DAYS}d" --format=json > raw.json || {
-              echo "::error::gcloud logging read failed — no report, no evidence, promotion stays blocked"
+          FILTER='protoPayload.metadata."@type"="type.googleapis.com/google.cloud.audit.VpcServiceControlAuditMetadata"
+                  AND protoPayload.metadata.dryRun="true"'
+          mkdir -p .logs
+          czytaj() {  # $1 = scope flag, $2 = output file stem
+            gcloud logging read "$FILTER" "$1" --freshness="${DAYS}d" --format=json > ".logs/$2.json" || {
+              echo "::error::gcloud logging read $1 failed — no report, no evidence, promotion stays blocked"
               exit 1
             }
-          echo "entries: $(python3 -c 'import json,sys;print(len(json.load(open("raw.json"))))')"
+          }
+          czytaj "--organization=$ORG_ID" org
+          python3 -c 'import json;[print(m["project_id"]) for m in json.load(open("declarations.json"))["members"].values()]' > members.txt
+          i=0
+          while IFS= read -r pid; do
+            [ -n "$pid" ] || continue
+            i=$((i + 1))
+            czytaj "--project=$pid" "member-$i"
+          done < members.txt
+          echo "scopes read: organization + $i member project(s)"
+          # De-duplicated by insertId: organization and project scopes may legitimately overlap, and a
+          # violation counted twice would inflate the number the promotion gate reads.
+          python3 -c '
+          import json, pathlib
+          seen, out = set(), []
+          for p in sorted(pathlib.Path(".logs").glob("*.json")):
+              for e in json.loads(p.read_text()):
+                  k = e.get("insertId")
+                  if k in seen:
+                      continue
+                  seen.add(k)
+                  out.append(e)
+          json.dump(out, open("raw.json", "w"))
+          print("entries:", len(out))
+          '
 
       - name: build the report
         run: |
-          pip install --quiet pyyaml
-          python3 tools/collect_declarations.py > declarations.json
           python3 tools/violations_report.py \
             --logs raw.json --declarations declarations.json \
             --json-out violations.json --markdown-out violations.md
