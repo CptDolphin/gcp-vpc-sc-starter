@@ -113,7 +113,15 @@ jobs:
       - run: terraform -chdir=terraform validate
       # Natywne testy renderera — sprawdzają, czy YAML tłumaczy się na właściwe reguły. Bez credentiali:
       # `command = plan` na locals, żadnego apply.
+      #
+      # ATRAPA TOKENU, NIE POŚWIADCZENIE. Provider `google` odmawia INICJALIZACJI, gdy nie widzi żadnej
+      # tożsamości — niezależnie od tego, że testy renderera nie wołają API. Bez tej zmiennej job padał
+      # na `could not find default credentials`, czyli jedyna bramka na logikę renderera mówiła o czymś
+      # innym niż to, co bada. Wartość jest jawnie bezużyteczna: pozwala providerowi wystartować i nic
+      # nie autoryzuje. Ten job nadal NIE MA i nie może mieć dostępu do chmury (brak `id-token: write`).
       - run: terraform -chdir=terraform test
+        env:
+          GOOGLE_OAUTH_ACCESS_TOKEN: nie-uzywany-testy-sa-plan-only
 
   tflint:
     name: tflint (static analysis)

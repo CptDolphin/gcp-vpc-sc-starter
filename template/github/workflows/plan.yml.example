@@ -42,11 +42,17 @@ jobs:
         with:
           terraform_version: "1.15.5"
 
+      # `-chdir` przenosi katalog roboczy WYŁĄCZNIE terraformowi — przekierowanie `>` wykonuje powłoka
+      # w katalogu joba, czyli w korzeniu repo. `> plan.json` kładło więc plik obok `terraform/`, a kroki
+      # niżej (conftest, sha256sum, upload-artifact) czytają `terraform/…`. Efekt: job padał na
+      # `stat terraform/plan.json: no such file or directory` PO udanym planie, czyli bramki OPA na planie
+      # nie wykonywały się ani razu. Ścieżka jest wypisana wprost, żeby producent i konsument pliku
+      # zgadzali się bez wiedzy o tym, czym `-chdir` jest, a czym nie.
       - name: plan
         run: |
           terraform -chdir=terraform init -input=false
           terraform -chdir=terraform plan -input=false -lock-timeout=5m -out=tfplan.binary
-          terraform -chdir=terraform show -json tfplan.binary > plan.json
+          terraform -chdir=terraform show -json tfplan.binary > terraform/plan.json
 
       - name: install conftest
         run: |
