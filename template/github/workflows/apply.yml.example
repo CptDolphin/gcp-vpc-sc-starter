@@ -1,13 +1,23 @@
 # .github/workflows/apply.yml
 # The ONLY job in this repository that mutates the perimeter.
 #
-# Two things make it safe, and both are load-bearing:
-#   * environment `perimeter-apply` with required reviewers — a merged PR still does not apply until a human
-#     approves the run. This gate lives in GitHub, independent of CODEOWNERS.
+# Three things make it safe. Two are properties of THIS FILE and travel with it; the third is a repository
+# SETTING, and that difference is the whole point of this paragraph — a comment cannot assert a setting it
+# does not control, and a gate that is only asserted is not a gate:
+#   * environment `perimeter-apply` — two layers, often confused for one. The layer that always works: the
+#     WIF binding hands the write-capable identity only to a token carrying this environment claim, and the
+#     environment's DEPLOYMENT BRANCH POLICY decides which refs may claim it. Those two together are what
+#     makes "only the default branch mutates the perimeter" true. The layer that may or may not be there:
+#     REQUIRED REVIEWERS, so that a merged PR still waits for a human. It is a paid GitHub feature — on a
+#     plan without it the API rejects the setting and the environment silently ends up with no protection
+#     rule at all. `tools/bootstrap_github.sh` therefore READS THE SETTING BACK and refuses to report
+#     success on a missing human gate; `docs/1`, stage 4, says what to write down when there is none.
 #   * single-flight concurrency — Access Context Manager modifies the org-level policy as a whole and guards
 #     it with an eTag, so two parallel applies do not corrupt anything silently: the loser fails with
 #     `Error 400: The eTag provided ... does not match`. The reason to serialize is RELIABILITY — without it
 #     roughly every overlapping run fails and has to be retried by hand (measured, see DEC-6).
+#   * the policy gates run AGAIN here, on the plan built from the default branch — see the step below. A
+#     gate that only runs on the pull request protects the pull request, not the boundary.
 
 name: apply
 
@@ -35,12 +45,15 @@ jobs:
   apply:
     name: terraform apply
     runs-on: ubuntu-latest
-    environment: perimeter-apply # required reviewers: networking + security
+    environment: perimeter-apply # this is what puts the environment claim into the OIDC token — see header
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      # The write-capable service account. Its WIF condition pins ref == refs/heads/main AND
-      # environment == perimeter-apply, so this identity is unreachable from a pull request.
+      # The write-capable service account. The WIF binding pins exactly ONE attribute — the
+      # `perimeter-apply` environment claim. There is no ref in it, and reading a ref restriction into it is
+      # the mistake this comment exists to prevent: what keeps a pull request (or any other branch) away
+      # from this identity is the ENVIRONMENT's deployment branch policy. Without that policy any ref whose
+      # job declares `environment: perimeter-apply` mints exactly the same token.
       - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.9
         with:
           workload_identity_provider: ${{ vars.WIF_PROVIDER }}

@@ -36,8 +36,9 @@ variable "apply_environment" {
   default     = "perimeter-apply"
 
   validation {
-    # Pusta nazwa environment w `attribute_condition` puli WIF dałaby warunek, który spełnia KAŻDY token z
-    # tego repozytorium — w tym token z pull requesta. Cała bramka ludzkiego zatwierdzenia przestałaby istnieć.
+    # Pusta nazwa w `principalSet` konta apply dałaby zbiór dopasowujący KAŻDY token z tego repozytorium —
+    # w tym token z pull requesta. Rozdział plan/apply przestałby istnieć, a jedyną pozostałą barierą byłaby
+    # polityka gałęzi environment, o której ten stack nic nie wie.
     condition     = length(trimspace(var.apply_environment)) > 0
     error_message = "apply_environment nie może być puste — to ono odcina tokeny z pull requestów od konta apply."
   }
