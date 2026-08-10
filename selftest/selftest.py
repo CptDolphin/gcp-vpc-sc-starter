@@ -103,8 +103,10 @@ def bootstrap() -> None:
         "terraform/contract.tf", "terraform/tests/renderer.tftest.hcl", "terraform/monitoring.tf",
         "iam-bootstrap/README.md", "iam-bootstrap/main.tf", "iam-bootstrap/variables.tf",
         "iam-bootstrap/versions.tf", "iam-bootstrap/terraform.tfvars.sample",
+        "iam-bootstrap/outputs.tf",
         "tools/attribute_budget.py", "tools/collect_declarations.py", "tools/preflight_check.sh",
         "tools/render_member.py", "tools/snow_verify.py", "tools/violations_report.py",
+        "tools/deny_check.sh",
         "tools/bootstrap_github.sh", "docs/access-request.md",
         "tools/check_supported_services.py",
         "tools/perimeter_to_policy.py", "tools/brownfield_import.sh",
@@ -529,6 +531,115 @@ def test_iam_bootstrap() -> None:
           any("sa-vpcsc-apply@" in m for m in czlonkowie), f"member={czlonkowie!r}")
     check("iam-bootstrap: rola monitoringu NIE idzie do konta plan (plan zostaje read-only)",
           not any("sa-vpcsc-plan@" in m for m in czlonkowie), f"member={czlonkowie!r}")
+
+    # --- warstwa deny: odczyt zawezony, zapis za flaga ------------------------------------------------
+    # DLACZEGO TEN GUARD ISTNIEJE: `403` z `denypolicies.get` jest NIEODROZNIALNY od braku zasobu, wiec
+    # przez caly czas nie dalo sie powiedziec, czy guardrail stoi — `terraform plan` pokazywal `1 to add`
+    # w obu przypadkach, a `import` padal. Odczyt (rola wlasna) i zapis (`roles/iam.denyAdmin`, jedyna
+    # rola z `denypolicies.create`) maja tu wiec ROZNYCH wlascicieli i to jest niezmiennik, nie detal.
+    def plan_deny(flaga, out):
+        cmd = ["terraform", f"-chdir={d}", "plan", "-no-color", "-input=false", "-lock=false", f"-out={out}"]
+        return sh(cmd + baza + [f"-var=manage_deny_policy={flaga}"])
+
+    wyniki = {}
+    for flaga in ("true", "false"):
+        out = f"zz_deny_{flaga}.tfplan"
+        p = plan_deny(flaga, out)
+        wyniki[flaga] = zasoby_planu(out) if p.returncode == 0 else None
+        check(f"iam-bootstrap: plan przechodzi przy manage_deny_policy={flaga}",
+              p.returncode == 0, (p.stdout[-300:] + p.stderr[-600:]))
+        (d / out).unlink(missing_ok=True)
+
+    def typy(flaga, typ):
+        return [r for r in (wyniki[flaga] or []) if r["type"] == typ]
+
+    # ANTY-TAUTOLOGIA W OBIE STRONY: guard sprawdzajacy tylko `false` przeszedlby takze wtedy, gdyby zasob
+    # zniknal z pliku na zawsze — czyli chwalilby usuniecie warstwy, ktorej pilnuje.
+    check("iam-bootstrap: manage_deny_policy=true TWORZY polityke deny",
+          len(typy("true", "google_iam_deny_policy")) == 1)
+    check("iam-bootstrap: manage_deny_policy=false NIE tworzy polityki deny (swiadoma rezygnacja)",
+          not typy("false", "google_iam_deny_policy"))
+    # Odczyt zostaje TAKZE przy wylaczonym zapisie — i to jest sedno. Wdrozenie bez `roles/iam.denyAdmin`
+    # nie tworzy polityki, ale musi umiec sprawdzic, czy ktos nie utworzyl jej obok, poza tym stackiem.
+    czytelnik = [r for r in (wyniki["false"] or [])
+                 if r["type"] == "google_organization_iam_custom_role" and r["name"] == "deny_reader"]
+    check("iam-bootstrap: rola ODCZYTU deny powstaje takze przy manage_deny_policy=false",
+          len(czytelnik) == 1)
+
+    perms_deny = set((czytelnik[0]["values"].get("permissions") if czytelnik else []) or [])
+    check("iam-bootstrap: rola odczytu deny niesie get+list", {"iam.denypolicies.get", "iam.denypolicies.list"} <= perms_deny,
+          f"permissions={sorted(perms_deny)}")
+    # Te trzy maja `customRolesSupportLevel = NOT_SUPPORTED`: dopisanie ich tutaj nie daje zapisu, tylko
+    # wywraca apply. Guard jest wiec ostrzezeniem przed pozorna „naprawa" braku uprawnien do apply.
+    # `perms_deny` MUSI byc niepuste, inaczej ten guard przechodzi takze wtedy, gdy plan padl albo rola
+    # zniknela z pliku — czyli chwali brak roli za to, ze nie ma w niej uprawnien zapisu.
+    zapisujace = {p for p in perms_deny if p.startswith("iam.denypolicies.") and not p.endswith((".get", ".list"))}
+    check("iam-bootstrap: rola odczytu deny BEZ uprawnien zapisu (i tak NOT_SUPPORTED w roli wlasnej)",
+          bool(perms_deny) and not zapisujace, f"permissions={sorted(perms_deny)}, zapisujace={sorted(zapisujace)}")
+
+    # Kontrakt `deny_reader_principals` — ten sam tryb awarii co przy `contract_reader_groups`: `default = []`
+    # sprawia, ze zadna sciezka planu nigdy nie dotyka wartosci, wiec walidacja i przyklad w tfvars moga sie
+    # rozjechac w ciszy. Mierzymy WYNIK planu, nie tekst.
+    def plan_principals(wartosc):
+        return sh(["terraform", f"-chdir={d}", "plan", "-no-color", "-input=false", "-lock=false"]
+                  + baza + [f"-var=deny_reader_principals={json.dumps(wartosc)}"])
+
+    check("iam-bootstrap: deny_reader_principals PRZYJMUJE pelnego principala (test anty-tautologiczny)",
+          plan_principals(["group:grp-example-iam@example.com"]).returncode == 0)
+    for zly in ("domain:example.com", "allUsers", "grp-example-iam@example.com"):
+        check(f"iam-bootstrap: deny_reader_principals ODRZUCA {zly}",
+              plan_principals([zly]).returncode != 0)
+
+    sample_deny = re.search(r"^#\s*deny_reader_principals\s*=\s*\[(.*?)\]", sample, re.M)
+    przyklad_deny = re.findall(r'"([^"]+)"', sample_deny.group(1)) if sample_deny else []
+    check("iam-bootstrap: przyklad deny_reader_principals z tfvars.sample przechodzi walidacje",
+          bool(przyklad_deny) and plan_principals(przyklad_deny).returncode == 0,
+          f"przyklad={przyklad_deny!r}")
+
+
+# --------------------------------------------------------------------- narzedzie deny_check
+def test_deny_check() -> None:
+    """Trzy werdykty narzedzia rozstrzygajacego, czy guardrail istnieje — bo dwa to za malo.
+
+    CALA WARTOSC tego skryptu polega na tym, ze NIE MYLI `403` z `404`. Test, ktory sprawdza wylacznie
+    sciezke `200`, przeszedlby takze na implementacji raportujacej odmowe odczytu jako „nie ma" — czyli
+    na dokladnie tym bledzie, dla ktorego to narzedzie powstalo. Dlatego mierzymy WSZYSTKIE trzy kody.
+
+    `curl` i `gcloud` sa tu podmienione na zaslepki: sprawdzamy LOGIKE werdyktu, a nie API Google.
+    """
+    print("\n== deny_check ==")
+    skrypt = ROOT / "tools" / "deny_check.sh"
+    check("deny_check: narzedzie rozpakowane i wykonywalne",
+          skrypt.exists() and os.access(skrypt, os.X_OK))
+    if not skrypt.exists():
+        return
+
+    stub = ROOT / "zz_stub_bin"
+    stub.mkdir(exist_ok=True)
+    (stub / "gcloud").write_text("#!/usr/bin/env bash\necho stub-token\n")
+    # Zaslepka `curl` honoruje `-o <plik>` i `-w %{http_code}` — czyli dokladnie te dwa zachowania, na
+    # ktorych opiera sie skrypt. Kod HTTP przychodzi ze zmiennej srodowiskowej testu.
+    (stub / "curl").write_text(
+        "#!/usr/bin/env bash\nout=\"\"\n"
+        "while [ $# -gt 0 ]; do case \"$1\" in -o) shift; out=\"$1\";; esac; shift; done\n"
+        "[ -n \"$out\" ] && printf '{\"name\":\"stub\"}' > \"$out\"\n"
+        "printf '%s' \"$STUB_HTTP\"\n")
+    for f in ("gcloud", "curl"):
+        (stub / f).chmod(0o755)
+
+    srodowisko = dict(os.environ, PATH=f"{stub}:{os.environ['PATH']}")
+    kody = {}
+    for http, oczekiwany, opis in (("200", 0, "ISTNIEJE"), ("404", 1, "NIE MA"), ("403", 2, "NIE WIADOMO")):
+        p = sh([str(skrypt), "--org", "123456789012"], env=dict(srodowisko, STUB_HTTP=http))
+        kody[http] = p.returncode
+        check(f"deny_check: HTTP {http} -> {opis} (kod {oczekiwany})", p.returncode == oczekiwany,
+              f"rc={p.returncode}, out={p.stdout[-200:]}{p.stderr[-200:]}")
+
+    # NAJWAZNIEJSZA ASERCJA TEGO TESTU: gdyby ktos „uproscil" skrypt do dwoch werdyktow, guardy wyzej
+    # moglyby zostac przepisane pod nowe kody, a ten warunek nadal odrzuci sklejenie odmowy z brakiem.
+    check("deny_check: 403 i 404 daja ROZNE kody wyjscia (odmowa to nie „nie ma”)",
+          kody.get("403") != kody.get("404"), f"kody={kody}")
+    shutil.rmtree(stub, ignore_errors=True)
 
 
 # --------------------------------------------------------------------- kontrakt
@@ -2001,6 +2112,7 @@ def main() -> int:
     test_samodzielnosc()
     test_terraform()
     test_iam_bootstrap()
+    test_deny_check()
     test_contract()
     test_kontrakt_dwie_publikacje()
     test_przyklad_repo_dywizji()
