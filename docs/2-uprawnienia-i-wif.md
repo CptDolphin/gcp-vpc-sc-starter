@@ -190,7 +190,23 @@ nie działają na folderze); zawężamy więc to, co jesteśmy w stanie zawęzi�
 | Rola | Zakres | Do jakiej operacji | Bez niej |
 |---|---|---|---|
 | `roles/storage.objectAdmin` | prefiks bucketa stanu | zapis stanu Terraform + lock | apply nie zapisze stanu → następny plan zobaczy świat niezgodny z rzeczywistością |
+| custom rola `vpcScMonitoringWriter` | projekt z `monitoring.project_id` | pełny cykl życia metryk logowych i polityk alertów perimetru (`terraform/monitoring.tf`) | **apply pada zawsze**, także przy zmianie niedotyczącej monitoringu: `terraform apply` zaczyna od refreshu, więc musi PRZECZYTAĆ te zasoby (`Error 403: Permission 'logging.logMetrics.get' denied`) |
 | `roles/iam.workloadIdentityUser` **na `sa-vpcsc-apply`** | to konto serwisowe | impersonacja z puli WIF, wyłącznie dla workflow apply | brak ścieżki keyless dla apply |
+
+**Pułapka, która kosztowała dwa czerwone applye:** „konto apply zapisuje, konto plan czyta" to skrót
+myślowy. `terraform apply` **zaczyna od odświeżenia stanu**, więc apply jest nadzbiorem planu i musi umieć
+odczytać *wszystko*, czym zarządza — łącznie z zasobami, których w danym przebiegu nie rusza. Konto plan
+czytało metryki i alerty „przypadkiem", bo ma read-only role na organizacji; konto apply nie miało do nich
+żadnego prawa. Każdy nowy typ zasobu w `terraform/` domagaj się sprawdzenia po TEJ stronie tabeli, nie
+tylko po stronie planu.
+
+`vpcScMonitoringWriter` zamiast pary `roles/monitoring.editor` + `roles/logging.configWriter`: ta para
+daje na całym projekcie także tworzenie **sinków** i kubełków logów, czyli ścieżkę wyprowadzenia logów,
+o którą nikt nie prosił. Bierzemy dwa typy zasobów i nic poza nimi — ta sama zasada, co przy
+`vpcScPerimeterWriter`. `delete` jest tu natomiast **obecne**, w przeciwieństwie do perimetru: metryka
+i alert są odtwarzalne z kodu jednym apply, a część zmian `metric_descriptor` provider realizuje jako
+replace; perimetru odtworzyć się nie da, bo `servicePerimeters.create` świadomie nie należy do żadnej roli
+tego pipeline'u.
 | (opcjonalnie) `roles/logging.viewer` | organizacja | raport naruszeń dry-run czyta audit-logi (`protoPayload.metadata.dryRun=true`) | nie da się udowodnić, że okno obserwacji było czyste — a bez tego promocja do enforced jest zgadywaniem. Można też nadać osobnej tożsamości raportującej |
 
 ### 3.3 IAM Deny — pas bezpieczeństwa ponad rolą
@@ -408,6 +424,10 @@ Prosimy o (środowisko: <org GCP>, repozytorium: ORG/gcp-vpc-sc):
    - custom rola vpcScPerimeterWriter               [ORGANIZACJA]  — servicePerimeters.update + accessLevels.create/update
                                                                      (BEZ create/delete perimetru — patrz uzasadnienie)
    - roles/storage.objectAdmin                      [prefiks bucketa stanu] — zapis stanu TF
+   - custom rola vpcScMonitoringWriter              [PROJEKT monitoringu] — logMetrics.* + alertPolicies.*
+                                                                     (tylko te dwa typy; BEZ sinków i kubełków logów.
+                                                                      apply odświeża stan, więc bez tego pada na 403
+                                                                      przy każdej zmianie, także niedotyczącej monitoringu)
    - (opcjonalnie) roles/logging.viewer             [ORGANIZACJA]  — raport naruszeń dry-run
 
 3. IAM Deny [ORGANIZACJA] dla obu SA:
