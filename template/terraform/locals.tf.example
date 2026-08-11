@@ -77,18 +77,45 @@ locals {
   # per-member pierwszy zespół, który zapomni go wybrać, wypadłby ze skanowania w momencie promocji.
   baseline_ingress = lookup(local.policy, "baseline_ingress", [])
 
+  # `sources` REGULY INGRESS NIE JEST OPCJONALNE — regula bez zrodla nie autoryzuje niczego.
+  #
+  # ZMIERZONE na zywym ACM: regula baseline z `access_levels: []` i `allow_without_access_level: true`
+  # stala w konfiguracji od osmiu minut, a wywolanie dokladnie tej tozsamosci na dokladnie tej metodzie
+  # i tak wygenerowalo naruszenie z `violationReason: NO_MATCHING_ACCESS_LEVEL`. Renderer produkowal
+  # `ingress_from` z sama lista `identities` i ZERO blokow `sources` (patrz `dynamic "sources"` w rules.tf),
+  # bo lista access levels byla pusta. API nie zna ksztaltu „autoryzuj po samej tozsamosci" — brak zrodla
+  # czyta jako brak dopasowania, wiec regula wyglada w konsoli na obecna i nie przepuszcza nic.
+  #
+  # To jest najgorszy wariant bledu w tym repo: reguly baseline istnieja WLASNIE po to, zeby przeplywy
+  # platformy (skaner, raport naruszen) przezyly promocje czlonka. Bezczynne zabieraja te ochrone w chwili,
+  # w ktorej zaczyna byc potrzebna, a awaria wyglada na problem z IAM, nie na skutek promocji.
+  #
+  # `accessLevel: "*"` to jedyny zapis, ktory realizuje intencje „dowolne pochodzenie sieciowe, autoryzacja
+  # wylacznie tozsamoscia" (dokumentacja VPC-SC, ingress-egress-rules). Nie jest to poluzowanie reguly
+  # „ingress zawsze z access levelem" — ta regula zyje w OPA i wymaga jawnego `allow_without_access_level`
+  # z approvalem Security. Tutaj tylko przestajemy renderowac ksztalt, ktorego API nie honoruje.
+  baseline_source_any = "*"
+
   baseline_rules_all = {
     for r in flatten([
       for mkey, m in local.members : [
         for rule in local.baseline_ingress : {
-          key           = "${mkey}--baseline--${rule.title}"
-          member        = mkey
-          stage         = m.stage
-          title         = "${mkey}--baseline--${rule.title}"
-          identities    = rule.identities
-          access_levels = [for a in lookup(rule, "access_levels", []) : "accessPolicies/${local.policy_id}/accessLevels/${a}"]
-          resources     = ["projects/${m.project_number}"]
-          operations    = rule.operations
+          key        = "${mkey}--baseline--${rule.title}"
+          member     = mkey
+          stage      = m.stage
+          title      = "${mkey}--baseline--${rule.title}"
+          identities = rule.identities
+          # Warunek pyta o JAWNA flage, a nie tylko o pusta liste. Bramka OPA i tak nie przepusci reguly
+          # baseline bez access levels i bez `allow_without_access_level: true`, ale gdyby ktos ja obszedl,
+          # renderer ma sie zdegradowac w strone BEZPIECZNA (regula bez zrodla = nie autoryzuje nic),
+          # a nie dorysowac `*` samemu.
+          access_levels = length(lookup(rule, "access_levels", [])) > 0 ? [
+            for a in rule.access_levels : "accessPolicies/${local.policy_id}/accessLevels/${a}"
+            ] : (
+            lookup(rule, "allow_without_access_level", false) ? [local.baseline_source_any] : []
+          )
+          resources  = ["projects/${m.project_number}"]
+          operations = rule.operations
         }
       ]
     ]) : r.key => r
