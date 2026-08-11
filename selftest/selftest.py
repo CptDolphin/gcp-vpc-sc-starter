@@ -1691,6 +1691,48 @@ def test_alerty() -> None:
     check("wygasli liczy wpisy po review_by",
           pw.wygasli_czlonkowie(doc, datetime.date(2026, 8, 11)) == 1)
 
+    # 8b. BUDZET LICZONY Z ZYWEJ GRANICY, NIE Z DEKLARACJI. `attribute_budget.py` modeluje renderer na
+    # podstawie plikow YAML — wlasciwie na pull requescie („czy MOJA zmiana sie zmiesci"), ale strukturalnie
+    # slepo na wszystko, co jest w granicy, a czego nie ma w deklaracji: zdublowane reguly po nieudanym
+    # odzysku stanu, reczne dopiski, dryf. Alert na tej liczbie milczalby dokladnie w tym scenariuszu,
+    # w ktorym sufit zostaje przekroczony bez niczyjej wiedzy.
+    check("obserwator czyta ZYWA granice z Access Context Managera",
+          "accesscontextmanager.googleapis.com" in watch_py and "def pobierz_perimetr" in watch_py)
+    check("metryka budzetu liczy sie z obiektu API, nie z declarations.json",
+          "procenty_budzetu(perimetr, limit)" in watch_py)
+    # FAIL-CLOSED: gdy zywej granicy nie da sie odczytac, NIE podstawiamy liczby z deklaracji. Wartosc
+    # z YAML-i wygladalaby poprawnie i opisywala co innego — czyli dokladnie ten tryb awarii, ktory ten
+    # plik ma tropic. Brak punktu jest uczciwszy niz zly punkt.
+    check("brak odczytu granicy => ZADNEGO punktu budzetu (nie podstawiamy deklaracji)",
+          "procenty, prognoza = {}, {}" in watch_py)
+
+    zywa = {
+        "ingressPolicies": [{
+            "ingressFrom": {"identities": ["serviceAccount:a@b.iam.gserviceaccount.com"],
+                            "sources": [{"accessLevel": "*"}]},
+            "ingressTo": {"resources": ["projects/1"],
+                          "operations": [{"serviceName": "storage.googleapis.com",
+                                          "methodSelectors": [{"method": "*"}]}]},
+        }],
+        "egressPolicies": [{
+            "egressFrom": {"identities": ["serviceAccount:a@b.iam.gserviceaccount.com"]},
+            "egressTo": {"externalResources": ["s3://kubelek"],
+                         "operations": [{"serviceName": "bigquery.googleapis.com",
+                                         "methodSelectors": [{"permission": "bigquery.tables.get"}]}]},
+        }],
+    }
+    # ingress: 1 tozsamosc + 1 zrodlo + 1 zasob + (1 usluga + 1 selektor) = 5
+    # egress:  1 tozsamosc + 1 zasob zewnetrzny + (1 usluga + 1 selektor)  = 4
+    check("koszt zywej konfiguracji liczy tozsamosci, zrodla, cele i selektory",
+          pw.koszt_konfiguracji(zywa) == 9, str(pw.koszt_konfiguracji(zywa)))
+    check("zasoby zewnetrzne (BigQuery Omni) tez konsumuja budzet",
+          pw.koszt_konfiguracji({"egressPolicies": [{"egressTo": {"externalResources": ["s3://x", "s3://y"]}}]}) == 2)
+    check("pusta konfiguracja kosztuje zero (a nie wywraca sie na braku kluczy)",
+          pw.koszt_konfiguracji({}) == 0)
+    check("procenty licza sie OSOBNO dla spec i status",
+          pw.procenty_budzetu({"spec": zywa, "status": {}}, 900) == {"spec": 1.0, "status": 0.0},
+          str(pw.procenty_budzetu({"spec": zywa, "status": {}}, 900)))
+
     # 9. PRODUCENT MUSI PATRZEĆ NA TE SAME KATALOGI, CO WYZWALACZ `apply.yml`. Rozjazd znaczy: zmiana
     # w katalogu, który uruchamia apply, nie jest liczona jako zaległa (albo odwrotnie — wieczna zaległość
     # od pliku, którego apply nigdy nie zastosuje).

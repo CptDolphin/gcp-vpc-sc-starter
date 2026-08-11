@@ -106,17 +106,67 @@ def dni_do_sciany(historia: list[tuple[float, float]], biezacy_procent: float) -
     return min(BRAK_PROGNOZY_DNI, zostalo / nachylenie)
 
 
-def procenty_budzetu(deklaracje: dict, budzet_json: dict) -> dict:
+def koszt_operacji_api(operacje: list | None) -> int:
+    """Usluga + kazdy selektor metody — ten sam model co `attribute_budget.py`, tylko na obiekcie z API.
+
+    Parytet obu modeli jest tu warunkiem uzytecznosci, nie estetyki: rozjazd w samej ARYTMETYCE
+    wygladalby tak samo jak rozjazd Gita z chmura, wiec ostrzezenie o rozjezdzie przestaloby cokolwiek
+    znaczyc. `methodSelectors` po stronie API niesie i `method`, i `permission` — tak samo jak
+    `methods` + `permissions` po stronie YAML.
+    """
+    return sum(1 + len(o.get("methodSelectors") or []) for o in (operacje or []))
+
+
+def koszt_konfiguracji(cfg: dict) -> int:
+    """Atrybuty ZUZYTE PRZEZ JEDNA KONFIGURACJE perimetru, policzone z obiektu zwroconego przez API.
+
+    DLACZEGO Z API, A NIE Z DEKLARACJI — to jest sedno tej metryki. `tools/attribute_budget.py` liczy
+    z plikow YAML i modeluje renderer; jest to WLASCIWE narzedzie na pull requescie, bo odpowiada na
+    pytanie „czy ZMIANA, ktora proponuje, sie zmiesci" — a zmiany w chmurze jeszcze nie ma. Jest za to
+    STRUKTURALNIE SLEPE na wszystko, co jest w granicy, a czego nie ma w deklaracji: zdublowane reguly
+    po nieudanym odzysku stanu, reczne dopiski w konsoli, dryf. Alert zbudowany na tej liczbie milczalby
+    dokladnie w tym scenariuszu, w ktorym sufit zostaje przekroczony bez niczyjej wiedzy — czyli
+    w jedynym, ktory boli. Alert mierzy wiec GRANICE, a bramka na PR-ze mierzy WNIOSEK; to sa dwa rozne
+    pytania i dlatego maja dwa rozne zrodla.
+
+    Ten sam wybor rozstrzyga wymiar predykcyjny: nachylenie liczone z deklaracji pokazywaloby tempo
+    NASZYCH pull requestow, a nie tempo rosniecia granicy.
+
+    CO LICZYMY: wylacznie atrybuty w regulach ingress/egress. `resources` (czlonkostwo),
+    `restrictedServices` i `vpcAccessibleServices` maja WLASNE, osobne limity — doliczanie ich mieszaloby
+    dwie pule kwotowe (regul: 6000 na konfiguracje; zasobow chronionych: 40 000 na polityke).
+    """
+    razem = 0
+    for r in (cfg.get("ingressPolicies") or []):
+        zrodlo = r.get("ingressFrom") or {}
+        cel = r.get("ingressTo") or {}
+        razem += (len(zrodlo.get("identities") or [])
+                  + len(zrodlo.get("sources") or [])
+                  + len(cel.get("resources") or [])
+                  + koszt_operacji_api(cel.get("operations")))
+    for r in (cfg.get("egressPolicies") or []):
+        zrodlo = r.get("egressFrom") or {}
+        cel = r.get("egressTo") or {}
+        razem += (len(zrodlo.get("identities") or [])
+                  + len(zrodlo.get("sources") or [])
+                  + len(cel.get("resources") or [])
+                  # `externalResources` (BigQuery Omni) API trzyma osobnym polem, ale konsumuja budzet
+                  # dokladnie tak samo jak `resources`.
+                  + len(cel.get("externalResources") or [])
+                  + koszt_operacji_api(cel.get("operations")))
+    return razem
+
+
+def procenty_budzetu(perimetr: dict, limit: int) -> dict:
     """{'spec': %, 'status': %} — OSOBNO, bo limit 6000 jest NA KONFIGURACJE, nie laczny.
 
-    Mapowanie nazw jest tu jawne, bo dwa slowniki opisuja to samo dwoma jezykami: `attribute_budget.py`
-    mowi `dry_run`/`enforced` (etapy czlonka), a API ACM `spec`/`status` (pola obiektu). Alert i runbook
-    mowia jezykiem API — operator patrzy na `perimeters describe`, nie na nasz raport.
+    Nazwy pol sa jezykiem API (`spec` = dry-run, `status` = egzekwowana), a nie jezykiem etapow czlonka
+    (`dry_run`/`enforced`) uzywanym przez bramke na PR-ze. Alert i runbook mowia jezykiem API, bo operator
+    patrzy na `perimeters describe`, a nie na nasz raport.
     """
-    limit = deklaracje["policy"]["attribute_budget"]["limit_per_config"]
     return {
-        "spec": round(100.0 * budzet_json["dry_run"] / limit, 3),
-        "status": round(100.0 * budzet_json["enforced"] / limit, 3),
+        nazwa: round(100.0 * koszt_konfiguracji(perimetr.get(nazwa) or {}) / limit, 3)
+        for nazwa in ("spec", "status")
     }
 
 
@@ -217,6 +267,12 @@ def sekundy_zalegania(repo: str, workflow: str, galaz: str, token: str, sciezki:
     return max(0, teraz - najstarszy), f"zmiana z {sha[:8]}..{head[:8]} czeka na apply"
 
 
+def pobierz_perimetr(policy_id: str, nazwa: str, token: str) -> dict:
+    """Zywa konfiguracja granicy z Access Context Managera. Konto planu ma do tego `policyReader`."""
+    return _http(f"https://accesscontextmanager.googleapis.com/v1/accessPolicies/{policy_id}"
+                 f"/servicePerimeters/{nazwa}", token)
+
+
 def historia_procentow(projekt: str, token: str, dni: int, teraz: int) -> dict:
     """Historia `attribute_budget_percent` z Cloud Monitoring, per etykieta `config`.
 
@@ -282,13 +338,41 @@ def zmierz(args) -> int:
                                          args.sciezki.split(","), teraz)
     zaleganie = wiek_niezastosowanej_zmiany(zaleganie)
 
-    deklaracje = json.load(open(args.declarations))
-    budzet = json.load(open(args.budget))
-    procenty = procenty_budzetu(deklaracje, budzet)
+    # BUDZET LICZYMY Z ZYWEJ GRANICY, nie z deklaracji — patrz `koszt_konfiguracji`. Deklaracja zostaje
+    # jako KONTROLA: rozjazd tych dwoch liczb znaczy, ze w granicy jest cos, czego nie ma w Gicie (albo
+    # odwrotnie), i wyglada dokladnie tak samo jak dryf — o ktorym mowi wlasny alert.
+    polityka = yaml.safe_load(open(args.policy))
+    limit = polityka["attribute_budget"]["limit_per_config"]
+    budzet_z_deklaracji = json.load(open(args.budget))
+    zadeklarowane = {"spec": budzet_z_deklaracji["dry_run"], "status": budzet_z_deklaracji["enforced"]}
 
-    historia = historia_procentow(args.project, g_token, args.history_days, teraz) if g_token else \
-        {"spec": [], "status": []}
-    prognoza = {k: round(dni_do_sciany(historia[k], procenty[k]), 2) for k in procenty}
+    perimetr = {}
+    blad_odczytu = None
+    try:
+        perimetr = pobierz_perimetr(polityka["organization"]["access_policy_name"],
+                                    polityka["perimeter"]["name"], g_token)
+    except (urllib.error.HTTPError, urllib.error.URLError, KeyError) as e:
+        blad_odczytu = str(e)
+
+    if blad_odczytu:
+        # FAIL-CLOSED: NIE podstawiamy liczby z deklaracji. Metryka nazywa sie „zuzycie budzetu granicy";
+        # podstawienie liczby z YAML-i daloby wartosc, ktora wyglada poprawnie i opisuje co innego —
+        # dokladnie ten tryb awarii, ktory ten plik ma tropic. Brak punktu jest uczciwszy niz zly punkt.
+        print(f"::warning::nie udalo sie odczytac zywej granicy ({blad_odczytu}) — metryki budzetu "
+              f"NIE zostana opublikowane w tym przebiegu", file=sys.stderr)
+        procenty, prognoza = {}, {}
+        zywe = {}
+    else:
+        procenty = procenty_budzetu(perimetr, limit)
+        zywe = {n: koszt_konfiguracji(perimetr.get(n) or {}) for n in ("spec", "status")}
+        historia = historia_procentow(args.project, g_token, args.history_days, teraz) if g_token else \
+            {"spec": [], "status": []}
+        prognoza = {k: round(dni_do_sciany(historia[k], procenty[k]), 2) for k in procenty}
+        for n in ("spec", "status"):
+            if zywe[n] != zadeklarowane[n]:
+                print(f"::warning::budzet {n}: granica ma {zywe[n]} atrybutow, deklaracja opisuje "
+                      f"{zadeklarowane[n]} — to jest rozjazd Gita z chmura, patrz alert o dryfie",
+                      file=sys.stderr)
 
     plan = json.load(open(args.plan_json)) if os.path.exists(args.plan_json) else {}
     dryf = dryf_z_planu(plan, zaleganie > 0)
@@ -307,20 +391,24 @@ def zmierz(args) -> int:
             punkt(METRYKI["wygasli"], wygasli, None, args.project, teraz, True),
         ] + [
             punkt(METRYKI["budzet_procent"], procenty[c], {"config": c}, args.project, teraz, False)
-            for c in ("spec", "status")
+            for c in sorted(procenty)
         ] + [
             punkt(METRYKI["budzet_dni"], prognoza[c], {"config": c}, args.project, teraz, False)
-            for c in ("spec", "status")
+            for c in sorted(prognoza)
         ],
         # Czytelne podsumowanie dla `$GITHUB_STEP_SUMMARY` — to jest DOWOD, ze producent liczy realne
-        # wartosci, niezalezny od tego, czy alert akurat odpalil.
+        # wartosci, niezalezny od tego, czy alert akurat odpalil. `zadeklarowane` stoi obok `zywe`
+        # celowo: te dwie liczby maja byc rowne, a ich rozjazd jest sam w sobie informacja.
         "podsumowanie": {
             "apply_pending_seconds": zaleganie,
             "attribute_budget_percent": procenty,
             "attribute_budget_days_to_limit": prognoza,
+            "atrybuty_w_granicy": zywe,
+            "atrybuty_w_deklaracji": zadeklarowane,
+            "limit_na_konfiguracje": limit,
             "drift_resources": dryf,
             "members_expired": wygasli,
-            "punktow_historii": {k: len(v) for k, v in historia.items()},
+            "blad_odczytu_granicy": blad_odczytu,
         },
     }
     json.dump(wynik, sys.stdout, indent=2, sort_keys=True, ensure_ascii=False)
@@ -355,7 +443,11 @@ def main() -> int:
     m.add_argument("--sciezki", default="perimeter,terraform",
                    help="katalogi, ktorych zmiana wymaga apply — MUSZA zgadzac sie z `paths` w apply.yml")
     m.add_argument("--declarations", default="declarations.json")
-    m.add_argument("--budget", default="budget.json")
+    m.add_argument("--budget", default="budget.json",
+                   help="wynik `attribute_budget.py --format json` — uzywany WYLACZNIE jako kontrola "
+                        "rozjazdu; metryka budzetu liczy sie z zywej granicy")
+    m.add_argument("--policy", default="perimeter/policy.yaml",
+                   help="stad bierze sie nazwa polityki dostepu, nazwa perimetru i limit atrybutow")
     m.add_argument("--plan-json", default="terraform/plan.json")
     m.add_argument("--projects", default="perimeter/projects.yaml")
     m.add_argument("--history-days", type=int, default=30)

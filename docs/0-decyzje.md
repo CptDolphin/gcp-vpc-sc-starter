@@ -662,6 +662,23 @@ pull request**; gdyby dostało `timeSeries.create`, autor dowolnego PR-a opublik
 apply 0" i uciszył cztery alerty naraz, nie dotykając ani granicy, ani gałęzi domyślnej. `sa-vpcsc-watch`
 jest za to związane refem `refs/heads/<gałąź domyślna>`, czyli **węziej** niż `plan`, mimo że robi mniej.
 
+**Dlaczego budżet liczymy z ŻYWEJ granicy, a nie z deklaracji.** `tools/attribute_budget.py` liczy koszt
+z plików YAML i modeluje renderer. Na pull requeście to jest właściwe źródło — pytanie brzmi „czy ZMIANA,
+którą proponuję, się zmieści", a zmiany w chmurze jeszcze nie ma. Jako źródło ALERTU ta sama liczba jest
+strukturalnie ślepa na wszystko, co jest w granicy, a czego nie ma w deklaracji: zdublowane reguły po
+nieudanym odzysku stanu, ręczne dopiski w konsoli, dryf. Alert zbudowany na deklaracji milczałby więc
+dokładnie w tym scenariuszu, w którym sufit zostaje przekroczony bez niczyjej wiedzy — czyli w jedynym,
+który boli. Obserwator czyta `servicePerimeters.get` i liczy atrybuty na obiekcie z API; deklaracja zostaje
+jako KONTROLA (rozjazd obu liczb ląduje w podsumowaniu przebiegu i jest tym samym objawem, o którym mówi
+alert o dryfie). Ten sam wybór rozstrzyga wymiar predykcyjny: nachylenie liczone z deklaracji pokazywałoby
+tempo naszych pull requestów, a nie tempo rośnięcia granicy. Zmierzone przy wdrożeniu: oba modele dają dziś
+tę samą liczbę (`spec` 48, `status` 0), więc zmiana źródła zmienia ZNACZENIE metryki, a nie jej wartość —
+i właśnie dlatego trzeba ją było zrobić od razu, a nie „gdy liczby się rozjadą".
+
+**Gdy żywej granicy nie da się odczytać, metryka budżetu NIE POWSTAJE.** Podstawienie liczby z deklaracji
+dałoby wartość, która wygląda poprawnie i opisuje co innego — dokładnie ten tryb awarii, który ten
+mechanizm ma tropić. Brak punktu jest uczciwszy niż zły punkt.
+
 **Dlaczego dwa kanały.** Alert pojemnościowy czyta się w godzinach pracy; alert o zmianie granicy poza
 Gitem jest sygnałem obejścia procesu. Jeden kanał na oba kończy się wyuczoną obojętnością: dziewięć na
 dziesięć wiadomości nie wymaga reakcji, więc dziesiąta też jej nie dostanie.

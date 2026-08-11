@@ -94,6 +94,15 @@ w mniej niż próg krytyczny` (CRITICAL). Oba na kanał pojemnościowy.
 Etykieta `config` w incydencie mówi, o którą chodzi. Nie sumuj ich i nie bierz maksimum — pierwsze alarmuje
 przy dwóch zdrowych konfiguracjach, drugie ukrywa tę, która właśnie się zapycha.
 
+**Skąd bierze się ta liczba — to nie jest to samo źródło, co bramka na pull requeście.** Alert liczy
+atrybuty z **żywej granicy** (`servicePerimeters.get`), a nie z plików YAML. Powód jest konkretny:
+`attribute_budget.py` modeluje renderer na podstawie deklaracji i jest przez to ślepy na wszystko, co jest
+w granicy, a czego nie ma w Gicie — zdublowane reguły po nieudanym odzysku stanu, ręczne dopiski, dryf.
+Bramka na PR-ze odpowiada na pytanie „czy moja zmiana się zmieści" (i tam deklaracja jest właściwa, bo
+zmiany w chmurze jeszcze nie ma); alert odpowiada na pytanie „ile zostało w granicy". Obie liczby lądują
+w podsumowaniu przebiegu `watch.yml` obok siebie — ich rozjazd to ten sam objaw, o którym mówi alert
+o dryfie.
+
 **Nie myl z drugą pulą:** wpisy członków konsumują osobny limit 40 000 „protected resources" **na politykę**.
 Ten alert go nie dotyczy.
 

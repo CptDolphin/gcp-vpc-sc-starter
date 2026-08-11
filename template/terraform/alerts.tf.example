@@ -347,8 +347,12 @@ resource "google_monitoring_alert_policy" "vpcsc_apply_stale" {
 # staje do czasu konsolidacji profili albo decyzji o drugim perimetrze.
 #
 # DWA WYMIARY, BO ODPOWIADAJĄ NA DWA RÓŻNE PYTANIA:
-#   * PRÓG STATYCZNY mówi GDZIE JESTEŚ. Ten sam, którego pilnuje bramka `attribute_budget.py` na pull
-#     requeście — tyle że tam widzi go autor wniosku, a tutaj właściciel platformy, bez czekania na wniosek.
+#   * PRÓG STATYCZNY mówi GDZIE JESTEŚ. Ten sam PRÓG co bramka `attribute_budget.py` na pull requeście,
+#     ale INNE ŹRÓDŁO liczby — i to jest istotne. Bramka liczy z DEKLARACJI (odpowiada na pytanie, czy
+#     proponowana zmiana się zmieści; zmiany w chmurze jeszcze nie ma). Ten alert liczy z ŻYWEJ granicy
+#     (`servicePerimeters.get`), bo odpowiada na pytanie, ile zostało W GRANICY. Liczba z deklaracji jest
+#     ślepa na zdublowane reguły po nieudanym odzysku stanu, ręczne dopiski w konsoli i dryf — czyli
+#     milczałaby dokładnie w tym scenariuszu, w którym sufit zostaje przekroczony bez niczyjej wiedzy.
 #   * PROGNOZA mówi ILE MASZ CZASU. Przy +50 projektach na miesiąc jest ważniejsza: 65% z nachyleniem
 #     200 atrybutów na tydzień jest gorsze niż 72% na płaskim wykresie, a próg statyczny widzi to odwrotnie.
 #
