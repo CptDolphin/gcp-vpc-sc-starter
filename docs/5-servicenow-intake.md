@@ -109,7 +109,7 @@ niżej — celowo nie. Nie dotyka GCP: cała moc zapisu w chmurze siedzi w konci
 > Prerekwizyt **chronionej gałęzi domyślnej** obowiązuje nadal — zawężenie tokenu zmniejsza skutki wycieku,
 > a nie zastępuje ochrony gałęzi.
 
-### 3.1 Prerekwizyt, bez którego ten kanał NIE OTWIERA PR-a (zmierzone 2026-08-11, #1947)
+### 3.1 Prerekwizyt, bez którego ten kanał NIE OTWIERA PR-a (zmierzone 2026-08-11, #1947 i #1977)
 
 Automat renderuje plik członka, przechodzi bramki, **wypycha gałąź** i dopiero wtedy woła API pull
 requestów. Jeśli PR-a otwiera `GITHUB_TOKEN`, to wołanie kończy się:
@@ -124,11 +124,40 @@ domyślna). Kanał pada wtedy **w połowie**: gałąź z plikiem członka zostaj
 
 **Włączenie tego ustawienia nie jest naprawą.** Po pierwsze, ten sam przełącznik daje Actions prawo
 **zatwierdzania** PR-ów. Po drugie — i to jest powód właściwy — pull request utworzony `GITHUB_TOKEN`-em
-**nie uruchamia żadnego workflow `pull_request`**, więc kanał zacząłby produkować PR-y z plikiem członka,
-na które nie patrzy `validate` ani `plan`. Kanał, który omija bramkę, jest luką, nie udogodnieniem.
+**nie dostaje ani jednej bramki**, więc kanał zacząłby produkować PR-y z plikiem członka, na które nie
+patrzy `validate` ani `plan`. Kanał, który omija bramkę, jest luką, nie udogodnieniem.
+
+#### Jak dokładnie — mechanizm sprostowany pomiarem (2026-08-11, #1977)
+
+Ten punkt jako jedyny w całym opisie kanału stał na dokumentacji GitHuba, a nie na przebiegu: brzmiał
+„pull request utworzony `GITHUB_TOKEN`-em **nie uruchamia żadnego workflow** `pull_request`". Domknięty
+pomiarem — przełącznik włączony na kilka minut za zgodą właściciela repozytorium, kanał puszczony w trybie
+testowym, stan przywrócony. **Mechanizm jest inny, niż brzmiał; wniosek się utrzymał.**
+
+Przebiegi `pull_request` **powstają** — po jednym na każdy workflow pasujący ścieżkami, `validate` i `plan`
+— i **nie wykonuje się z nich nic**: oba `completed` / `action_required` / `jobs: []`. Efekt na PR-ze:
+
+```
+gh api …/commits/<head-sha>/check-runs --jq .total_count  ->  0
+gh api …/commits/<head-sha>/status     --jq .state        ->  pending   (0 wpisów)
+gh pr checks <n>                                          ->  no checks reported   (exit 1)
+gh pr view <n> --json mergeable                           ->  MERGEABLE
+```
+
+**Kontrola, bez której to nie byłby pomiar:** `action_required` wystąpiło na **dokładnie tych dwóch**
+przebiegach ze 100 ostatnich w repozytorium, a ludzkie PR-y z tego samego dnia mają `validate` **i** `plan`
+zielone. Przyczyną jest więc token, którym otwarto PR-a (`triggering_actor: github-actions[bot]`), a nie
+ścieżki w triggerze ani inne ustawienie repozytorium.
+
+Praktyczna różnica między „nie uruchamia" a „uruchamia i parkuje" jest jedna i **nie ratuje przełącznika**:
+zaparkowane przebiegi widać w zakładce Actions, więc ktoś **mógłby** je zatwierdzić ręcznie — nikt i nic
+tego nie wymusza, a PR jest scalalny bez tego kliknięcia. Reviewer patrzący na taki PR widzi komplet zer,
+nie czerwoną bramkę.
 
 **Konfiguracja wspierana:** token instalacji GitHub Appa w `secrets.INTAKE_PR_TOKEN` (oba workflow
-wejściowe czytają ten sam sekret). PR otwarty tym tokenem uruchamia bramki jak każdy inny. Aplikacji nie da
+wejściowe czytają ten sam sekret). PR otwarty tym tokenem powinien uruchamiać bramki jak każdy inny — to
+**przewidywanie, nie pomiar**: Appa nadal nie ma, więc nie było czego zmierzyć. Domknięcie tej luki to
+jeden przebieg: otworzyć PR-a tokenem Appa i sprawdzić `check-runs.total_count > 0`. Aplikacji nie da
 się założyć przez API — to ta sama pozycja „wymaga człowieka", co App dywizji.
 
 ---
