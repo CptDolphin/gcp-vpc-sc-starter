@@ -27,6 +27,25 @@ resource "google_service_account" "apply" {
   description  = "Jedyna tożsamość modyfikująca zawartość perimetru. Wyłącznie z main + environment z reviewerami."
 }
 
+# TRZECIA TOŻSAMOŚĆ, I JEDYNY POWÓD, DLA KTÓREGO ISTNIEJE: obserwator (`watch.yml`) musi ZAPISAĆ metrykę,
+# a konto `plan` nie może mieć ANI JEDNEGO uprawnienia zapisującego — to niezmiennik tego stacku, nie
+# szczegół. Konto `plan` może impersonować KAŻDY pull request; gdyby dostało `timeSeries.create`, autor
+# dowolnego PR-a opublikowałby „budżet 5%, zaległość apply 0" i uciszył wszystkie alerty naraz, nie
+# dotykając ani granicy, ani repozytorium.
+#
+# ZAKRES JEST CELOWO ŚMIESZNIE MAŁY: jedno uprawnienie w jednym projekcie. To konto nie czyta perimetru,
+# nie czyta stanu Terraforma i nie czyta kontraktu — przejęte, potrafi wyłącznie KŁAMAĆ O TELEMETRII.
+# To jest realne ryzyko (fałszywy spokój), ale o rząd wielkości mniejsze niż zapis do granicy, i dlatego
+# stoi po tej stronie podziału.
+resource "google_service_account" "watch" {
+  count = var.monitoring_project_id == "" ? 0 : 1
+
+  project      = var.identity_project_id
+  account_id   = "sa-vpcsc-watch"
+  display_name = "VPC-SC perimeter — watch (telemetria)"
+  description  = "Publikuje metryki obserwatora granicy. Jedyne uprawnienie: monitoring.timeSeries.create w projekcie monitoringu."
+}
+
 # --- 2. custom rola -------------------------------------------------------------------------------
 # DLACZEGO nie predefiniowana roles/accesscontextmanager.policyEditor: daje read-write na politykach
 # RAZEM z prawem usunięcia perimetru. Perimetr u nas już istnieje i ma istnieć dalej — potrzebujemy
@@ -265,7 +284,38 @@ resource "google_project_iam_custom_role" "monitoring_writer" {
     "monitoring.alertPolicies.create",
     "monitoring.alertPolicies.update",
     "monitoring.alertPolicies.delete",
+    # KANAŁY POWIADOMIEŃ — dołożone razem z `terraform/alerts.tf`. Bez nich powtórzyłby się DOKŁADNIE ten
+    # sam tryb awarii, który ta sekcja opisuje piętro wyżej: `plan` zielony (konto plan czyta je org-level
+    # rolą `monitoring.viewer`), `apply` czerwony na odświeżeniu, przy KAŻDEJ zmianie — także takiej, która
+    # kanałów nie dotyka. Zasada, która z tego wynika i którą trzeba stosować przy każdym nowym zasobie:
+    # konto `apply` zaczyna od REFRESHU, więc musi UMIEĆ PRZECZYTAĆ wszystko, czym zarządza.
+    "monitoring.notificationChannels.get",
+    "monitoring.notificationChannels.list",
+    "monitoring.notificationChannels.create",
+    "monitoring.notificationChannels.update",
+    "monitoring.notificationChannels.delete",
+    # DESKRYPTORY METRYK WŁASNYCH (`custom.googleapis.com/vpcsc/*`) — deklarowane w `terraform/alerts.tf`,
+    # żeby `condition_absent` miało co obserwować od chwili apply, a nie dopiero od pierwszego zapisu.
+    # `update` NIE ISTNIEJE w tym API (deskryptor zmienia się przez delete+create), więc go tu nie ma.
+    "monitoring.metricDescriptors.get",
+    "monitoring.metricDescriptors.list",
+    "monitoring.metricDescriptors.create",
+    "monitoring.metricDescriptors.delete",
   ]
+}
+
+# --- 3d. telemetria obserwatora ---------------------------------------------------------------------
+# `roles/monitoring.metricWriter` zamiast roli własnej — i to jest wyjątek od zasady „własna, wąska rola"
+# stosowanej wyżej, więc wymaga uzasadnienia. Rola predefiniowana niesie tu DOKŁADNIE to, czego potrzeba
+# do zapisu punktu metryki (`timeSeries.create` + deskryptory + typy zasobów) i ani jednego uprawnienia
+# odczytu: konto `watch` nie zobaczy nawet tego, co samo napisało. Rola własna byłaby jej kopią pod inną
+# nazwą, a każda kopia jest czymś, co można zapomnieć zaktualizować.
+resource "google_project_iam_member" "watch_metric_writer" {
+  count = var.monitoring_project_id == "" ? 0 : 1
+
+  project = var.monitoring_project_id
+  role    = "roles/monitoring.metricWriter"
+  member  = "serviceAccount:${google_service_account.watch[0].email}"
 }
 
 # Rola idzie WYŁĄCZNIE do konta apply. Konto plan czyta te zasoby rolami read-only na organizacji
@@ -338,6 +388,21 @@ resource "google_service_account_iam_member" "apply_wif" {
   service_account_id = google_service_account.apply.name
   role               = "roles/iam.workloadIdentityUser"
   member             = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github.name}/attribute.environment/${var.apply_environment}"
+}
+
+# watch: WYŁĄCZNIE token z gałęzi domyślnej — czyli WĘŻEJ niż `plan`, mimo że to konto robi mniej.
+#
+# DLACZEGO NIE `attribute.repository` jak przy `plan`: tamten zbiór dopasowuje także token z pull requesta,
+# a konto `watch` MA PRAWO ZAPISU (jednej rzeczy: punktu metryki). Wystarczyłoby to, żeby autor dowolnego
+# PR-a — bez merge'a, bez review — opublikował „zaległość apply 0, budżet 5%" i uciszył cztery alerty
+# naraz. `attribute.ref` z tokenu pull requesta ma postać `refs/pull/N/merge`, więc nie pasuje do
+# `refs/heads/<gałąź domyślna>` i ta droga jest zamknięta atrybutem, a nie regulaminem.
+resource "google_service_account_iam_member" "watch_wif" {
+  count = var.monitoring_project_id == "" ? 0 : 1
+
+  service_account_id = google_service_account.watch[0].name
+  role               = "roles/iam.workloadIdentityUser"
+  member             = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github.name}/attribute.ref/${var.watch_ref}"
 }
 
 # --- 5. warstwa IAM Deny ----------------------------------------------------------------------------
