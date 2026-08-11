@@ -215,6 +215,48 @@ def test_terraform() -> None:
     check("swieze repo nie ma zadnej reguly egzekwowanej",
           p.returncode == 0 and p.stdout.strip().splitlines()[-1].strip() == "0", p.stdout + p.stderr[-300:])
 
+    # --- KOLAPS BASELINE'U: liczba regul baseline NIE ZALEZY od liczby czlonkow ----------------------
+    #
+    # Zmierzone na zywym ACM: przy renderowaniu per czlonek baseline kosztowal 21 atrybutow NA CZLONKA, przy
+    # limicie 6000 NA KONFIGURACJE — czyli sufit ~230 czlonkow, przekraczany w trakcie wdrozenia. Po kolapsie
+    # czlonek dokłada do reguly zbiorczej JEDNA pozycje w `ingress_to.resources`.
+    #
+    # DLACZEGO TEN TEST DOKŁADA DRUGIEGO CZLONKA, a nie pyta o material startera takim, jaki jest: przy
+    # JEDNYM czlonku „jedna regula na tytul" i „jedna regula na czlonek x tytul" daja TE SAMA liczbe, wiec
+    # asercja przechodzilaby rowniez dla ksztaltu, ktory ten test ma wykluczyc. Rozstrzyga dopiero drugi
+    # czlonek. `terraform test` nie umie podlozyc plikow deklaracji, wiec robimy to tutaj — na rozpakowanej
+    # kopii, ktora i tak jest jednorazowa. Kopia znika przed nastepnymi testami, zeby nie zmieniac ich premis.
+    def konsola(wyrazenie: str) -> str:
+        r = sh(["terraform", f"-chdir={tf}", "console"], input=wyrazenie + "\n")
+        return r.stdout.strip().splitlines()[-1].strip() if r.stdout.strip() else ""
+
+    czlonkowie_przed = konsola("length(local.members)")
+    baseline_przed = konsola("length(local.baseline_rules_all)")
+
+    wzor = sorted((ROOT / "perimeter/members").glob("*.yaml"))[0]
+    kopia = wzor.with_name("zz-selftest-drugi-czlonek.yaml")
+    dane = yaml.safe_load(wzor.read_text())
+    dane["project_id"] = "prj-selftest-kopia"
+    dane["project_number"] = "999999999999"
+    kopia.write_text(yaml.safe_dump(dane, allow_unicode=True, sort_keys=False))
+    try:
+        czlonkowie_po = konsola("length(local.members)")
+        baseline_po = konsola("length(local.baseline_rules_all)")
+        zasoby_po = konsola("length(local.baseline_rules_all[sort(keys(local.baseline_rules_all))[0]].resources)")
+    finally:
+        kopia.unlink()
+
+    # Premisy sa czescia asercji: gdyby przykladowy czlonek albo baseline zniknal z materialu, ponizsze
+    # rownosci byly by prawdziwe „bo nic nie ma", a test meldowalby zielono nie badajac niczego.
+    check("kolaps baseline: premisa (jeden czlonek i niepusty baseline w materiale startera)",
+          czlonkowie_przed == "1" and czlonkowie_po == "2" and baseline_przed not in ("0", ""),
+          f"czlonkowie {czlonkowie_przed!r}->{czlonkowie_po!r}, reguly baseline {baseline_przed!r}")
+    check("kolaps baseline: drugi czlonek NIE mnozy regul baseline",
+          baseline_przed == baseline_po,
+          f"regul baseline przy jednym czlonku={baseline_przed!r}, przy dwoch={baseline_po!r}")
+    check("kolaps baseline: drugi czlonek dokłada JEDEN zasob do reguly zbiorczej",
+          zasoby_po == "2", f"len(resources) reguly baseline przy dwoch czlonkach={zasoby_po!r}")
+
     # KOLEJNOSC DESTROY: regula ingress referuje access level po NAZWIE (string z YAML), wiec Terraform sam
     # nie zbuduje krawedzi i moze skasowac poziom przed regula — API odrzuca `you must first remove the
     # reference` (zmierzone na zywym ACM 2026-08-07, #1904). Mierzymy GRAF, ktory Terraform faktycznie
@@ -1460,9 +1502,9 @@ def test_tools() -> None:
 
     # --- guard budzetu liczy TO, CO LADUJE W KONFIGURACJI --------------------------------------------
     #
-    # Zmierzone na zywym perimetrze (#1940): narzedzie raportowalo 5 atrybutow, a `spec` w API trzymal 20.
-    # Roznica to reguly baseline — renderowane dla KAZDEGO czlonka (locals.tf: `ingress_rules_effective`),
-    # a w guardzie nieliczone. Guard, ktory zaniza, mowi „jest miejsce" dokladnie wtedy, gdy go brakuje.
+    # Zmierzone na zywym perimetrze: narzedzie raportowalo 5 atrybutow, a `spec` w API trzymal 20. Roznica to
+    # reguly baseline (locals.tf: `ingress_rules_effective`), w guardzie wtedy nieliczone. Guard, ktory
+    # zaniza, mowi „jest miejsce" dokladnie wtedy, gdy go brakuje.
     #
     # Ponizsze asercje sa WLASNOSCIOWE (usun skladnik -> liczba MUSI zmalec), a nie porownaniem ze stala:
     # stala trzeba by aktualizowac przy kazdej zmianie fixture'u, a wtedy test uczy aktualizowania stalej.
@@ -1477,11 +1519,15 @@ def test_tools() -> None:
     def bez_baseline(d):
         d["policy"]["baseline_ingress"] = []
 
-    # Baseline mnozy sie przez liczbe czlonkow — to jest powod, dla ktorego jego pominiecie bolalo dopiero
-    # przy trzydziestu dywizjach. Duplikujemy czlonka i sprawdzamy, ze przyrost obejmuje takze baseline.
+    # Baseline jest JEDNA regula na tytul z lista zasobow, wiec drugi czlonek dokłada do niego DOKLADNIE
+    # jeden atrybut na regule — a nie caly jej koszt. Duplikujemy czlonka i mierzymy sam przyrost.
     def dwaj_czlonkowie(d):
         nazwa, czlonek = list(d["members"].items())[0]
         d["members"][nazwa + "-kopia"] = json.loads(json.dumps(czlonek))
+
+    def bez_baseline_dwaj(d):
+        bez_baseline(d)
+        dwaj_czlonkowie(d)
 
     # `externalResources` (BigQuery Omni) API liczy do limitu wprost. Bez tego skladnika egress poza GCP
     # bylby jedyna regula, ktora nic nie kosztuje — a to najdrozsza regula w katalogu pod wzgledem ryzyka.
@@ -1493,12 +1539,32 @@ def test_tools() -> None:
     pelny = budzet(lambda d: None)
     goly = budzet(bez_baseline)
     podwojony = budzet(dwaj_czlonkowie)
+    goly_podwojony = budzet(bez_baseline_dwaj)
     bez_s3 = budzet(bez_zewnetrznych)
+    regul_baseline = len(json.loads(decl)["policy"].get("baseline_ingress", []) or [])
 
     check("budzet: reguly baseline_ingress SA liczone (usuniecie ich obniza wynik)", goly < pelny,
           f"pelny={pelny} bez_baseline={goly}")
-    check("budzet: baseline mnozy sie przez liczbe czlonkow", podwojony == 2 * pelny,
-          f"jeden={pelny} dwaj={podwojony}")
+
+    # PREMISA obu asercji nizej. Bez niej „baseline nie mnozy sie przez czlonkow" jest trywialnie prawdziwe
+    # dla zera regul baseline — czyli test przechodzilby najgłosniej wtedy, gdy baseline w ogole zniknal.
+    check("budzet: material startera deklaruje reguly baseline (premisa asercji o kolapsie)",
+          regul_baseline > 0, f"baseline_ingress ma {regul_baseline} regul")
+
+    # KSZTALT PO KOLAPSIE: drugi czlonek dokłada koszt swoich regul PROFILOWYCH (to samo, co bez baselinu)
+    # plus DOKLADNIE JEDEN atrybut na kazda regule baseline — bo jego projekt dopisuje sie do listy
+    # `ingress_to.resources` reguly zbiorczej, zamiast powolywac wlasna kopie calej reguly.
+    check("budzet: drugi czlonek dokłada do baselinu jeden atrybut na regule (kolaps)",
+          podwojony - pelny == (goly_podwojony - goly) + regul_baseline,
+          f"przyrost z baselinem={podwojony - pelny} bez baselinu={goly_podwojony - goly} regul={regul_baseline}")
+
+    # ANTY-TAUTOLOGIA / REGRESJA. Stary ksztalt (regula baseline per czlonek) dawal DOKLADNIE `2 * pelny`:
+    # kazdy skladnik podwajal sie razem z czlonkiem. Po kolapsie stala czesc baselinu (tozsamosci, zrodla,
+    # usługi, metody) nie podwaja sie, wiec wynik MUSI byc ostro mniejszy. Cofniecie kolapsu w rendererze
+    # albo w tym narzedziu zapala te asercje, a nie tylko zmienia liczbe w raporcie.
+    check("budzet: baseline NIE mnozy sie przez liczbe czlonkow", podwojony < 2 * pelny,
+          f"jeden={pelny} dwaj={podwojony} (stary ksztalt dalby {2 * pelny})")
+
     check("budzet: zasoby zewnetrzne (s3://) sa liczone", bez_s3 < pelny,
           f"pelny={pelny} bez_zewnetrznych={bez_s3}")
 

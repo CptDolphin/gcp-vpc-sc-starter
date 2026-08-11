@@ -22,9 +22,9 @@ output "members_dry_run_only" {
 output "attribute_estimate" {
   description = "Szacunek zużycia atrybutów per konfiguracja (dry-run i enforced) wobec limitu z policy.yaml."
   # Wyrażenie liczące siedzi w locals.tf (`attribute_usage_*`) i jest współdzielone z kontraktem — patrz
-  # komentarz tam. Baseline mnoży się przez liczbę członków, więc przy trzydziestu dywizjach to on zużywa
-  # większość budżetu; liczenie samych reguł profilowych dawało wynik ZANIŻONY, czyli guard mówiłby
-  # „jest miejsce" dokładnie wtedy, gdy zaczyna go brakować.
+  # komentarz tam. Baseline po kolapsie kosztuje STAŁĄ plus jeden atrybut na członka (jedna reguła na tytuł,
+  # lista zasobów), a nie całą regułę na członka; liczenie samych reguł profilowych nadal dawałoby wynik
+  # ZANIŻONY o tę stałą, czyli guard mówiłby „jest miejsce" dokładnie wtedy, gdy zaczyna go brakować.
   value = {
     limit    = local.policy.attribute_budget.limit_per_config
     dry_run  = local.attribute_usage_dry_run
