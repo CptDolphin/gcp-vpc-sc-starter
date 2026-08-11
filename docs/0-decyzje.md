@@ -1,6 +1,6 @@
-# Decyzje, na których stoi ten starter (DEC-1…DEC-12)
+# Decyzje, na których stoi ten starter (DEC-1…DEC-13)
 
-Dwanaście rozstrzygnięć, które określają kształt repozytorium. Kod odsyła tutaj skrótem `DEC-1`…`DEC-12` — jeśli komentarz
+Trzynaście rozstrzygnięć, które określają kształt repozytorium. Kod odsyła tutaj skrótem `DEC-1`…`DEC-13` — jeśli komentarz
 w pliku mówi „(DEC-4)", to znaczy: „powód tej linijki jest opisany w DEC-4, nie zmieniaj jej bez przeczytania".
 
 Każda pozycja ma tę samą strukturę: **decyzja** · **dlaczego** · **co odrzucono i dlaczego**. Odrzucone warianty są
@@ -628,3 +628,71 @@ bramki i kwalifikującym się do auto-merge'a.
   wyjście, gdy self-service per dywizja stanie się wymaganiem; wtedy własnym pull requestem.
 - *`uniqueItems: true` w JSON Schema zamiast reguł OPA.* Porównuje CAŁE elementy, więc dwa wpisy o tym samym
   projekcie i różnym właścicielu przechodzą — czyli dokładnie ten duplikat, który boli.
+
+---
+
+## DEC-13 — Alert na WIEK niezastosowanej zmiany, nie na nieudany przebieg; obserwator z własną tożsamością
+
+**Decyzja.** Cztery objawy zepsutej granicy (`apply` nie doszedł · budżet atrybutów · dryf · członek po
+terminie) mają alerty w Cloud Monitoring, karmione metrykami z workflowa `watch.yml` (co godzinę,
+`tools/perimeter_watch.py`). Alert o `apply` jest **dead-man's-switchem na WIEKU niezastosowanej zmiany**,
+a nie nasłuchem zdarzenia „workflow failed", i ma drugi warunek na **BRAK danych**. Progi, kanały i baza
+URL runbooka mieszkają w **osobnym pliku** `perimeter/alerting.yaml`. Publikacja metryk idzie **trzecią
+tożsamością** `sa-vpcsc-watch`, z jednym uprawnieniem (`monitoring.timeSeries.create`).
+
+**Dlaczego alert o wieku, a nie o nieudanym przebiegu.** Tryby awarii `apply` są trzy i tylko pierwszy
+generuje zdarzenie: (a) przebieg **padł** — jest `conclusion: failure`; (b) przebieg **się nie odpalił** —
+zły filtr `paths`, wyłączone Actions, brak minut, awaria GitHuba: nie ma ŻADNEGO zdarzenia, więc nasłuch
+nie ma czego usłyszeć; (c) przebieg **wisi** — zdarzenia nie będzie przez 6 godzin (limit joba), a przy
+environment z wymaganym recenzentem przez 30 dni. Wszystkie trzy dają jeden objaw: minął czas, a zmiana
+z gałęzi domyślnej nie jest w chmurze. Reguła o wieku pokrywa więc trzy tryby jedną liczbą, a udany apply
+zeruje ją bez żadnego dodatkowego kroku. Czwarty tryb — **zepsuł się sam obserwator** — domyka warunek
+`condition_absent` w tej samej polityce: bez niego martwy `watch.yml` daje wykres zamrożony na ostatniej
+dobrej wartości, czyli ciszę nie do odróżnienia od zdrowia.
+
+**Dlaczego osobny plik konfiguracji.** `policy.yaml` odpowiada na pytanie CO GRANICA PRZEPUSZCZA: zmienia
+się przy każdym wniosku dywizji i recenzuje go właściciel granicy. `alerting.yaml` odpowiada na pytanie
+KOGO BOLI, GDY MASZYNERIA PADNIE: zmienia się przy zmianie dyżuru i recenzuje go SRE. Trzymanie ich razem
+znaczy, że zmiana adresu e-mail wpada w tę samą ścieżkę review co dopuszczenie projektu do granicy —
+i odwrotnie, że każdy wniosek dywizji konfliktuje z każdą zmianą dyżuru na tym samym pliku.
+
+**Dlaczego trzecia tożsamość.** Publikacja metryki jest ZAPISEM, a konto `plan` nie może mieć ani jednego
+uprawnienia zapisującego — to niezmiennik całego stacku (DEC-2). Konto `plan` może impersonować **każdy
+pull request**; gdyby dostało `timeSeries.create`, autor dowolnego PR-a opublikowałby „budżet 5%, zaległość
+apply 0" i uciszył cztery alerty naraz, nie dotykając ani granicy, ani gałęzi domyślnej. `sa-vpcsc-watch`
+jest za to związane refem `refs/heads/<gałąź domyślna>`, czyli **węziej** niż `plan`, mimo że robi mniej.
+
+**Dlaczego dwa kanały.** Alert pojemnościowy czyta się w godzinach pracy; alert o zmianie granicy poza
+Gitem jest sygnałem obejścia procesu. Jeden kanał na oba kończy się wyuczoną obojętnością: dziewięć na
+dziesięć wiadomości nie wymaga reakcji, więc dziesiąta też jej nie dostanie.
+
+**Gdzie te alerty żyją i co je zabije.** Stoją w projekcie monitoringu, obok stanu Terraforma. Alerty
+z audit-logów (`monitoring.tf`) przeżyją zamknięcie tego projektu w granicy egzekwowanej, bo logi powstają
+po stronie Google. Alerty z metryk (`alerts.tf`) — nie: zapis idzie z GitHuba, czyli spoza granicy. Trzy
+z nich zamilkną, a czwarty (`apply`) ODPALI warunkiem o braku danych, i będzie to prawda, bo w tym samym
+momencie apply też nie zadziała (stan leży w tym samym projekcie). **Ryzyko szczątkowe nazwane wprost:**
+skasowanie projektu monitoringu albo wyłączenie mu billingu nie odpala niczego. Zamknięcie tej luki wymaga
+obserwatora poza organizacją i świadomie nie wchodzi tutaj.
+
+**Odrzucone.**
+- *Nasłuch na `workflow_run` z `conclusion: failure` (GitHub → webhook → alert).* Najprostsze i najczęściej
+  spotykane, łapie **jeden z trzech** trybów awarii. Przebieg, który się nie odpalił, nie generuje zdarzenia
+  — a to właśnie ten tryb sprawia, że granica psuje się najciszej.
+- *Znacznik czasu ostatniego udanego apply w obiekcie GCS.* Kusi, bo daje dead-man's-switch bez GitHub API.
+  Wymaga jednak własnego prefiksu i własnych grantów (zapis dla `apply`, odczyt dla obserwatora), a przy
+  grancie zbyt szerokim — na tym samym prefiksie co stan — **konto dostępne z pull requesta mogłoby
+  podrobić znacznik**. Historia przebiegów w GitHub API daje tę samą odpowiedź bez nowego magazynu i bez
+  nowego IAM. Gdy GitHub jest niedostępny, obserwator nie chodzi, więc odpala warunek o braku danych —
+  degradacja idzie w stronę bezpieczną.
+- *Plik historii budżetu w GCS pod regresję.* Cloud Monitoring trzyma metryki własne przez 6 tygodni, więc
+  historia do prognozy już istnieje. Osobny magazyn byłby drugą kopią tych samych danych, z własnym IAM,
+  własnym trybem awarii i własnym rozjazdem.
+- *Jeden alert pojemnościowy zamiast pary WARNING/CRITICAL.* Polityka Cloud Monitoring ma jedną `severity`,
+  a „zbliżamy się" i „w tym miesiącu uderzysz w limit" to dwie różne decyzje operacyjne. Sklejone w jedną
+  politykę dają albo krzyk przy 70%, albo szept przy 25 dniach.
+- *Sumowanie budżetu `spec` i `status` do jednej liczby.* Limit 6000 jest **na konfigurację**. Suma alarmuje
+  przy dwóch zdrowych konfiguracjach, a maksimum ukrywa tę, która właśnie się zapycha — myli w obie strony.
+- *Kadencja co 5 minut.* `terraform plan` na tej konfiguracji trwa ~40 s; 288 przebiegów na dobę to koszt
+  minut Actions bez zysku, bo objawy, o których mowa, trwają godzinami. Kadencja jest za to ZWIĄZANA
+  z `alignment_period` w politykach — okno krótsze od kadencji daje puste kubełki, w których żaden warunek
+  nie utrzyma się przez wymagany czas.
