@@ -106,6 +106,9 @@ def bootstrap() -> None:
         "iam-bootstrap/README.md", "iam-bootstrap/main.tf", "iam-bootstrap/variables.tf",
         "iam-bootstrap/versions.tf", "iam-bootstrap/terraform.tfvars.sample",
         "iam-bootstrap/outputs.tf",
+        "violations-sink/README.md", "violations-sink/main.tf", "violations-sink/variables.tf",
+        "violations-sink/versions.tf", "violations-sink/terraform.tfvars.sample",
+        "violations-sink/outputs.tf",
         "tools/attribute_budget.py", "tools/collect_declarations.py", "tools/preflight_check.sh",
         "tools/render_member.py", "tools/snow_verify.py", "tools/violations_report.py",
         "tools/deny_check.sh",
@@ -1715,42 +1718,82 @@ def test_tools() -> None:
     check("violations_report.py ODRZUCA wejscie, ktore nie jest lista wpisow",
           p.returncode != 0 and "Traceback" not in p.stderr, f"rc={p.returncode} " + p.stderr[-300:])
 
-    # ---- ZAKRES ODCZYTU: poprawiony raport na zlym zakresie to nadal slepy raport --------------------
-    # Wpis audytowy VPC-SC laduje w logu PROJEKTU, ktory jest wlascicielem chronionego zasobu — czyli
-    # czlonka. `--organization=` czyta wylacznie `organizations/<id>/logs/…` i nic ponizej, wiec zakres
-    # wygladajacy najszerzej widzi najmniej. Zmierzone na zywym perimetrze: organizacja zwrocila 0 wpisow,
-    # projekt czlonka 30 — ten sam filtr, to samo okno. Zero jest nieodroznialne od czystego okna, ktore
-    # promotion_gate przyjmuje jako DOWOD, wiec sam zly zakres wystarczal do promocji czlonka z 30
-    # naruszeniami. Atrapa `gcloud` odwzorowuje wlasnie te asymetrie: organizacja pusta, czlonek z wpisem.
+    # ---- ZAKRES ODCZYTU: jedno zapytanie do sinka zamiast N do projektow -----------------------------
+    # Wpis audytowy VPC-SC laduje w logu PROJEKTU-wlasciciela zasobu, wiec `--organization=` widzi 0 przy
+    # 41 w projekcie czlonka (zmierzone). Odczyt kazdego czlonka osobno usuwal te slepote, ale przy kilkuset
+    # projektach to kilkaset wywolan na przebieg, a JEDEN projekt bez uprawnien wywracal caly dowod.
+    # Wejsciem jest teraz sink org-level; ten test pilnuje OBU wlasnosci naraz: ze krok CZYTA z sinka i ze
+    # NIE robi ani jednego zapytania per projekt.
+    #
+    # Atrapa `gcloud` rozroznia odczyt z kubelka (`--bucket=`) od odczytu projektowego i LOGUJE kazde
+    # wywolanie — dzieki temu liczba zapytan jest mierzona, a nie zakladana.
     wf_raport = yaml.safe_load((ROOT / ".github/workflows/violations-report.yml").read_text())
     krok_logow = next((k for k, _ in kroki_workflow(wf_raport)
                        if "gcloud logging read" in str(k.get("run", ""))), None)
     check("violations-report.yml ma krok czytajacy logi audytowe", krok_logow is not None)
     if krok_logow is not None:
-        czlonek = json.loads((ROOT / "declarations.json").read_text())["members"]
-        czlonek = sorted(m["project_id"] for m in czlonek.values())[0]
         wpis = json.loads((ROOT / "tests/vpcsc-violation-dryrun.json").read_text())[:1]
-        (ROOT / "wpis-czlonka.json").write_text(json.dumps(wpis))
+        (ROOT / "wpis-sinka.json").write_text(json.dumps(wpis))
         bin_logi = ROOT / "stub-bin-logi"
         bin_logi.mkdir(exist_ok=True)
         (bin_logi / "gcloud").write_text(
             "#!/usr/bin/env bash\n"
+            "echo \"$*\" >> \"$PWD/gcloud-calls.log\"\n"
             "case \"$*\" in\n"
-            "  *--organization=*) echo '[]' ;;\n"
-            f"  *--project={czlonek}*) cat \"$PWD/wpis-czlonka.json\" ;;\n"
+            "  *\"sinks describe\"*)\n"
+            "    printf '%s\\n' \"${STUB_SINK_CFG:-protoPayload.metadata.\\\"@type\\\"=\\\"type.googleapis.com/google.cloud.audit.VpcServiceControlAuditMetadata\\\"	True}\" ;;\n"
+            "  *\"logging read\"*)\n"
+            "    case \"$*\" in\n"
+            "      *--bucket=*) if [ -n \"$STUB_SINK_PUSTY\" ]; then echo '[]'; else cat \"$PWD/wpis-sinka.json\"; fi ;;\n"
+            # Odczyt PROJEKTOWY oddaje wpis zawsze. Gdyby krok mimo wszystko pytal projekty, zobaczymy to
+            # i w liczniku wywolan, i w tresci raw.json przy rozbrojonym sinku (kontrola nizej).
+            "      *) cat \"$PWD/wpis-sinka.json\" ;;\n"
+            "    esac ;;\n"
             "  *) echo '[]' ;;\n"
             "esac\n")
         (bin_logi / "gcloud").chmod(0o755)
-        env = dict(os.environ, PATH=f"{bin_logi}:{os.environ['PATH']}",
-                   ORG_ID="123456789012", DAYS="14")
-        (ROOT / "raw.json").unlink(missing_ok=True)
-        p = subprocess.run(["bash", "-e", "-c", krok_logow["run"]],
-                           cwd=ROOT, env=env, capture_output=True, text=True)
-        surowe = json.loads((ROOT / "raw.json").read_text()) if (ROOT / "raw.json").exists() else []
-        # Anty-tautologia: gdyby krok czytal SAMA organizacje, atrapa oddalaby `[]` i lista bylaby pusta.
-        check("violations-report.yml czyta logi PROJEKTOW czlonkow, nie samej organizacji",
-              p.returncode == 0 and len(surowe) == 1,
+        baza_env = dict(os.environ, PATH=f"{bin_logi}:{os.environ['PATH']}",
+                        ORG_ID="123456789012", DAYS="14",
+                        SINK_PROJECT="prj-example-adm", SINK_BUCKET="vpcsc-violations",
+                        SINK_LOCATION="eu")
+
+        def przebieg(**nadpisz):
+            (ROOT / "raw.json").unlink(missing_ok=True)
+            (ROOT / "gcloud-calls.log").unlink(missing_ok=True)
+            p = subprocess.run(["bash", "-e", "-c", krok_logow["run"]], cwd=ROOT,
+                               env=dict(baza_env, **nadpisz), capture_output=True, text=True)
+            surowe = json.loads((ROOT / "raw.json").read_text()) if (ROOT / "raw.json").exists() else []
+            wywolania = (ROOT / "gcloud-calls.log").read_text().splitlines() \
+                if (ROOT / "gcloud-calls.log").exists() else []
+            return p, surowe, [w for w in wywolania if "logging read" in w]
+
+        p, surowe, odczyty = przebieg()
+        check("violations-report.yml czyta naruszenia Z SINKA", p.returncode == 0 and len(surowe) == 1,
               f"rc={p.returncode} wpisow={len(surowe)} " + (p.stdout + p.stderr)[-400:])
+        # KPI zadania: zero zapytan per projekt. Liczymy wywolania, a nie ufamy, ze petli nie ma.
+        check("violations-report.yml robi DOKLADNIE JEDNO zapytanie o logi (zero per projekt)",
+              len(odczyty) == 1 and all("--bucket=" in o for o in odczyty),
+              f"odczytow={len(odczyty)}: {odczyty}")
+
+        # ---- ANTY-TAUTOLOGIA: po rozbrojeniu sinka asercja MUSI paść ---------------------------------
+        # Gdyby krok czytal cokolwiek poza sinkiem, ten przebieg nadal dalby niepuste `raw.json` — bo atrapa
+        # oddaje wpis na KAZDYM odczycie projektowym. Pusty wynik jest wiec dowodem, ze zrodlem jest sink,
+        # a nie tym, ze test nie ma jak sie nie udac.
+        p, surowe, _ = przebieg(STUB_SINK_PUSTY="1")
+        check("ANTY-TAUTOLOGIA: pusty sink daje pusty raport (dane nie pochodza skadinad)",
+              p.returncode == 0 and len(surowe) == 0,
+              f"rc={p.returncode} wpisow={len(surowe)} " + (p.stdout + p.stderr)[-300:])
+
+        # ---- GUARD KONFIGURACJI SINKA: sink bez `includeChildren` widzi tylko logi ORGANIZACJI --------
+        # Czyli 0 wpisow przy pelnym oknie naruszen — nieodroznialne od czystego okna, a to jest DOWOD dla
+        # promotion_gate. Krok ma padac, zanim wystawi taki raport.
+        p, _, _ = przebieg(STUB_SINK_CFG="protoPayload.metadata.\"@type\"=\"type.googleapis.com/google.cloud.audit.VpcServiceControlAuditMetadata\"\tFalse")
+        check("violations-report.yml PADA, gdy sink nie ma includeChildren (widzialby tylko organizacje)",
+              p.returncode != 0, f"rc={p.returncode} " + (p.stdout + p.stderr)[-300:])
+
+        p, _, _ = przebieg(STUB_SINK_CFG="severity>=ERROR\tTrue")
+        check("violations-report.yml PADA, gdy sink ma inny filtr niz odczyt",
+              p.returncode != 0, f"rc={p.returncode} " + (p.stdout + p.stderr)[-300:])
 
 
 # --------------------------------------------------- eksperyment wyscigu (klasyfikacja wynikow)
