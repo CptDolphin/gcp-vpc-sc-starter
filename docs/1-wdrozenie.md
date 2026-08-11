@@ -84,6 +84,15 @@ W GitHubie: utwórz environment **`perimeter-apply`** z *required reviewers* (si
 gałęzi `main`: wymagane statusy `validate` i `plan`, wymagane review CODEOWNERS, zakaz force-push.
 Wszystko to robi `tools/bootstrap_github.sh` — i, co ważniejsze, **czyta wynik z powrotem**.
 
+> **Ochrona gałęzi domyślnej jest PREREKWIZYTEM, nie ozdobą.** Wszystkie bramki treści — schema, OPA,
+> budżet atrybutów, pre-flight — wiszą na zdarzeniu `pull_request`. Push prosto na gałąź domyślną nie
+> uruchamia **ani jednej** z nich, a apply rusza właśnie z tej gałęzi. Bez ochrony każde poświadczenie
+> z prawem zapisu do tego repozytorium (CI, integracja ticketowa, token kanału wejściowego) jest ścieżką
+> do zmiany granicy organizacji bez żadnej bramki. Dlatego kanał dywizji jedzie `workflow_dispatch`-em
+> na `actions: write` — token, który nie ma prawa zapisu, nie może tej ścieżki użyć — a `bootstrap_github.sh`
+> **kończy się błędem**, gdy odczyt z API ochrony nie widzi (`--no-branch-protection "<powód>"` = świadome
+> odstępstwo).
+
 > Environment jest bramką **niezależną** od CODEOWNERS: nawet zmergowany PR nie zaaplikuje się, dopóki
 > człowiek nie zatwierdzi uruchomienia. To jedyne miejsce, w którym „merge" i „zmiana granicy" są rozdzielone.
 
@@ -92,6 +101,7 @@ Wszystko to robi `tools/bootstrap_github.sh` — i, co ważniejsze, **czyta wyni
 ```bash
 gh api repos/<ORG>/<REPO>/environments/perimeter-apply --jq '.protection_rules'
 gh api repos/<ORG>/<REPO>/environments/perimeter-apply/deployment-branch-policies --jq '.branch_policies[].name'
+gh api repos/<ORG>/<REPO>/branches/main/protection --jq '.required_status_checks.contexts'
 ```
 
 Pierwsza komenda ma pokazać `required_reviewers`, druga — samą gałąź domyślną. Rozróżnij dwa braki, bo
@@ -100,6 +110,7 @@ ważą inaczej:
 | Czego brak | Co to znaczy naprawdę | Co robić |
 |---|---|---|
 | polityka gałęzi (`branch_policies` puste, `deployment_branch_policy: null`) | **dziura**, nie odstępstwo: `principalSet` konta apply pinuje samą nazwę environment, więc job z `environment: perimeter-apply` na **dowolnej** gałęzi dostaje tożsamość zapisującą | ustaw natychmiast — działa na każdym planie GitHuba |
+| **ochrona gałęzi domyślnej** (`403` albo `404` na `branches/main/protection`) | **prerekwizyt**: bez niej bramki treści są omijalne pushem, a apply rusza z tego samego miejsca. Na darmowym planie dla repo prywatnego API odpowiada `403 Upgrade to GitHub Pro or make this repository public to enable this feature.` | plan GitHuba z ochroną gałęzi dla repo prywatnych **albo** zapisane odstępstwo (`bootstrap_github.sh --no-branch-protection "<powód>"`). Upublicznienie repo perimetru **nie jest** obejściem — jego treść to mapa dostępów do waszych danych |
 | wymagani recenzenci (`protection_rules: []`) | funkcja płatna; na części planów prywatnych API ją odrzuca (`Please ensure the billing plan supports…`) | jeśli plan jej nie ma: **zapisz świadome odstępstwo z powodem** i wymień kontrole, które zostają — polityka gałęzi, `principalSet` na environment, IAM Deny na kasowaniu, bramki OPA uruchamiane **ponownie** na planie w apply, `git revert` + apply jako droga wycofania. Zaznacz też, czego one NIE dają: pary oczu na treści zmiany |
 
 Nie zastępuj wtedy apply ręcznym `workflow_dispatch` w przekonaniu, że to przywraca bramkę: pauza to nie

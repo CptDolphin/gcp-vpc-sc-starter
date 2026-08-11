@@ -27,7 +27,10 @@ examples/division-repo/
 | **prawa apply** | apply jest jeden, na jednym stanie, za środowiskiem z wymaganymi recenzentami |
 
 **Jedno prawo, które dostajesz: doprowadzić do powstania pull requesta** — przez GitHub App na repo
-perimetru. Zakres tego tokenu jest zmierzony i wychodzi inaczej, niż podpowiada intuicja: patrz sekcja
+perimetru z uprawnieniami `Contents: Read-only` + `Actions: Read and write`. To zdanie było kiedyś
+nieprawdziwe i zostało naprawione zmianą kanału, nie zmianą tekstu: dopóki zgłoszenie szło
+`repository_dispatch`-em, token musiał mieć **prawo zapisu do kodu perimetru**. Zakres jest zmierzony
+i wychodzi inaczej, niż podpowiada intuicja: patrz sekcja
 [Zakres tokenu](#zakres-tokenu--zmierzony-nie-wywnioskowany) niżej.
 
 Co dostajesz w zamian za to, czego nie dostajesz: **walidację u siebie**. Twój pipeline mówi „ten profil
@@ -44,33 +47,49 @@ uprawnień co instalacja GitHub Appa), cztery wywołania:
 |---|---|---|
 | `contents: read` + `pull-requests: write` | `POST /repos/{o}/{r}/dispatches` | **403** `Resource not accessible by integration` |
 | `contents: write` | `POST /repos/{o}/{r}/dispatches` | **204** |
-| `actions: write` | `POST /repos/{o}/{r}/actions/workflows/{plik}/dispatches` | **204** |
+| `actions: write` (bez `contents`) | `POST /repos/{o}/{r}/actions/workflows/{plik}/dispatches` | **204** |
 | `contents: write` **bez** `actions` | `POST /repos/{o}/{r}/actions/workflows/{plik}/dispatches` | **403** |
+| `contents: read` (bez niczego więcej) | `GET /repos/{o}/{r}/releases` + pobranie assetu | **200** |
 
 Czyli:
 
-- **`repository_dispatch` wymaga `contents: write`** na repo perimetru. To jest ostatni krok akcji `contrib`
-  i bez tego uprawnienia kończy się 403 — kanał nie działa.
+- **`actions` i `contents` są rozłączne w OBIE strony** (wiersze 3–4). Token, który potrafi uruchomić
+  workflow przyjmujący zgłoszenia, **nie potrafi zapisać ani jednego bajtu** w repozytorium perimetru —
+  i odwrotnie. To jest cała podstawa wyboru kanału.
+- **`Contents: Read-only` wystarcza do kontraktu i bramek** (wiersz 5). Obie paczki to **assety
+  release'u**, a release'y są zasobem `Contents`; pobranie ich nie wymaga zapisu.
 - **`pull_requests` nie jest potrzebne w ogóle.** Pull requesta otwiera po swojej stronie
   `external-intake.yml`, własnym `GITHUB_TOKEN`-em repozytorium perimetru. Token dywizji nie woła ani
   jednego endpointu PR-owego.
 
-**To jest niewygodne i lepiej to napisać, niż przemilczeć:** `contents: write` znaczy prawo zapisu do
-repozytorium perimetru — więcej niż „otworzyć PR". Uprawnienia GitHuba nie mają ziarna „wyślij zdarzenie",
-więc granica nie stoi na zakresie tokenu, tylko na trzech rzeczach poza nim:
+**Dlaczego kanał NIE jedzie `repository_dispatch`-em, mimo że działał:** wymaga `contents: write`, czyli
+prawa zapisu do kodu perimetru — więcej niż „otworzyć PR". Samo w sobie byłoby to tylko nadmiarowe.
+Groźne robi się w złożeniu: bramki treści (schema, OPA, budżet, pre-flight) wiszą po tamtej stronie na
+zdarzeniu `pull_request`, a apply rusza z **pushu na gałąź domyślną**. Gdzie ta gałąź nie jest chroniona —
+a ochrona gałęzi to na części planów GitHuba funkcja płatna dla repozytoriów prywatnych — poświadczenie
+dywizji staje się ścieżką do zmiany granicy organizacji z pominięciem **wszystkich** bramek. Wzorzec nie
+może zależeć od planu subskrypcji odbiorcy, więc kanał został zawężony po stronie uprawnienia.
+
+**Czego `actions: write` nie odbiera i o czym nie milczymy:** pozwala ponawiać i anulować przebiegi oraz
+**kasować logi przebiegów** w repo perimetru. Węższe niż zapis kodu, ale nie zerowe. Ślad audytowy, który
+ma znaczenie, siedzi więc w gicie (PR i jego commit), nie tylko w historii przebiegów.
+
+Granica i tak nie stoi na zakresie tokenu, tylko na czterech rzeczach poza nim:
 
 1. `perimeter/contributors.yaml` **leży po tamtej stronie** — repozytorium dywizji nie może rozszerzyć
    własnej listy dozwolonych projektów, bo nie ma jej u siebie.
-2. Payload dispatcha jest **danymi, nie autoryzacją**: repo perimetru konfrontuje `change_ref` z nadawcą
-   zdarzenia i odrzuca rozjazd.
+2. Payload zgłoszenia jest **danymi, nie autoryzacją**: repo perimetru konfrontuje `change_ref` z nadawcą
+   zadeklarowanym w zgłoszeniu i odrzuca rozjazd.
 3. Apply wychodzi wyłącznie z gałęzi domyślnej repozytorium perimetru, przez environment `perimeter-apply`
    z polityką gałęzi.
+4. **Ta gałąź jest chroniona** — to prerekwizyt wdrożenia po stronie perimetru, nie miła opcja. Bez niej
+   punkt 3 mówi tylko „apply rusza stamtąd", a nie „stamtąd rusza wyłącznie to, co przeszło bramki".
 
-Wiersze 3–4 tabeli pokazują wariant **węższy**, który istnieje: `workflow_dispatch` chodzi po osi `actions`,
-a `actions` i `contents` są rozłączne w obie strony — token wysyłający zgłoszenie nie miałby wtedy prawa
-zapisu do kodu. Kosztuje to zmianę po OBU stronach kanału (`contrib/action.yml` i `external-intake.yml`)
-i ograniczenie payloadu do `inputs` workflowa, więc nie jest to poprawka w tym pliku. Zapisane jako
-świadomy dług, nie przeoczenie.
+**A kto ręczy za to, że zgłoszenie przyszło z TEGO repozytorium?** Nie token. `github.triggering_actor`
+po stronie perimetru jest pisany przez GitHuba i nie da się go podrobić, ale nazywa **instalację
+aplikacji**, a jedna aplikacja na trzydziestu repozytoriach dywizji daje trzydzieści razy tego samego
+aktora. Nazwa repozytorium jedzie w payloadzie, czyli jest deklaracją. Rozstrzyga dopiero
+`contributors.yaml` — i to jest powód, dla którego ten plik leży po tamtej stronie, a nie u ciebie.
 
 ## Dlaczego to NIE jest moduł Terraform wołany z waszego stanu
 
@@ -105,7 +124,8 @@ Dwie inne odrzucone drogi, dla kompletu:
    profili, nazw access levels i twoich projektów) z release'ów repo perimetru i sprawdza deklarację
    u ciebie.
 3. Po merge'u job `zgloszenie` woła akcję `contrib`, która waliduje jeszcze raz (kontrakt mógł się
-   w międzyczasie zmienić) i wysyła `repository_dispatch` do repo perimetru.
+   w międzyczasie zmienić) i **uruchamia** `external-intake.yml` w repo perimetru — `workflow_dispatch`
+   na jego gałęzi domyślnej, wniosek jedzie w `inputs`.
 4. Repo perimetru sprawdza, czy **to repozytorium** ma ten projekt na liście dozwolonych
    (`perimeter/contributors.yaml`) i czy dywizja się zgadza — po czym otwiera u siebie PR.
 5. Sieć i security zatwierdzają. Apply dodaje projekt do konfiguracji **dry-run**: nic nie jest
@@ -132,8 +152,9 @@ kontrolujesz, wpisywane „żeby przeszło", są dokładnie tymi, których nikt 
 
 | Co | Gdzie | Kto ustawia |
 |---|---|---|
-| GitHub App zainstalowana na obu repozytoriach (`contents: write` na repo perimetru — patrz §„Zakres tokenu"; `pull_requests` NIE jest potrzebne) | `vars.VPCSC_APP_ID`, `secrets.VPCSC_APP_KEY` | ty, raz, **przez interfejs GitHuba** — aplikacji nie da się utworzyć przez API |
+| GitHub App zainstalowana na obu repozytoriach, **`Contents: Read-only` + `Actions: Read and write`** na repo perimetru (i nic więcej — patrz §„Zakres tokenu"; `pull_requests` NIE jest potrzebne) | `vars.VPCSC_APP_ID`, `secrets.VPCSC_APP_KEY` | ty, raz, **przez interfejs GitHuba** — aplikacji nie da się utworzyć przez API |
 | wpis w `perimeter/contributors.yaml`: to repozytorium → twoja dywizja → dozwolone projekty | repo perimetru | **zespół sieciowy**, PR z approvalem |
+| **ochrona gałęzi domyślnej repo perimetru** (prerekwizyt, nie opcja — §„Zakres tokenu") | repo perimetru | **zespół perimetru**; `tools/bootstrap_github.sh` odczytuje to z API i pada, gdy brak |
 | podmiana `ORG/gcp-vpc-sc` i `<SHA_WYDANIA>` w workflow | ten przykład | ty |
 
 Drugi wiersz jest tym, którego nie da się załatwić u siebie — i to nie jest biurokracja. Gdybyś trzymał

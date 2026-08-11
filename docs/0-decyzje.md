@@ -209,12 +209,23 @@ projektu albo reguły wprost do bloku szkieletu jest od tej chwili **cicho ignor
 |---|---|---|
 | `snow:` | ludzie bez Terraforma | ticket zweryfikowany **oddzwonieniem** do API systemu ticketowego |
 | `manual:` | architekci, sieć | approval CODEOWNERS + wymagane statusy na chronionej gałęzi |
-| `pr:` | repozytoria zespołów | mapowanie repo→projekty w `perimeter/contributors.yaml` |
+| `pr:` | repozytoria zespołów | mapowanie repo→projekty w `perimeter/contributors.yaml` (token: `actions: write`, bez prawa zapisu kodu) |
 
 Pole opisujące podstawę zmiany nazywa się `change_ref` i ma trzy warianty (`snow:…`, `pr:ORG/repo#123`,
 `manual:<uzasadnienie ≥20 znaków>`). Kanał `pr:` **nie aplikuje niczego** — repozytorium zespołu waliduje deklarację
-u siebie i wysyła `repository_dispatch`; PR otwiera workflow po stronie perimetru. Zespół potrzebuje prawa
-otwarcia PR, nie uprawnień w GCP.
+u siebie i **uruchamia** `external-intake.yml` (`workflow_dispatch`, wniosek w `inputs`); PR otwiera
+workflow po stronie perimetru. Zespół potrzebuje prawa uruchomienia tego workflowa (`actions: write`),
+nie prawa zapisu do repo perimetru i nie uprawnień w GCP.
+
+**Dlaczego `workflow_dispatch`, a nie `repository_dispatch`.** Wyboru nie robi elegancja, tylko
+uprawnienie. `POST /repos/{o}/{r}/dispatches` wymaga `contents: write` — prawa zapisu do KODU perimetru
+(zmierzone: `contents: read` + `pull-requests: write` → 403). Bramki treści wiszą na `pull_request`,
+a apply rusza z pushu na gałąź domyślną, więc tam, gdzie ta gałąź nie jest chroniona, poświadczenie
+dywizji jest ścieżką do zmiany granicy z pominięciem wszystkiego. `workflow_dispatch` chodzi po osi
+`actions`, rozłącznej z `contents` w obie strony (`actions: write` → 204, `contents: write` bez `actions`
+→ 403), więc token uruchamiający kanał nie zapisze ani jednego bajtu. **Jeden kanał, nie dwa:**
+`repository_dispatch: vpc-sc-external` został usunięty, a nie zostawiony „na okres przejściowy" — dopóki
+oba są czynne, wymogiem realnym pozostaje to szersze uprawnienie i zawężenie nic nie daje.
 
 **Dlaczego mapowanie repo→projekty mieszka w repo perimetru.** Listę swoich dozwolonych projektów zespół
 rozszerzyłby tym samym commitem, którym dodaje projekt. To jedyna rzecz, której kanał `pr:` nie może o sobie orzec.
@@ -272,13 +283,16 @@ stronie i `Cache-Control: no-store` po drugiej.
 2. **Kontrakt trafia do INNEGO bucketa niż stan.** Wspólny bucket oznacza, że jeden błąd w warunku IAM odsłania
    state, a state to pełna mapa granicy. Egzekwowane `precondition` w `contract.tf`.
 3. **Dwa rozłączne ACL:** writer = konto apply na prefiksie kontraktu; reader = konsumenci maszynowi spoza
-   GitHuba, read-only. Konsument nie może podmienić danych, którym ufa kolejny konsument. **Po stronie
-   GitHuba tej rozłączności NIE MA i trzeba to powiedzieć wprost:** token dywizji potrzebuje
-   `contents: write` na repo perimetru, bo tyle wymaga `repository_dispatch` (zmierzone: `contents: read`
-   → HTTP 403 `Resource not accessible by integration`; szczegóły w `contrib/README.md` §„Zakres tokenu").
-   Kontraktu w release'ie to nie zmienia — asset i tak czyta się uprawnieniem, które token ma na wysyłkę
-   zgłoszenia. Granicy pilnuje więc nie zakres tokenu, tylko `contributors.yaml` po stronie perimetru,
-   payload traktowany jako dane i apply wyłącznie z gałęzi domyślnej.
+   GitHuba, read-only. Konsument nie może podmienić danych, którym ufa kolejny konsument. **Po stronie GitHuba
+   ta rozłączność też istnieje, ale trzeba było jej poszukać:** kanał dywizji szedł `repository_dispatch`-em,
+   a ten wymaga `contents: write` na repo perimetru — czyli prawa zapisu do KODU (zmierzone: `contents: read`
+   + `pull-requests: write` → HTTP 403 `Resource not accessible by integration`). Kanał został przestawiony
+   na `workflow_dispatch`, który chodzi po osi `actions`: `actions: write` → 204, `contents: write` bez
+   `actions` → 403. Token dywizji czyta kontrakt i bramki `Contents: Read-only`, a zgłoszenie wysyła
+   `Actions: Read and write` — **nie mając prawa zapisu ani jednego bajtu** (szczegóły w `contrib/README.md`
+   §„Zakres tokenu"). Granicy i tak nie pilnuje zakres tokenu, tylko `contributors.yaml` po stronie
+   perimetru, payload traktowany jako dane, apply wyłącznie z gałęzi domyślnej i **ochrona tej gałęzi**
+   (prerekwizyt wdrożenia — `docs/1-wdrozenie.md` §Etap 4).
 4. **Kontrakt jest informacją, nie źródłem decyzji.** Reguła sprawdzająca, czy repozytorium może wnioskować o dany
    projekt, czyta plik **z repo**, nie z kontraktu. Gdyby decyzja zależała od kontraktu, wystarczyłoby go podmienić.
 

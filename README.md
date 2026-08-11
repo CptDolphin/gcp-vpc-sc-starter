@@ -40,7 +40,7 @@ i przeczytaj [`docs/1-wdrozenie.md`](docs/1-wdrozenie.md) — kolejność krokó
 | `policy.yaml` §`control_plane_projects` | lista projektów, w których leży maszyneria perimetru (stan Terraform, kontrakty, monitoring); bramka OPA odrzuca członka wskazującego którykolwiek z nich | **jedyny tryb awarii tego repo, którego `git revert` nie cofa**: projekt z bucketem stanu w konfiguracji egzekwowanej odcina konto apply od własnego stanu (apply woła spoza granicy), a apply rewertu też potrzebuje stanu — wyjście tylko przez człowieka z uprawnieniami org-level. Furtka `control_plane_exception` w pliku członka zamiast wyłączania bramki |
 | `tools/` | budżet atrybutów · pre-flight · weryfikacja ticketu · raport naruszeń · render członka · **zgodność baseline z żywą listą usług VPC-SC** | każdy zamyka konkretny tryb awarii (opisany w nagłówku pliku) |
 | `.github/workflows/` (12) | intake · external-intake · validate · plan · apply · drift · violations-report · expiry-sweep · break-glass · publish-gates · starter-drift · **boundary-probe** | apply jest jedynym mutatorem: WIF keyless, environment z polityką gałęzi (i z recenzentami tam, gdzie plan GitHuba je ma), single-flight |
-| `contrib/` + `perimeter/contributors.yaml` | trzeci kanał wejścia: repo zespołu waliduje u siebie i prosi o PR | zespół dostaje prawo „otwórz PR", a nie `servicePerimeters.update` na organizacji (DEC-7) |
+| `contrib/` + `perimeter/contributors.yaml` | trzeci kanał wejścia: repo zespołu waliduje u siebie i **uruchamia** `external-intake.yml` (`workflow_dispatch`) | zespół dostaje `actions: write` — prawo URUCHOMIENIA workflowa, bez zapisu kodu i bez `servicePerimeters.update` na organizacji (DEC-7) |
 | `terraform/contract.tf` + `publish-gates.yml` | publikuje wąski JSON (~4 KB) **w dwóch miejscach z jednego kroku apply** (bucket + asset release'u) i paczkę bramek | submodule oddawał `members/` wszystkich dywizji i zakresy IP, żeby zwalidować jeden plik; sam bucket kosztował dywizję tożsamość w GCP i grant IAM po to, by przeczytać 4 KB (DEC-8) |
 | `.tflint.hcl` + job `tflint` | statyczna analiza HCL: martwe zmienne, brak pinów providerów, literówki w atrybutach Google | `validate` przechodzi na konfiguracji z martwym knobem i niepinowanym providerem — jedno i drugie boli na obiekcie org-plane |
 | `tests/` + `docs/5-servicenow-intake.md` | fixture'y kanału ServiceNow (3 z 5 negatywne) + specyfikacja formularza i mapowania pól | kanał wejścia musi dać się przetestować **bez** działającej instancji ServiceNow — inaczej pierwszy test odbywa się na produkcji |
@@ -81,7 +81,10 @@ i przeczytaj [`docs/1-wdrozenie.md`](docs/1-wdrozenie.md) — kolejność krokó
 [`examples/division-repo/`](examples/division-repo/README.md) — **kompletne repozytorium dywizji** do
 skopiowania: jeden `vpc-sc/request.yaml`, workflow (walidacja na PR, zgłoszenie dopiero po merge) i README,
 który mówi wprost **czego zespół NIE dostaje** — konta serwisowego, stanu Terraform, wglądu w `members/`
-innych dywizji ani w zakresy IP z `access-levels/`. Jedno prawo: otworzyć PR.
+innych dywizji ani w zakresy IP z `access-levels/`. Jedno prawo: doprowadzić do powstania PR-a —
+`Contents: Read-only` (kontrakt i bramki z release'ów) + `Actions: Read and write` (uruchomienie
+`external-intake.yml`). Zmierzone: `actions` i `contents` są rozłączne w obie strony, więc token dywizji
+**nie ma prawa zapisu do kodu perimetru**. Prerekwizyt po drugiej stronie: chroniona gałąź domyślna.
 
 Ten katalog **nie jest rozpakowywany** przez `install.sh`: to materiał dla repozytorium dywizji, a `install.sh`
 buduje repozytorium perimetru — workflow przykładu stałby się tam żywym jobem wysyłającym zgłoszenie do

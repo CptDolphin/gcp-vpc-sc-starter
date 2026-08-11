@@ -4,9 +4,9 @@
 # Dwa zadania, świadomie rozdzielone, bo mają różne konsekwencje:
 #   * WALIDACJA jedzie na każdym pushu do pull requesta — błąd ma być widoczny u ciebie, w sekundy,
 #     a nie w odrzuconym PR-ze w cudzym repozytorium;
-#   * ZGŁOSZENIE (`repository_dispatch`) jedzie dopiero po MERGE'u. Wysłanie wniosku to skutek uboczny
-#     z konsekwencjami po drugiej stronie granicy — otwarty PR nie może go wywołać, bo wtedy każdy,
-#     kto potrafi otworzyć PR w tym repozytorium, potrafi też wygenerować PR w repo perimetru.
+#   * ZGŁOSZENIE (`workflow_dispatch` do repo perimetru) jedzie dopiero po MERGE'u. Wysłanie wniosku to
+#     skutek uboczny z konsekwencjami po drugiej stronie granicy — otwarty PR nie może go wywołać, bo
+#     wtedy każdy, kto potrafi otworzyć PR w tym repozytorium, potrafi też wygenerować PR w repo perimetru.
 #
 # DLACZEGO `pull_request: closed` + `merged == true`, a nie `push` na `main`: akcja buduje referencję
 # zmiany jako `pr:ORG/repo#NUMER`. Na zdarzeniu `push` numeru PR-a po prostu nie ma i akcja wpisałaby
@@ -58,9 +58,11 @@ jobs:
       # Token GitHub App na repo perimetru. GITHUB_TOKEN NIE zadziała — jest zawężony do repozytorium,
       # w którym powstał, a my sięgamy po release'y cudzego repo.
       #
-      # Ten job potrzebuje wyłącznie `contents: read`. Instalacja aplikacji ma jednak jeden zakres dla
-      # obu jobów, a job `zgloszenie` wymaga `contents: write` (patrz komentarz tam) — README §„Zakres
-      # tokenu" mówi, co z tego wynika i jak wygląda wariant węższy.
+      # ZAKRES APLIKACJI: `Contents: Read-only` + `Actions: Read and write` na repo perimetru — i tyle.
+      # Ten job zużywa pierwsze (release'y są zasobem Contents), job `zgloszenie` drugie. Instalacja ma
+      # jeden zakres dla obu jobów, więc o realnym uprawnieniu decyduje szersze z nich: dopóki kanał szedł
+      # `repository_dispatch`-em, aplikacja musiała mieć `contents: write`, czyli prawo zapisu do KODU
+      # perimetru. README §„Zakres tokenu" ma pomiar i wnioski.
       - uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v3.2.0
         id: app
         with:
@@ -112,9 +114,10 @@ jobs:
       # Akcja waliduje jeszcze raz, i to nie jest zbędne powtórzenie: między otwarciem PR-a a merge'em
       # kontrakt mógł się zmienić (ktoś wycofał profil), więc walidacja z PR-a jest już nieaktualna.
       #
-      # Jej OSTATNI krok woła `POST /repos/{o}/{r}/dispatches`, a ten endpoint wymaga na repo perimetru
-      # uprawnienia `contents: write` — zmierzone, `contents: read` + `pull-requests: write` daje HTTP 403
-      # („Resource not accessible by integration"). README §„Zakres tokenu" ma tabelę pomiaru.
+      # Jej OSTATNI krok woła `POST /repos/{o}/{r}/actions/workflows/external-intake.yml/dispatches`.
+      # Ten endpoint wymaga `actions: write` — uprawnienia, które URUCHAMIA workflow i nie daje prawa
+      # zapisu ani jednego bajtu kodu. Zmierzone w obie strony: `contents: write` bez `actions` na tym
+      # endpoincie daje 403, `actions: write` bez `contents` daje 204. README §„Zakres tokenu" ma tabelę.
       #
       # `@<SHA_WYDANIA>`, nigdy `@main`: ruchomy tag to mutowalna referencja — kto kontroluje tag,
       # kontroluje kod uruchamiany z waszym tokenem. Ten sam powód, dla którego wszystkie akcje wyżej
