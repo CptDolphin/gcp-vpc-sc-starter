@@ -7,10 +7,12 @@ jest nieprawdziwa, a plik, którego nikt nie widzi, nie jest dokumentacją forma
 | Plik | Scenariusz | Oczekiwany wynik |
 |---|---|---|
 | `snow-approved.json` | ticket zatwierdzony przez grupę sieciową, projekt zgodny | `snow_verify.py` kończy się **0** |
-| `snow-not-approved.json` | approval jeszcze trwa | **PADA** — wniosek w trakcie akceptacji nie wchodzi |
-| `snow-self-approved.json` | zatwierdzony przez grupę wnioskodawcy | **PADA** — samo-zatwierdzenie |
+| `snow-not-approved.json` | approval jeszcze trwa (`approval: requested`) | **PADA** — wniosek w trakcie akceptacji nie wchodzi |
+| `snow-self-approved.json` | zatwierdzony przez grupę wnioskodawcy | **PADA** — samo-zatwierdzenie (patrz zastrzeżenie niżej) |
 | `snow-wrong-project.json` | ticket dotyczy innego projektu niż payload | **PADA** — podmiana celu po approvalu |
-| `dispatch-example.json` | kompletny payload `repository_dispatch` | wejście dla `gh api …/dispatches` |
+| `snow-no-approval.json` | ticket istnieje, ale nie niesie ŻADNEGO śladu zatwierdzenia | **PADA** — dwiema regułami naraz; zarazem dowód, że nieznany kształt odpowiedzi degraduje się do odmowy, nie do zgody |
+| `snow-not-found.json` | `result: []` — numeru ticketu nie ma w systemie rekordu | **PADA** — payload zmyślił numer |
+| `dispatch-example.json` | komplet wejść `workflow_dispatch` kanału ticketowego | wejście dla `gh workflow run intake.yml -f …` |
 | `vpcsc-violation-dryrun.json` | 4 naruszenia dry-run w kształcie zwracanym przez `gcloud logging read` | `violations_report.py` przypisuje **3** członkowi, 4. trafia do „spoza listy członków" |
 
 ```bash
@@ -20,8 +22,18 @@ python3 tools/snow_verify.py --ticket RITM0000001 --expect-project prj-x-test \
   --offline-fixture tests/snow-not-approved.json      # != 0
 ```
 
-Trzy z pięciu plików opisują przypadki **negatywne** i to jest sedno: bramka, która nigdy nie odrzuca,
-przechodzi każdy test pozytywny i nie chroni niczego.
+Pięć z siedmiu plików opisuje przypadki **negatywne** i to jest sedno: bramka, która nigdy nie odrzuca,
+przechodzi każdy test pozytywny i nie chroni niczego. `snow_verify.py` sprawdza cztery rzeczy i każda ma
+teraz swój fixture — `snow-not-found` domyka punkt 1 („ticket istnieje"), który przez cały czas był
+**jedynym bez pokrycia**: kod tej gałęzi nigdy nie wykonał się w żadnym teście.
+
+**Czego `snow-self-approved.json` NIE pokrywa, powiedziane wprost.** Opisuje samo-zatwierdzenie przez
+GRUPĘ wnioskodawcy i tyle sprawdza `snow_verify.py`: porównuje grupę z ticketu z allowlistą sieciową.
+Nie porównuje **osoby** zatwierdzającej z wnioskodawcą, więc wnioskodawca należący do grupy sieciowej
+zatwierdziłby własny ticket i przeszedł. Domknięcie wymaga odczytu rekordu approvalu
+(`sysapproval_approver`) z żywej instancji ServiceNow — a fixture napisany „z wyobrażenia o kształcie
+API", którego nie da się skonfrontować z niczym prawdziwym, produkowałby zieloną bramkę o nieznanej
+wartości. To jest zapisana luka, nie przeoczenie.
 
 ## `vpcsc-violation-dryrun.json` — kształt zdjęty z żywej organizacji, nie wymyślony
 

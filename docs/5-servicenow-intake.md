@@ -18,7 +18,7 @@ perimetru i nie wywołuje API Google.
 |---|---|
 | zbiera wniosek w ustrukturyzowanej formie | nie zapisuje niczego w Access Context Managerze |
 | przeprowadza approval (dywizja → networking → security dla profili `risk: high`) | nie decyduje, czy projekt jest chroniony (o tym decyduje merge PR-a i `stage`) |
-| wysyła `repository_dispatch` do repo perimetru | nie tworzy projektów GCP ani sieci (patrz §7) |
+| wysyła `workflow_dispatch` do repo perimetru | nie tworzy projektów GCP ani sieci (patrz §7) |
 | zostaje rekordem „kto poprosił, kto zatwierdził, kiedy" | nie zastępuje audytu w gicie — ten jest w historii PR-ów |
 
 **Dlaczego nie ticket → API wprost.** Wywołanie API z ticketa oddaje trzy własności, bez których granica
@@ -30,7 +30,7 @@ przy tym, w czym jest dobry.
 
 ## 2. Pozycja katalogu — specyfikacja pól
 
-Nazwy techniczne po lewej to nazwy zmiennych w Catalog Item; automat wysyła je 1:1 w `client_payload`.
+Nazwy techniczne po lewej to nazwy zmiennych w Catalog Item; automat wysyła je 1:1 jako `inputs` zgłoszenia.
 
 | Pole (techniczne) | Typ / kontrolka | Wymagane | Walidacja w SNOW | Uwaga |
 |---|---|---|---|---|
@@ -70,61 +70,99 @@ wnioskodawca (dywizja)
 Po ostatnim approvalu Flow Designer wysyła:
 
 ```http
-POST https://api.github.com/repos/<ORG>/<REPO>/dispatches
+POST https://api.github.com/repos/<ORG>/<REPO>/actions/workflows/intake.yml/dispatches
 Authorization: Bearer <token integracji>
 Content-Type: application/json
 
 {
-  "event_type": "vpc-sc-onboard",
-  "client_payload": {
+  "ref": "main",
+  "inputs": {
     "snow_ticket": "RITM0000123",
     "division": "example-division",
     "project_id": "prj-example-vertex-prod",
     "project_number": "123456789012",
     "owner_group": "grp-example-division-cloud@example.com",
     "approved_by": "net-approver@example.com",
-    "profiles": [
-      { "name": "vertex-online-serving",
-        "params": { "caller_identities": ["serviceAccount:sa-scoring@prj-example-app-prod.iam.gserviceaccount.com"],
-                    "access_levels": ["corp_network"] } }
-    ]
+    "profiles": "[{\"name\":\"vertex-online-serving\",\"params\":{\"caller_identities\":[\"serviceAccount:sa-scoring@prj-example-app-prod.iam.gserviceaccount.com\"],\"access_levels\":[\"corp_network\"]}}]"
   }
 }
 ```
 
-Token integracji potrzebuje `contents: write` na tym jednym repozytorium — tyle wymaga
-`repository_dispatch` (zmierzone; `pull-requests: write` **nie jest** potrzebne, bo PR-a otwiera po tej
-stronie `intake.yml` własnym `GITHUB_TOKEN`-em). Nie dotyka GCP — cała moc zapisu w chmurze siedzi
-w koncie apply, za environmentem z reviewerami.
+`inputs` są **płaskimi stringami** (max 10, po 65535 znaków), więc zagnieżdżone profile jadą jako jeden
+input z JSON-em — dokładnie tak samo jak w kanale dywizji.
 
-> **Ten kanał świadomie ZOSTAJE na `repository_dispatch`, a kanał dywizji został z niego zdjęty.** Różnica
-> jest w tym, kto trzyma poświadczenie. Integracja ticketowa to jeden system pod kontrolą tego samego
-> zespołu, co perimetr; kanał dywizji rozdaje token na zewnątrz, jednej instalacji na wiele repozytoriów
-> zespołów, i tam „ma prawo zapisu do kodu perimetru" jest zdaniem, którego nie chcemy wypowiadać
-> (`docs/0-decyzje.md` §DEC-7). Dla obu kanałów obowiązuje ten sam prerekwizyt: **chroniona gałąź
-> domyślna** — bez niej `contents: write` omija wszystkie bramki treści, bo te wiszą na `pull_request`.
+Token integracji potrzebuje `actions: write` na tym jednym repozytorium i **nic ponadto**:
+`pull-requests: write` nie jest potrzebne (PR-a otwiera po tej stronie `intake.yml`), a `contents` — patrz
+niżej — celowo nie. Nie dotyka GCP: cała moc zapisu w chmurze siedzi w koncie apply, za environmentem.
+
+> **Ten kanał był na `repository_dispatch` i został z niego ZDJĘTY (#1947)** — tak samo jak kanał dywizji
+> (#1958) i z tego samego powodu, mimo że ta sama dokumentacja tłumaczyła wcześniej, dlaczego akurat tu
+> zostaje. Tamten argument brzmiał: integracja ticketowa to jeden system pod kontrolą tego samego zespołu,
+> co perimetr, więc „prawo zapisu do kodu perimetru" jest tu do przyjęcia. Argument jest prawdziwy
+> i nieistotny: **zasięg wycieku wynika z UPRAWNIEŃ tokenu, nie z tego, kto miał go trzymać.**
+> `POST /repos/{o}/{r}/dispatches` wymaga `contents: write`; złożone z gałęzią domyślną bez ochrony
+> (`403 Upgrade to GitHub Pro` na tym planie) i z apply ruszającym z pushu na tę gałąź, poświadczenie
+> integracji było ścieżką do zmiany granicy organizacji z pominięciem **wszystkich** bramek treści — te
+> wiszą na `pull_request`. `workflow_dispatch` wymaga `actions: write`, które uruchamia workflow i nie
+> zapisuje kodu (rozłączność zmierzona w obie strony: `contrib/README.md` §macierz).
+>
+> Prerekwizyt **chronionej gałęzi domyślnej** obowiązuje nadal — zawężenie tokenu zmniejsza skutki wycieku,
+> a nie zastępuje ochrony gałęzi.
+
+### 3.1 Prerekwizyt, bez którego ten kanał NIE OTWIERA PR-a (zmierzone 2026-08-11, #1947)
+
+Automat renderuje plik członka, przechodzi bramki, **wypycha gałąź** i dopiero wtedy woła API pull
+requestów. Jeśli PR-a otwiera `GITHUB_TOKEN`, to wołanie kończy się:
+
+```
+GitHub Actions is not permitted to create or approve pull requests
+```
+
+— dopóki ustawienie repozytorium *Allow GitHub Actions to create and approve pull requests* jest wyłączone
+(`GET /repos/{o}/{r}/actions/permissions/workflow` → `can_approve_pull_request_reviews: false`, wartość
+domyślna). Kanał pada wtedy **w połowie**: gałąź z plikiem członka zostaje, PR-a nie ma.
+
+**Włączenie tego ustawienia nie jest naprawą.** Po pierwsze, ten sam przełącznik daje Actions prawo
+**zatwierdzania** PR-ów. Po drugie — i to jest powód właściwy — pull request utworzony `GITHUB_TOKEN`-em
+**nie uruchamia żadnego workflow `pull_request`**, więc kanał zacząłby produkować PR-y z plikiem członka,
+na które nie patrzy `validate` ani `plan`. Kanał, który omija bramkę, jest luką, nie udogodnieniem.
+
+**Konfiguracja wspierana:** token instalacji GitHub Appa w `secrets.INTAKE_PR_TOKEN` (oba workflow
+wejściowe czytają ten sam sekret). PR otwarty tym tokenem uruchamia bramki jak każdy inny. Aplikacji nie da
+się założyć przez API — to ta sama pozycja „wymaga człowieka", co App dywizji.
 
 ---
 
 ## 4. Co robi automat (`intake.yml`), krok po kroku
 
-1. **`repository_dispatch: vpc-sc-onboard`** — wejście. `concurrency` grupuje po `project_id`, bez
-   `cancel-in-progress`: dwa zgłoszenia tego samego projektu ustawiają się w kolejce, zamiast ścigać się o
-   ten sam plik.
+0. **Tylko gałąź domyślna.** Endpoint dispatchu przyjmuje `ref` wybierany przez NADAWCĘ i uruchamia plik
+   workflow w wersji z tej gałęzi. Nadawca nie umie gałęzi utworzyć (`actions: write` nie zapisuje kodu),
+   ale gałęzie po otwartych PR-ach istnieją, a wersja tego pliku na takiej gałęzi nie jest wersją, która
+   przeszła review. Ten sam guard, co w kanale dywizji.
+1. **`workflow_dispatch`** — wejście. `concurrency` grupuje po `project_id`, bez `cancel-in-progress`:
+   dwa zgłoszenia tego samego projektu ustawiają się w kolejce, zamiast ścigać się o ten sam plik.
 2. **`snow_verify.py` — oddzwonienie do ServiceNow.** To jest krok, który zamienia „ufam wiadomości" w „ufam
-   systemowi rekordu". Payload jest **danymi, nigdy autoryzacją**: `repository_dispatch` jest tak wiarygodny
-   jak token, którym go wysłano, a tokeny wyciekają. Skrypt sprawdza cztery rzeczy:
-   ticket istnieje · stan == zatwierdzony · approver należy do grupy sieciowej (nie samo-zatwierdzenie) ·
-   **projekt w tickecie == projekt w payloadzie** (payload nie podmienił celu po zatwierdzeniu).
+   systemowi rekordu". Payload jest **danymi, nigdy autoryzacją**: zgłoszenie jest tak wiarygodne jak token,
+   którym je wysłano, a tokeny wyciekają. Skrypt sprawdza cztery rzeczy:
+   ticket istnieje · stan == zatwierdzony · **grupa** z ticketu należy do allowlisty sieciowej ·
+   **projekt w tickecie == projekt w zgłoszeniu** (payload nie podmienił celu po zatwierdzeniu).
+   Brak konfiguracji ServiceNow to **odmowa z komunikatem** (rc=2), nie traceback: „nie mamy jak zapytać"
+   nigdy nie znaczy „zatwierdzono".
 3. **`render_member.py` — plik członka.** Nazwa: `<division>-<project_id>.yaml`. Skrypt **wymusza**
-   `stage: dry-run`, ustawia `dry_run_since` na dziś i `review_by` na dziś + okno z `policy.yaml`.
-4. **PR** przez `create-pull-request`: gałąź `onboard/<division>-<project_id>`, etykiety `onboarding`,
-   `dry-run`, w opisie numer ticketu i checklista dla recenzenta.
-5. **`validate.yml`** na tym PR-ze: schematy → reguły OPA → budżet atrybutów → `terraform fmt/validate/test`
+   `stage: dry-run`, ustawia `dry_run_since` na dziś i `review_by` na dziś + okno z `policy.yaml`,
+   i składa plik z **listy dozwolonych pól** — czyli `control_plane_exception` czy `exceptions` nie da się
+   przemycić w zgłoszeniu. Ten sam skrypt renderuje kanał dywizji (jeden renderer, trzy kanały).
+4. **Bramki treści JESZCZE PRZED PR-em**: `check-jsonschema` na pliku członka i reguły OPA
+   (`vpcsc.onboarding`). Wcześniej ich tu nie było i kanał ticketowy polegał wyłącznie na tym, że
+   ktoś kiedyś spojrzy na PR — a czy PR w ogóle dostaje bramki, zależy od tokenu, który go otworzył (§3.1).
+5. **PR** przez `create-pull-request`: gałąź `onboard/<division>-<project_id>`, etykiety `onboarding`,
+   `dry-run`, w opisie numer ticketu i checklista dla recenzenta. Gdy utworzenie PR-a zostanie odmówione,
+   workflow **kasuje gałąź, którą przed chwilą wypchnął** — kanał ma paść w całości albo wcale.
+6. **`validate.yml`** na tym PR-ze: schematy → reguły OPA → budżet atrybutów → `terraform fmt/validate/test`
    → tflint. Nic z tego nie dotyka chmury, więc PR nie może zejść na czerwono z powodu credentiali.
-6. **Merge** → `apply.yml` czeka na zatwierdzenie environmentu `perimeter-apply`. Projekt wchodzi do
+7. **Merge** → `apply.yml` czeka na zatwierdzenie environmentu `perimeter-apply`. Projekt wchodzi do
    **konfiguracji dry-run**: naruszenia są logowane, nic nie jest blokowane.
-7. **Po oknie obserwacji** — osobny PR promocyjny (`stage: enforced`) z raportem naruszeń jako dowodem.
+8. **Po oknie obserwacji** — osobny PR promocyjny (`stage: enforced`) z raportem naruszeń jako dowodem.
 
 Sekrety: `SNOW_INSTANCE`, `SNOW_USER`, `SNOW_TOKEN` w secrets repozytorium. `snow_verify.py` ich nie loguje —
 w razie błędu wypisuje przyczynę, nie odpowiedź API.
@@ -171,19 +209,39 @@ python3 tools/render_member.py --division risk --project-id prj-x --project-numb
 grep stage /tmp/member.yaml     # zawsze: stage: dry-run
 ```
 
-**c) Cały kanał na sucho** — wywołaj dispatch ręcznie z własnego konta (token z `contents: write` na repo
-testowym) i obserwuj, czy powstał PR z właściwą etykietą i gałęzią:
+**c) CAŁY KANAŁ NA ŻYWO, bez ServiceNow** — wejście `fixture` podmienia system rekordu na plik z `tests/`
+i nie podmienia niczego innego: te same kroki, ten sam renderer, te same bramki, ten sam PR.
 
 ```bash
-gh api repos/<ORG>/<REPO>/dispatches -f event_type=vpc-sc-onboard \
-  --input tests/dispatch-example.json
+# pozytyw — ticket zatwierdzony przez grupę sieciową
+gh workflow run intake.yml -R <ORG>/<REPO> --ref main \
+  -f fixture=snow-approved -f snow_ticket=RITM0000001 \
+  -f division=example-division -f project_id=prj-x-test -f project_number=000000000000 \
+  -f owner_group=grp@example.com -f approved_by=net@example.com \
+  -f profiles='[{"name":"vertex-online-serving","params":{"caller_identities":["serviceAccount:a@b.iam.gserviceaccount.com"],"access_levels":["corp_network"]}}]'
+
+# negatywy — ta sama komenda z -f fixture=snow-not-approved | snow-self-approved | snow-wrong-project
 ```
+
+**Co ogranicza tryb testowy** (bo test na ścieżce wejściowej granicy bezpieczeństwa jest dziurą, dopóki
+ktoś nie napisze, co go ogranicza): nazwa fixture'a musi pasować do `^snow-[a-z0-9-]+$` i wskazywać plik
+w `tests/` **na gałęzi domyślnej**, czyli treść, która przeszła review; a projekt jest ograniczony
+przez `u_project_id` w samym fixturze, bo `snow_verify.py` porównuje go z `project_id` ze zgłoszenia.
+`tests/snow-approved.json` mówi `prj-x-test` — żadne wejście dispatchu nie zamieni tego na czyjś realny
+projekt.
 
 Wszystkie fixture'y są w `tests/` (opis: `tests/README.md`) — trzy z pięciu opisują przypadki **negatywne**:
 approval w toku, samo-zatwierdzenie i podmiana projektu po approvalu. Selftest repozytorium
 (`python3 selftest/selftest.py`) uruchamia (a) i (b) na każdym przebiegu, na TYCH SAMYCH plikach, które
 cytuje ta dokumentacja — więc zepsuty fixture wychodzi w teście, nie u czytelnika.
 Bramka, która nigdy nie odrzuca, przechodzi każdy test pozytywny i nie chroni niczego.
+
+**Czego te fixture'y NIE pokrywają, powiedziane wprost.** `snow-self-approved.json` opisuje
+samo-zatwierdzenie przez **grupę wnioskodawcy** i tyle łapie `snow_verify.py`: porównuje grupę z ticketu
+z allowlistą sieciową. Nie porównuje **osoby** zatwierdzającej z wnioskodawcą, więc wnioskodawca będący
+członkiem grupy sieciowej zatwierdziłby własny ticket i przeszedł. Domknięcie wymaga odczytu rekordu
+approvalu (`sysapproval_approver`) z żywej instancji — a bramki pisanej „z wyobrażenia o kształcie API",
+bez możliwości zmierzenia jej na czymkolwiek prawdziwym, ten materiał nie przyjmuje.
 
 ---
 

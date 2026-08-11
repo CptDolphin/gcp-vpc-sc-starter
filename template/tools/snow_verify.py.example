@@ -1,10 +1,18 @@
 #!/usr/bin/env python3
 """Weryfikuje ticket ServiceNow U ŹRÓDŁA, zanim bot otworzy PR.
 
-DLACZEGO to jest osobny, obowiązkowy krok: `repository_dispatch` niesie payload, który jest tak wiarygodny
-jak token, którym go wysłano — a tokeny wyciekają. Gdyby workflow ufał payloadowi, każdy, kto zdobędzie
-token integracji, dopisywałby sobie projekty do perimetru całej organizacji, w pełni „proceduralnie".
-Oddzwonienie zamienia „ufam wiadomości" w „ufam systemowi rekordu".
+DLACZEGO to jest osobny, obowiązkowy krok: zgłoszenie niesie payload, który jest tak wiarygodny jak token,
+którym go wysłano — a tokeny wyciekają. Gdyby workflow ufał payloadowi, każdy, kto zdobędzie token
+integracji, dopisywałby sobie projekty do perimetru całej organizacji, w pełni „proceduralnie".
+Oddzwonienie zamienia „ufam wiadomości" w „ufam systemowi rekordu". Nie zmienia tego zawężenie kanału do
+`workflow_dispatch` (#1947): węższe uprawnienie nadawcy zmniejsza skutki wycieku, ale nie czyni payloadu
+prawdziwym.
+
+ZAKRES TEGO NARZĘDZIA, ŻEBY NIKT NIE CZYTAŁ GO SZERZEJ: sprawdza CZTERY rzeczy niżej i nic ponadto.
+Punkt 3 porównuje GRUPĘ z pola ticketu z allowlistą — NIE porównuje zatwierdzającego z wnioskodawcą.
+Wnioskodawca należący do grupy sieciowej zatwierdziłby więc własny ticket i przeszedł. Domknięcie tego
+wymaga odczytu rekordu approvalu (`sysapproval_approver`) z żywej instancji — której ten lab nie ma,
+a bramki pisanej „z wyobrażenia o API" ten materiał nie przyjmuje (runbook §1). Zapisane jako luka.
 
 Sprawdzamy cztery rzeczy — każda zamyka inny scenariusz:
   1. ticket istnieje                     → payload nie zmyśla numeru,
@@ -73,6 +81,19 @@ def main() -> int:
     if args.offline_fixture:
         doc = json.loads(open(args.offline_fixture).read())
     else:
+        # BRAK KONFIGURACJI TO NIE JEST ZGODA — i musi to POWIEDZIEĆ. Wcześniej `os.environ[...]` rzucało
+        # `KeyError: 'SNOW_INSTANCE'` z tracebackiem: kod wyjścia był niezerowy, więc bramka trzymała, ale
+        # w logu przebiegu wyglądało to na awarię skryptu, a nie na odmowę. Tryb awarii, którego nikt nie
+        # umie odczytać, kończy się „to chyba flaka, puść jeszcze raz" — czyli ścieżką, na której ludzie
+        # zaczynają szukać obejścia bramki zamiast przyczyny.
+        brakujace = [n for n in ("SNOW_INSTANCE", "SNOW_USER", "SNOW_TOKEN") if not os.environ.get(n)]
+        if brakujace:
+            print(
+                "ODRZUCONE: brak konfiguracji ServiceNow (" + ", ".join(brakujace) + ") — bez systemu "
+                "rekordu nie ma czym potwierdzić zatwierdzenia, więc nie ma PR-a",
+                file=sys.stderr,
+            )
+            return 2
         instance = os.environ["SNOW_INSTANCE"]
         try:
             doc = fetch(instance, args.ticket, os.environ["SNOW_USER"], os.environ["SNOW_TOKEN"])

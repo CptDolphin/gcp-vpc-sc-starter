@@ -46,7 +46,9 @@ zespołami → ścieżka pierwszego wyboru to *scoped policy*; (b) rezydencja da
 
 **Decyzja.** System ticketowy nie ma żadnych uprawnień w GCP: zero kont serwisowych, zero federacji tożsamości,
 zero wywołań API Access Context Managera. Jego rolą jest formularz, rejestr zgody, approval i widoczność statusu.
-Po approvalu woła `repository_dispatch`; workflow **oddzwania do API systemu ticketowego** i weryfikuje, że ticket
+Po approvalu woła `workflow_dispatch` (wcześniej `repository_dispatch` — zmienione z tego samego powodu co kanał
+dywizji: tamten trigger wymagał od integracji `contents: write`, czyli prawa zapisu do KODU perimetru);
+workflow **oddzwania do API systemu ticketowego** i weryfikuje, że ticket
 istnieje, jest zatwierdzony, approver należy do właściwej grupy, a treść zgadza się z payloadem. Bot otwiera PR
 z jednym plikiem członka i **nie zatwierdza własnego PR-a**. Jedynym bytem mutującym perimeter jest pipeline
 z tożsamością WIF keyless, applyujący **artefakt planu przypięty SHA256**, w environment z required reviewers.
@@ -63,7 +65,7 @@ realnego). Prędkość, którą kupuje, jest zresztą nieistotna przy zmianie, k
   sterowania bezpieczeństwem.
 - *Bot commituje prosto na gałąź główną (bez PR).* Usuwa jedyny moment, w którym człowiek widzi diff granicy przed
   zastosowaniem. Bramki maszynowe łapią kształt, nie intencję („ten projekt nie należy do tego zespołu").
-- *Zaufanie payloadowi `repository_dispatch` bez oddzwonienia.* Dispatch jest tak wiarygodny jak token, który go
+- *Zaufanie payloadowi zgłoszenia bez oddzwonienia.* Dispatch jest tak wiarygodny jak token, który go
   wysłał — a tokeny wyciekają. Weryfikacja u źródła zamienia „ufam wiadomości" w „ufam systemowi rekordu".
 - *Apply z laptopa operatora.* Brak przypiętego planu i powtarzalności; przy org-plane singletonie każdy ręczny
   apply to potencjalny wyścig z pipeline'em (DEC-6).

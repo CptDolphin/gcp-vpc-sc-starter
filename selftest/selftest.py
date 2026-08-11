@@ -118,6 +118,7 @@ def bootstrap() -> None:
         ".tflint.hcl", ".github/dependabot.yml", "tests/README.md",
         "tests/snow-approved.json", "tests/snow-not-approved.json", "tests/snow-self-approved.json",
         "tests/snow-wrong-project.json", "tests/dispatch-example.json",
+        "tests/snow-not-found.json", "tests/snow-no-approval.json",
         "tests/vpcsc-violation-dryrun.json",
     }
     # Dokumentacja jedzie razem z kodem. Wyliczamy ją z katalogu startera zamiast przepisywać listę:
@@ -1155,6 +1156,160 @@ def test_kanal_dywizji() -> None:
           "pgrade to GitHub" in boot)
 
 
+# --------------------------------------------------------------------- kanal ticketowy
+def bez_komentarzy(tekst: str) -> str:
+    """Tekst pliku BEZ linii komentarza.
+
+    Powod jest zmierzony, nie estetyczny: asercja „w tym pliku nie ma juz `yaml.safe_dump(member)`"
+    zapalila sie na czerwono, bo tak wlasnie brzmi KOMENTARZ tlumaczacy, co robil stary renderer.
+    Detektor czytajacy komentarze twierdzi, ze kod robi to, co dokumentacja mowi, ze robil kiedys.
+    """
+    return "\n".join(l for l in tekst.splitlines() if not l.lstrip().startswith("#"))
+
+
+def kroki(workflow: dict) -> list:
+    """Nazwy krokow JEDYNEGO joba workflowa, w kolejnosci wykonania."""
+    job = list(workflow["jobs"].values())[0]
+    return [s.get("name") or s.get("uses", "") for s in job["steps"]]
+
+
+def test_kanal_ticketowy() -> None:
+    """Trzeci bok tezy „trzy kanaly, jeden mutator": kanal ticketowy ma miec TE SAME wlasnosci.
+
+    Ten test powstal po przejsciu kanalu end-to-end po raz pierwszy. Kazda asercja nizej odpowiada
+    czemus, czego kanal NIE mial, a nie czemus, co juz dzialalo.
+    """
+    print("\n== kanal ticketowy (intake.yml) ==")
+    tekst = (ROOT / ".github/workflows/intake.yml").read_text()
+    wf = yaml.safe_load(tekst)
+    # `on:` w YAML 1.1 parsuje sie na True, nie na napis — stad ten odczyt.
+    zdarzenia = set((wf.get(True) or wf.get("on") or {}).keys())
+
+    check("intake: nasluchuje workflow_dispatch", "workflow_dispatch" in zdarzenia, str(zdarzenia))
+    # `repository_dispatch` wymusza na nadawcy `contents: write`, czyli prawo zapisu do KODU perimetru.
+    # Zlozone z galezia domyslna bez ochrony i z apply ruszajacym z pushu na nia, poswiadczenie integracji
+    # ticketowej jest sciezka do zmiany granicy z pominieciem WSZYSTKICH bramek tresci — te wisza na
+    # `pull_request`. Argument „ale to nasz wlasny system" nie zmienia zasiegu wycieku TOKENU.
+    check("intake: repository_dispatch WYCOFANY (wymuszal contents: write na nadawcy)",
+          "repository_dispatch" not in zdarzenia, str(zdarzenia))
+    check("intake: nie nasluchuje na push ani pull_request (jedno wejscie)",
+          not ({"push", "pull_request", "pull_request_target"} & zdarzenia), str(zdarzenia))
+    check("intake: sam nie wysyla dispatcha (petla wykluczona konstrukcja)",
+          kanal_zgloszenia(tekst) == "brak", kanal_zgloszenia(tekst))
+    check("intake: odmawia obslugi poza galezia domyslna",
+          "github.event.repository.default_branch" in tekst and "GITHUB_REF_NAME" in tekst)
+
+    # DEC-2: system ticketowy NIE DOTYKA GCP. Zero tozsamosci, zero wywolan ACM. Sprawdzamy to na
+    # workflowie, a nie w dokumentacji, bo to jedyne miejsce, w ktorym da sie ta wlasnosc zlamac.
+    kod = "\n".join(l for l in tekst.splitlines() if not l.lstrip().startswith("#"))
+    check("intake: zero tozsamosci w GCP (DEC-2 — brak id-token, auth, gcloud)",
+          "id-token" not in kod and "google-github-actions" not in kod and "gcloud " not in kod)
+
+    # BRAMKI PRZED PR-em, i to jest asercja o KOLEJNOSCI, nie o obecnosci. Bramka wykonana po kroku,
+    # ktory moze paść, nie jest bramka tego kroku — a krok „otworz PR" realnie pada, dopoki PR otwiera
+    # `GITHUB_TOKEN` (patrz komentarz przy nim). Wczesniej `intake.yml` nie mial tych krokow w ogóle
+    # i cala jego walidacja wisiala na PR-ze, ktory moze nie powstac.
+    nazwy = kroki(wf)
+    for etap in ("schema", "ownership and onboarding rules"):
+        check(f"intake: krok {etap!r} istnieje", etap in nazwy, str(nazwy))
+    if "schema" in nazwy and "open the pull request" in nazwy:
+        check("intake: bramki tresci PRZED otwarciem PR-a",
+              nazwy.index("schema") < nazwy.index("open the pull request")
+              and nazwy.index("ownership and onboarding rules") < nazwy.index("open the pull request"),
+              str(nazwy))
+
+    # JEDEN RENDERER NA TRZY KANALY. Kanal dywizji mial WLASNA kopie w heredocu i kopia sie rozjechala:
+    # `yaml.safe_dump(member)` zapisywalo caly slownik z payloadu, wiec przechodzilo przez nia kazde
+    # dodatkowe pole wnioskodawcy — w tym `control_plane_exception` (furtka w bramce chroniacej przed
+    # samo-zablokowaniem) i `exceptions` (wymagaja approvalu Security). `render_member.py` sklada plik
+    # z LISTY DOZWOLONYCH POL, wiec te pola nie maja ktoredy wejsc.
+    ext = (ROOT / ".github/workflows/external-intake.yml").read_text()
+    for plik, tresc in ((".github/workflows/intake.yml", tekst),
+                        (".github/workflows/external-intake.yml", ext)):
+        check(f"{plik}: renderuje przez tools/render_member.py", "render_member.py" in tresc)
+    # Komentarz w tym workflowie CYTUJE stary kod (`yaml.safe_dump(member)`), zeby wyjasnic, co przez
+    # niego przechodzilo — wiec detektor musi czytac KOD, nie komentarze. Pierwsza wersja tej asercji
+    # zapalila sie na czerwono wlasnie na wlasnym komentarzu.
+    check("external-intake: NIE ma drugiego renderera (nie zrzuca payloadu do YAML-a)",
+          "yaml.safe_dump(member" not in bez_komentarzy(ext))
+
+    # ANTY-TAUTOLOGIA dla asercji wyzej: uruchamiamy renderer z polami, ktorych wnioskodawca nie ma prawa
+    # ustawiac, i sprawdzamy, ze ich w wyniku NIE MA. Asercja „nie ma stringa w pliku workflow" byloby
+    # tu za malo — mowi o ksztalcie kodu, nie o tym, co kod produkuje.
+    p = sh([sys.executable, "tools/render_member.py", "--division", "d1", "--project-id", "prj-alw-test",
+            "--project-number", "123456789012", "--owner-group", "g@example.com",
+            "--change-ref", "snow:RITM0000123", "--approved-by", "n@example.com",
+            "--profiles-json", '[{"name":"vertex-online-serving","params":{}}]',
+            "--out", "allowlist.yaml"], cwd=ROOT)
+    wynik = (ROOT / "allowlist.yaml").read_text() if (ROOT / "allowlist.yaml").exists() else ""
+    check("render_member.py sklada plik z listy dozwolonych pol (stage zawsze dry-run)",
+          p.returncode == 0 and "stage: dry-run" in wynik, p.stdout + p.stderr)
+    check("render_member.py NIE przepuszcza control_plane_exception ani niepustych exceptions",
+          "control_plane_exception" not in wynik and "exceptions: []" in wynik, wynik[:300])
+
+    # TRYB TESTOWY. Bramka na nazwe fixture'a decyduje o tym, CO zostanie uznane za odpowiedz systemu
+    # rekordu — wiec musi byc kotwiczonym dopasowaniem, a nie wzorcem powloki (`snow-[a-z0-9-]*`
+    # dopasowuje pierwszy znak z klasy, a `*` juz wszystko, wiec `snow-a/../..` przechodzi).
+    krok_fixture = next((s for s in list(wf["jobs"].values())[0]["steps"]
+                         if s.get("name") == "test mode - resolve the fixture"), None)
+    check("intake: krok trybu testowego istnieje", krok_fixture is not None)
+    if krok_fixture:
+        skrypt = ROOT / "krok-fixture.sh"
+        skrypt.write_text(krok_fixture["run"])
+        for wartosc, oczekiwany, opis in [
+            ("", 0, "pusty = tryb normalny"),
+            ("snow-approved", 0, "fixture z tests/"),
+            ("snow-a/../../etc/passwd", 1, "traversal przez podkatalog"),
+            ("../tests/snow-approved", 1, "traversal na poczatku"),
+            ("/etc/passwd", 1, "sciezka absolutna"),
+            ("snow-a; echo WSTRZYKNIETE", 1, "wstrzykniecie polecenia"),
+            ("snow-nie-ma-takiego", 1, "fixture nie istnieje"),
+        ]:
+            srodowisko = dict(os.environ, FIXTURE=wartosc,
+                              GITHUB_OUTPUT=str(ROOT / "gh_out"), GITHUB_STEP_SUMMARY=str(ROOT / "gh_sum"))
+            r = sh(["bash", str(skrypt)], cwd=ROOT, env=srodowisko)
+            check(f"intake fixture — {opis}", r.returncode == oczekiwany,
+                  f"rc={r.returncode}, oczekiwano {oczekiwany}: {r.stdout[-200:]}")
+            # Dowodem wykonania jest LINIA rowna wyjsciu `echo`, nie wystapienie napisu gdziekolwiek:
+            # komunikat bledu cytuje wartosc fixture'a, wiec zawiera ten napis takze wtedy, gdy nic
+            # sie nie wykonalo. Pierwsza wersja tej asercji zglaszala wlasnie taki falszywy alarm.
+            if wartosc.startswith("snow-a;"):
+                check("intake fixture — polecenie z nazwy NIE zostalo wykonane",
+                      not any(l.strip() == "WSTRZYKNIETE" for l in r.stdout.splitlines()), r.stdout[-200:])
+
+    # KTORY TOKEN OTWIERA PR, DECYDUJE CZY PR JEST SPRAWDZANY. Z `GITHUB_TOKEN` utworzenie PR-a jest
+    # odmawiane (`GitHub Actions is not permitted to create or approve pull requests`), a nawet po
+    # wlaczeniu tamtego ustawienia PR utworzony tym tokenem nie uruchamia workflowow `pull_request`.
+    for plik, tresc in ((".github/workflows/intake.yml", tekst),
+                        (".github/workflows/external-intake.yml", ext)):
+        check(f"{plik}: PR-a otwiera token instalacji Appa, gdy jest (INTAKE_PR_TOKEN)",
+              "secrets.INTAKE_PR_TOKEN" in tresc)
+        # Bez stanu posredniego: `create-pull-request` wypycha galaz ZANIM wola API PR-ow, wiec odmowa
+        # zostawia galaz z plikiem czlonka i bez PR-a — niewidoczna na liscie PR-ow.
+        check(f"{plik}: po odmowie PR-a kasuje galaz, ktora wypchnal",
+              "steps.pr.outcome == 'failure'" in tresc and "git/refs/heads" in tresc)
+
+    # snow_verify.py: cztery checki, cztery fixture'y. `snow-not-found` domyka punkt 1 („ticket
+    # istnieje"), ktory przez caly czas byl JEDYNYM bez pokrycia — ta galaz kodu nie wykonala sie
+    # w zadnym tescie. `snow-no-approval` dokłada dowod, ze NIEZNANY ksztalt odpowiedzi degraduje sie
+    # do odmowy, a nie do zgody.
+    for fixture, opis in [("tests/snow-not-found.json", "ticket nie istnieje w systemie rekordu"),
+                          ("tests/snow-no-approval.json", "ticket bez zadnego sladu zatwierdzenia")]:
+        p = sh([sys.executable, "tools/snow_verify.py", "--ticket", "RITM0000001",
+                "--expect-project", "prj-x-test", "--offline-fixture", fixture], cwd=ROOT)
+        check(f"snow_verify.py ODRZUCA: {opis}", p.returncode != 0, p.stdout + p.stderr)
+
+    # Brak konfiguracji systemu rekordu to ODMOWA Z KOMUNIKATEM, nie traceback. Kod wyjscia byl niezerowy
+    # tak czy siak, ale tryb awarii, ktorego nikt nie umie odczytac, konczy sie „to chyba flaka, puscmy
+    # jeszcze raz" — czyli sciezka, na ktorej ludzie zaczynaja szukac obejscia bramki zamiast przyczyny.
+    czyste = {k: v for k, v in os.environ.items() if k not in ("SNOW_INSTANCE", "SNOW_USER", "SNOW_TOKEN")}
+    p = sh([sys.executable, "tools/snow_verify.py", "--ticket", "RITM0000001",
+            "--expect-project", "prj-x-test"], cwd=ROOT, env=czyste)
+    check("snow_verify.py bez konfiguracji SNOW: odmowa z komunikatem, nie traceback",
+          p.returncode == 2 and "ODRZUCONE" in p.stderr and "Traceback" not in p.stderr,
+          f"rc={p.returncode}: {p.stderr[-200:]}")
+
+
 # --------------------------------------------------------------------- monitoring
 def test_monitoring() -> None:
     """Perimetr bez alertu to granica, o której dowiadujesz się od użytkownika."""
@@ -2083,11 +2238,17 @@ def test_workflows() -> None:
     # NAPRAWDĘ wysłało dispatch, a stage jest nadpisywany na dry-run niezależnie od treści payloadu.
     check("external-intake: change_ref sprawdzany wobec repozytorium zgłaszającego",
           'ref.startswith(f"pr:{source}#")' in ext)
-    check("external-intake: stage wymuszany na dry-run", 'member["stage"] = "dry-run"' in ext)
-    # Trzecie zabezpieczenie: istniejący wpis nie może zostać nadpisany. Sprawdzamy też KOLEJNOŚĆ — wymuszenie
-    # dry-run po sprawdzeniu istnienia jest bezpieczne, przed nim byłoby cichą degradacją członka `enforced`.
-    check("external-intake: nie nadpisuje istniejacego czlonka",
-          "if out.exists():" in ext and ext.index("if out.exists():") < ext.index('member["stage"] = "dry-run"'))
+    # WYMUSZENIE dry-run I ZAKAZ NADPISANIA sa nadal niezbywalne — ale od czasu ujednolicenia renderera
+    # egzekwuje je `tools/render_member.py`, a nie kopia logiki w tym workflowie. Te dwie asercje szukały
+    # kiedyś literalnie `member["stage"] = "dry-run"` w tekście workflowa, czyli mierzyły KSZTAŁT KODU,
+    # a nie własność, która ma być prawdziwa. Po przeniesieniu tej logiki w jedno miejsce paliłyby się na
+    # zielono dopiero po przywróceniu drugiego renderera — czyli nagradzałyby regresję.
+    check("external-intake: renderuje przez wspolny tools/render_member.py (jeden renderer, trzy kanaly)",
+          "tools/render_member.py" in ext)
+    # Wlasnosci egzekwowane przez tamten skrypt sprawdza test_kanal_ticketowy(), URUCHAMIAJAC go: plik
+    # wychodzi ze `stage: dry-run`, a powtorne zgloscenie istniejacego czlonka konczy sie bledem.
+    check("external-intake: nie ma DRUGIEGO renderera (nie zrzuca payloadu do YAML-a)",
+          "yaml.safe_dump(member" not in bez_komentarzy(ext), "zostal zrzut calego payloadu")
 
     # Bramki po stronie GitHuba selftest sprawdzić nie może — nie ma API. Może za to sprawdzić, czy skrypt,
     # który je zakłada, ROZRÓŻNIA wysłanie ustawienia od jego istnienia. Cała ta trójka pilnuje jednego
@@ -2580,6 +2741,7 @@ def main() -> int:
     test_kontrakt_dwie_publikacje()
     test_przyklad_repo_dywizji()
     test_kanal_dywizji()
+    test_kanal_ticketowy()
     test_monitoring()
     test_brownfield()
     test_external_egress_and_guard()

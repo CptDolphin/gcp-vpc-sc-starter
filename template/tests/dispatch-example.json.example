@@ -1,24 +1,29 @@
 {
-  "event_type": "vpc-sc-onboard",
-  "client_payload": {
-    "snow_ticket": "RITM0000001",
-    "division": "example-division",
-    "project_id": "prj-example-vertex-dev",
-    "project_number": "000000000000",
-    "owner_group": "grp-example-division-cloud@example.com",
-    "approved_by": "net-approver@example.com",
-    "profiles": [
-      {
-        "name": "vertex-online-serving",
-        "params": {
-          "caller_identities": [
-            "serviceAccount:sa-scoring@prj-example-app-dev.iam.gserviceaccount.com"
-          ],
-          "access_levels": [
-            "corp_network"
-          ]
-        }
+  "_komentarz": [
+    "Wejscia workflow_dispatch dla .github/workflows/intake.yml (kanal ticketowy).",
+    "Do 2026-08-11 ten plik opisywal payload `repository_dispatch` — tamten kanal zostal usuniety,",
+    "bo wymagal od integracji ticketowej uprawnienia `contents: write`, czyli prawa zapisu kodu",
+    "w repozytorium perimetru (#1947, ten sam powod co #1958 dla kanalu dywizji).",
+    "Pola `stage`, `dry_run_since` i `review_by` NIE wystepuja tu celowo: wpisuje je strona perimetru.",
+    "Uruchomienie: gh workflow run intake.yml -R <org>/<repo> --ref main -f snow_ticket=... -f ..."
+  ],
+  "snow_ticket": "RITM0000001",
+  "division": "example-division",
+  "project_id": "prj-example-vertex-dev",
+  "project_number": "000000000000",
+  "owner_group": "grp-example-division-cloud@example.com",
+  "approved_by": "net-approver@example.com",
+  "profiles": [
+    {
+      "name": "vertex-online-serving",
+      "params": {
+        "caller_identities": [
+          "serviceAccount:sa-scoring@prj-example-app-dev.iam.gserviceaccount.com"
+        ],
+        "access_levels": [
+          "corp_network"
+        ]
       }
-    ]
-  }
+    }
+  ]
 }

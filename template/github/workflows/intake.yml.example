@@ -1,23 +1,73 @@
 # .github/workflows/intake.yml
-# ServiceNow → PR. This is the ONLY entry point for a division joining the perimeter.
+# ServiceNow → PR. The ticketing channel: one of the three entry points a division can join the perimeter by.
 #
 # WHY a PR and not a direct API call to Access Context Manager: a ticket-driven API call gives up the three
 # properties a security boundary cannot live without — an audit trail that explains WHY a rule exists,
 # a rollback that is just `git revert`, and drift detection (without a declared state there is nothing to
 # compare the live one against). The ticket stays what it is good at: the record of business approval.
+#
+# WHY workflow_dispatch AND NOT repository_dispatch — the same measurement that moved the division channel
+# (#1958), applied to the channel it deliberately left alone. `repository_dispatch` can only be sent with
+# Contents WRITE, i.e. the right to write code in THIS repository. Compose that with a default branch
+# without branch protection (403 `Upgrade to GitHub Pro` on this plan) and with apply running from that
+# branch, and the ticketing integration's credential stops being "the right to ask" and becomes a path to
+# mutating the organization's boundary with every gate bypassed: schema, OPA, budget and pre-flight all
+# hang off `pull_request`, and a push straight to the default branch runs none of them.
+#
+# The comment this file used to carry said the ServiceNow sender was "a different credential with a
+# different owner" and left it there. That is true and it does not help: the blast radius of a leaked
+# token is a property of the TOKEN'S RIGHTS, not of who was supposed to be holding it. `workflow_dispatch`
+# needs `actions: write`, which starts workflows and writes no code — measured disjoint from `contents` in
+# both directions (runbook §5). What `actions: write` still allows, said out loud: re-running, cancelling
+# and DELETING RUN LOGS in this repository. Narrower than code write, not zero — so the audit trail that
+# matters lives in git (the pull request and its commit), not only in run history.
+#
+# THIS WORKFLOW STILL NEVER TOUCHES GOOGLE CLOUD (DEC-2). No `id-token: write`, no
+# `google-github-actions/auth`, no gcloud. The ticketing system is the record of business approval and
+# nothing else; every call that can change the boundary lives in apply.yml.
 
 name: intake
 
 on:
-  repository_dispatch:
-    types: [vpc-sc-onboard]
+  # Flat string inputs (max 10, 65535 characters each), exactly like external-intake.yml. `profiles`
+  # travels as ONE input holding JSON, because inputs cannot be nested.
+  workflow_dispatch:
+    inputs:
+      snow_ticket:
+        description: ServiceNow request item, e.g. RITM0000123.
+        required: true
+      division:
+        description: Division the project belongs to.
+        required: true
+      project_id:
+        description: Project id joining the perimeter.
+        required: true
+      project_number:
+        description: Project NUMBER — Access Context Manager addresses projects by number, not by id.
+        required: true
+      owner_group:
+        description: Owner group; the violations report for the observation window goes here.
+        required: true
+      approved_by:
+        description: Who signed the change off on the requesting side.
+        required: true
+      profiles:
+        description: Requested profiles with their parameters, as a JSON array.
+        required: true
+      fixture:
+        description: >-
+          TEST MODE. Name of a fixture under tests/ (without the .json), used INSTEAD of calling
+          ServiceNow. Leave empty in normal operation — see the "test mode" step for what it does and
+          does not let through.
+        required: false
+        default: ""
 
 permissions:
-  contents: write # the bot commits a member file on a branch
+  contents: write # the bot commits a member file on a branch of THIS repository
   pull-requests: write
 
 concurrency:
-  group: intake-${{ github.event.client_payload.project_id }}
+  group: intake-${{ github.event.inputs.project_id }}
   cancel-in-progress: false
 
 jobs:
@@ -25,30 +75,100 @@ jobs:
     name: verify ticket and open PR
     runs-on: ubuntu-latest
     steps:
+      # The dispatch endpoint takes a `ref` and runs the workflow FILE as it exists there. The sender picks
+      # that ref. It cannot create one — `actions: write` writes no code — but branches left behind by open
+      # pull requests do exist, and the version of this file on such a branch is not the version that was
+      # reviewed. Identical guard to external-intake.yml, and for the identical reason.
+      - name: only the default branch handles intake
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          [ "$GITHUB_REF_NAME" = "$DEFAULT_BRANCH" ] || {
+            echo "::error::zgloszenie uruchomione na '$GITHUB_REF_NAME', a nie na '$DEFAULT_BRANCH'"
+            exit 1
+          }
+
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      # THE payload is DATA, never authorization. A repository_dispatch is exactly as trustworthy as the
-      # token that sent it, and tokens leak. We call ServiceNow back and ask the system of record whether
-      # this ticket is really approved, by whom, and for which project.
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: install tooling
+        run: |
+          pip install --quiet pyyaml check-jsonschema
+          curl -sSfL -o /tmp/conftest.tar.gz \
+            https://github.com/open-policy-agent/conftest/releases/download/v0.56.0/conftest_0.56.0_Linux_x86_64.tar.gz
+          tar -xzf /tmp/conftest.tar.gz -C /tmp conftest
+          sudo mv /tmp/conftest /usr/local/bin/
+
+      # TEST MODE — bounded on purpose, because a test facility on the entry path of a security boundary is
+      # a hole unless somebody wrote down what bounds it.
+      #
+      # The fixture NAME comes from the dispatch; the fixture CONTENT does not. It is read from `tests/`
+      # in the checked-out default branch, i.e. from reviewed, merged, CODEOWNERS-covered content.
+      #
+      # WHAT STILL BOUNDS THE REQUEST IN TEST MODE — the fixture itself. snow_verify.py check 4 compares
+      # `u_project_id` in the fixture against `--expect-project` from the dispatch, so a fixture can only
+      # ever onboard the ONE project written in it. `tests/snow-approved.json` says `prj-x-test`; no dispatch
+      # input can turn it into somebody's real project. That is why test mode does not need a second guard
+      # bolted onto it: the gate that is already there narrows it to a project that does not exist.
+      - name: test mode - resolve the fixture
+        id: fixture
+        env:
+          FIXTURE: ${{ inputs.fixture }}
+        run: |
+          if [ -z "$FIXTURE" ]; then
+            echo "path=" >> "$GITHUB_OUTPUT"
+            echo "Tryb normalny: weryfikacja przez API ServiceNow." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # `grep -qE` z KOTWICAMI, a nie `case`: wzorce powłoki nie mają kotwic w tym sensie, w jakim
+          # potrzebujemy — `snow-[a-z0-9-]*` dopasowuje pierwszy znak z klasy, a `*` już WSZYSTKO, więc
+          # `snow-a/../../cokolwiek` przechodzi. Ta nazwa trafia potem do ścieżki pliku, czyli decyduje,
+          # co zostanie uznane za odpowiedź systemu rekordu. Pełne dopasowanie ^…$ jest tu bramką, nie
+          # stylem: bez niego „fixture" wskazuje dowolny JSON w repozytorium albo poza nim.
+          printf '%s' "$FIXTURE" | grep -qE '^snow-[a-z0-9-]+$' || {
+            echo "::error::fixture '$FIXTURE' poza dozwolonym wzorcem ^snow-[a-z0-9-]+\$"; exit 1; }
+          [ -f "tests/$FIXTURE.json" ] || {
+            echo "::error::tests/$FIXTURE.json nie istnieje na galezi domyslnej"; exit 1; }
+          echo "path=tests/$FIXTURE.json" >> "$GITHUB_OUTPUT"
+          {
+            echo "### TRYB TESTOWY"
+            echo "System rekordu zastapiony fixture'em \`tests/$FIXTURE.json\` (tresc z galezi domyslnej)."
+            echo "Projekt jest ograniczony przez \`u_project_id\` w tym fixturze — patrz komentarz w workflow."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # THE payload is DATA, never authorization. A dispatch is exactly as trustworthy as the token that
+      # sent it, and tokens leak. We call ServiceNow back and ask the system of record whether this ticket
+      # is really approved, by whom, and for which project.
       - name: verify the ticket at the source
         env:
           SNOW_INSTANCE: ${{ secrets.SNOW_INSTANCE }}
           SNOW_USER: ${{ secrets.SNOW_USER }}
           SNOW_TOKEN: ${{ secrets.SNOW_TOKEN }}
+          TICKET: ${{ inputs.snow_ticket }}
+          PROJECT_ID: ${{ inputs.project_id }}
+          # Przez `env:`, NIE przez `${{ }}` w ciele `run:`. Wartość wyrażenia wklejona do skryptu jest
+          # kodem, a nie argumentem — to ta sama zasada, którą external-intake.yml stosuje do payloadu.
+          FIXTURE_PATH: ${{ steps.fixture.outputs.path }}
         run: |
-          python3 tools/snow_verify.py \
-            --ticket "${{ github.event.client_payload.snow_ticket }}" \
-            --expect-project "${{ github.event.client_payload.project_id }}"
+          if [ -n "$FIXTURE_PATH" ]; then
+            python3 tools/snow_verify.py --ticket "$TICKET" --expect-project "$PROJECT_ID" \
+              --offline-fixture "$FIXTURE_PATH"
+          else
+            python3 tools/snow_verify.py --ticket "$TICKET" --expect-project "$PROJECT_ID"
+          fi
 
       - name: render the member file
         env:
-          DIVISION: ${{ github.event.client_payload.division }}
-          PROJECT_ID: ${{ github.event.client_payload.project_id }}
-          PROJECT_NUMBER: ${{ github.event.client_payload.project_number }}
-          OWNER_GROUP: ${{ github.event.client_payload.owner_group }}
-          CHANGE_REF: "snow:${{ github.event.client_payload.snow_ticket }}"
-          APPROVED_BY: ${{ github.event.client_payload.approved_by }}
-          PROFILES_JSON: ${{ toJSON(github.event.client_payload.profiles) }}
+          DIVISION: ${{ inputs.division }}
+          PROJECT_ID: ${{ inputs.project_id }}
+          PROJECT_NUMBER: ${{ inputs.project_number }}
+          OWNER_GROUP: ${{ inputs.owner_group }}
+          CHANGE_REF: "snow:${{ inputs.snow_ticket }}"
+          APPROVED_BY: ${{ inputs.approved_by }}
+          PROFILES_JSON: ${{ inputs.profiles }}
         run: |
           python3 tools/render_member.py \
             --division "$DIVISION" \
@@ -60,16 +180,64 @@ jobs:
             --profiles-json "$PROFILES_JSON" \
             --out "perimeter/members/${DIVISION}-${PROJECT_ID}.yaml"
 
-      # The bot always writes stage: dry-run (render_member.py hard-codes it). Promotion to enforced is a
-      # separate, human-approved PR — see docs/3-runbook-promocja-i-break-glass.md.
+      # THE SAME GATES THE OTHER CHANNELS RUN, AND THEY RUN HERE FOR A REASON THAT IS NOT SYMMETRY.
+      # Before this, the ticketing channel opened its pull request without validating anything it had just
+      # written: schema and OPA hung off `pull_request` only. A malformed or policy-breaking member file
+      # therefore reached a PR, and whether it was ever CHECKED depended on which token opened that PR —
+      # a pull request opened with GITHUB_TOKEN starts no `pull_request` workflow. A channel whose gates
+      # live entirely on the other side of a step that may not happen is not gated.
+      - name: schema
+        run: check-jsonschema --schemafile schemas/member.schema.json perimeter/members/*.yaml
+
+      - name: ownership and onboarding rules
+        run: |
+          python3 tools/collect_declarations.py > declarations.json
+          conftest test --policy policy --namespace vpcsc.onboarding declarations.json
+
+      # CO NAPRAWDE POWSTALO, w przebiegu, a nie tylko w pull requescie. Normalnie plik czlonka widac
+      # w diffie PR-a — ale gdy utworzenie PR-a zostanie odmowione (krok nizej), jedynym sladem po tym,
+      # co kanal wyrenderowal, byla nazwa pliku w logu. Wnioskodawca nie ma dostepu do repozytorium
+      # perimetru, wiec podsumowanie przebiegu jest dla niego JEDYNYM miejscem, w ktorym moze zobaczyc,
+      # jakie pola zostaly mu ustawione po tej stronie i ze `stage` to `dry-run`.
+      - name: what was rendered
+        env:
+          MEMBER_FILE: perimeter/members/${{ inputs.division }}-${{ inputs.project_id }}.yaml
+        run: |
+          {
+            echo "### Wyrenderowany plik czlonka — \`$MEMBER_FILE\`"
+            echo '```yaml'
+            cat "$MEMBER_FILE"
+            echo '```'
+            echo "sha256: \`$(sha256sum "$MEMBER_FILE" | cut -d' ' -f1)\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # WHICH TOKEN OPENS THE PULL REQUEST DECIDES WHETHER THE PULL REQUEST IS EVER CHECKED — this is the
+      # prerequisite that broke this channel end to end, measured 2026-08-11 (#1947), and it is written
+      # here rather than only in docs/ because this is the step it breaks.
+      #
+      #   * `GITHUB_TOKEN` — creation is refused outright while the repository setting "Allow GitHub
+      #     Actions to create and approve pull requests" is off (`can_approve_pull_request_reviews: false`,
+      #     the default): `GitHub Actions is not permitted to create or approve pull requests`. The branch
+      #     is already pushed at that point, so the channel fails HALF-DONE. Turning that setting on is not
+      #     the fix and this file does not ask for it: it also grants Actions the right to APPROVE pull
+      #     requests, and a pull request created with GITHUB_TOKEN triggers no `pull_request` workflow at
+      #     all — so the channel would start producing member-file PRs that no gate ever looks at.
+      #   * A GitHub App installation token (`secrets.INTAKE_PR_TOKEN`) — creation works AND the resulting
+      #     pull request runs `validate` and `plan` like any human one. That is the supported configuration;
+      #     `tools/bootstrap_github.sh` names it as a prerequisite.
+      #
+      # The fallback to `github.token` is kept so the channel degrades to a LOUD, harmless failure instead
+      # of a silent one, and the step below cleans up the branch it left behind.
       - name: open the pull request
+        id: pr
         uses: peter-evans/create-pull-request@c5a7806660adbe173f04e3e038b0ccdcd758773c # v6.1.0
         with:
-          branch: onboard/${{ github.event.client_payload.division }}-${{ github.event.client_payload.project_id }}
-          title: "onboard: ${{ github.event.client_payload.division }} / ${{ github.event.client_payload.project_id }} (dry-run)"
-          commit-message: "onboard: add ${{ github.event.client_payload.project_id }} to the dry-run configuration"
+          token: ${{ secrets.INTAKE_PR_TOKEN || github.token }}
+          branch: onboard/${{ inputs.division }}-${{ inputs.project_id }}
+          title: "onboard: ${{ inputs.division }} / ${{ inputs.project_id }} (dry-run)"
+          commit-message: "onboard: add ${{ inputs.project_id }} to the dry-run configuration"
           body: |
-            Opened automatically from ServiceNow **${{ github.event.client_payload.snow_ticket }}**
+            Opened automatically from ServiceNow **${{ inputs.snow_ticket }}**
             (verified against the ServiceNow API, not against the dispatch payload).
 
             The project joins the **dry-run configuration only**: violations are logged, nothing is blocked
@@ -81,3 +249,29 @@ jobs:
             - [ ] the requested profiles match the described use case
             - [ ] pre-flight is green (Private Google Access, DNS on the restricted VIP)
           labels: onboarding, dry-run
+
+      # NO HALF-STATE. `create-pull-request` pushes the branch BEFORE it calls the pull-request API, so a
+      # refusal at that call leaves a branch carrying a member file and no pull request pointing at it —
+      # invisible in the pull-request list, and a starting point for somebody to open that PR by hand later
+      # without ever seeing the run that produced it. Measured on the division channel the same day, branch
+      # `external/lab-div-rwlab-vpcsc-t-div`. We delete what THIS run created, and only that.
+      - name: clean up the branch when the pull request was refused
+        if: failure() && steps.pr.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: onboard/${{ inputs.division }}-${{ inputs.project_id }}
+        run: |
+          otwarte=$(gh pr list --head "$BRANCH" --state open --json number --jq 'length')
+          if [ "$otwarte" != "0" ]; then
+            echo "::notice::galaz $BRANCH ma otwarty pull request — nie usuwam"
+            exit 0
+          fi
+          gh api -X DELETE "repos/${GITHUB_REPOSITORY}/git/refs/heads/${BRANCH}" \
+            && echo "::notice::usunieto osierocona galaz $BRANCH"
+          {
+            echo "### Zgloszenie NIE utworzylo pull requesta"
+            echo "Plik czlonka zostal zrenderowany i przeszedl bramki, ale utworzenie PR-a odmowiono."
+            echo "Najczestsza przyczyna: PR otwiera \`GITHUB_TOKEN\`, a ustawienie repozytorium"
+            echo "\"Allow GitHub Actions to create and approve pull requests\" jest wylaczone."
+            echo "Konfiguracja wspierana: token instalacji GitHub Appa w \`secrets.INTAKE_PR_TOKEN\`."
+          } >> "$GITHUB_STEP_SUMMARY"
