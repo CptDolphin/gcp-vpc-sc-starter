@@ -21,7 +21,7 @@
         <mxCell id="prof" value="&lt;b&gt;perimeter/profiles/*.yaml&lt;/b&gt;&lt;br&gt;reusable rule templates&lt;br&gt;a division picks a profile, never writes rules" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D5E8D4;strokeColor=#82B366;fontSize=11;spacing=6;" vertex="1" parent="repo">
           <mxGeometry x="25" y="170" width="370" height="80" as="geometry"/>
         </mxCell>
-        <mxCell id="memb" value="&lt;b&gt;perimeter/members/*.yaml&lt;/b&gt;&lt;br&gt;one file = one project&lt;br&gt;stage: dry-run | enforced&lt;br&gt;owner · ticket · review_by" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D5E8D4;strokeColor=#82B366;fontSize=11;spacing=6;" vertex="1" parent="repo">
+        <mxCell id="memb" value="&lt;b&gt;perimeter/projects.yaml&lt;/b&gt;&lt;br&gt;one shared file · a LIST of member entries&lt;br&gt;stage: dry-run | enforced&lt;br&gt;owner · ticket · review_by&lt;br&gt;&lt;i&gt;key = &amp;lt;division&amp;gt;-&amp;lt;project_id&amp;gt;, read from the entry&lt;/i&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D5E8D4;strokeColor=#82B366;fontSize=11;spacing=6;" vertex="1" parent="repo">
           <mxGeometry x="25" y="270" width="370" height="95" as="geometry"/>
         </mxCell>
         <mxCell id="al" value="&lt;b&gt;perimeter/access-levels/*.yaml&lt;/b&gt;&lt;br&gt;context conditions (corp network, device)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D5E8D4;strokeColor=#82B366;fontSize=11;spacing=6;" vertex="1" parent="repo">

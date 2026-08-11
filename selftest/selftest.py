@@ -88,17 +88,19 @@ def bootstrap() -> None:
         ".github/workflows/external-intake.yml", ".github/workflows/publish-gates.yml",
         ".github/workflows/starter-drift.yml", ".starter-sync",
         ".github/workflows/boundary-probe.yml",
+        ".github/workflows/intake-rebase.yml", ".gitattributes",
         "contrib/action.yml", "contrib/validate-local.sh", "contrib/README.md",
         ".gitignore", ".pre-commit-config.yaml", ".tool-versions",
         "perimeter/policy.yaml", "perimeter/access-levels/corp.yaml", "perimeter/contributors.yaml",
-        "perimeter/members/example-division-prj-example-vertex-dev.yaml",
+        "perimeter/projects.yaml",
         "perimeter/profiles/vertex-online-serving.yaml",
         "perimeter/profiles/vertex-batch-training.yaml",
         "perimeter/profiles/corp-user-console-access.yaml",
         "perimeter/profiles/bq-omni-external-read.yaml",
         "policy/onboarding.rego", "policy/onboarding_test.rego",
         "policy/perimeter.rego", "policy/perimeter_test.rego",
-        "schemas/member.schema.json", "schemas/policy.schema.json", "schemas/profile.schema.json",
+        "schemas/member.schema.json", "schemas/projects.schema.json",
+        "schemas/policy.schema.json", "schemas/profile.schema.json",
         "schemas/access-level.schema.json",
         "terraform/locals.tf", "terraform/members.tf", "terraform/outputs.tf",
         "terraform/perimeter.tf", "terraform/rules.tf", "terraform/versions.tf",
@@ -110,7 +112,8 @@ def bootstrap() -> None:
         "violations-sink/versions.tf", "violations-sink/terraform.tfvars.sample",
         "violations-sink/outputs.tf",
         "tools/attribute_budget.py", "tools/collect_declarations.py", "tools/preflight_check.sh",
-        "tools/render_member.py", "tools/snow_verify.py", "tools/violations_report.py",
+        "tools/render_member.py", "tools/projects_file.py", "tools/snow_verify.py",
+        "tools/violations_report.py",
         "tools/deny_check.sh",
         "tools/bootstrap_github.sh", "docs/access-request.md",
         "tools/check_supported_services.py",
@@ -255,13 +258,18 @@ def test_terraform() -> None:
     baseline_przed = konsola("length(local.baseline_rules_all)")
     odcisk_przed = konsola(odcisk_all)
 
-    wzor = sorted((ROOT / "perimeter/members").glob("*.yaml"))[0]
-    kopia = wzor.with_name("zz-selftest-drugi-czlonek.yaml")
-    dane = yaml.safe_load(wzor.read_text())
+    # Drugi czlonek dopisywany do WSPOLNEGO pliku (DEC-12), a nie jako nowy plik. Oryginal wraca w `finally`
+    # z zapamietanych BAJTOW, nie z ponownego zrzutu YAML-a: material startera ma byc po tescie identyczny
+    # co do bajta, inaczej selftest brudzilby drzewo, na ktorym sam orzeka o postaci kanonicznej.
+    plik_czlonkow = ROOT / "perimeter/projects.yaml"
+    kopia_zapasowa = plik_czlonkow.read_text()
+    dokument = yaml.safe_load(kopia_zapasowa)
+    dane = json.loads(json.dumps(dokument["members"][0]))
     dane["project_id"] = "prj-selftest-kopia"
     dane["project_number"] = "999999999999"
     dane["stage"] = "enforced"
-    kopia.write_text(yaml.safe_dump(dane, allow_unicode=True, sort_keys=False))
+    dokument["members"].append(dane)
+    plik_czlonkow.write_text(yaml.safe_dump(dokument, allow_unicode=True, sort_keys=False))
     try:
         czlonkowie_po = konsola("length(local.members)")
         baseline_po = konsola("length(local.baseline_rules_all)")
@@ -273,7 +281,7 @@ def test_terraform() -> None:
         # linie — czyli asercja badalaby nawias zamykajacy. Jedna linia jest tez porownywalna wprost.
         zasoby_enf = konsola(f"join(\",\", local.baseline_rules_enforced[{klucz_enf}].resources)")
     finally:
-        kopia.unlink()
+        plik_czlonkow.write_text(kopia_zapasowa)
 
     # Premisy sa czescia asercji: gdyby przykladowy czlonek albo baseline zniknal z materialu, ponizsze
     # rownosci byly by prawdziwe „bo nic nie ma", a test meldowalby zielono nie badajac niczego.
@@ -341,6 +349,174 @@ def test_terraform() -> None:
 
 
 # --------------------------------------------------------------------- iam-bootstrap
+def test_jeden_plik_projektow() -> None:
+    """Niezmienniki układu jednoplikowego (DEC-12).
+
+    NAJWAŻNIEJSZY test w tym pliku dotyczy jednej rzeczy: kanał wejściowy NIE MOŻE nadpisać wpisu członka,
+    który już jest w perimetrze. Przy pliku na projekt pilnował tego `out.exists()` — warunek o systemie
+    plików. Przy pliku wspólnym „plik istnieje" jest prawdą zawsze, więc gdyby ten warunek przeniesiono
+    dosłownie, powtórne zgłoszenie zapisałoby `stage: dry-run` członkowi, który jest `enforced`: projekt
+    traci ochronę pull requestem wyglądającym na onboarding, przechodzącym KAŻDĄ bramkę (nowy stan
+    `dry-run` nie łamie żadnej reguły promocji) i kwalifikującym się do auto-merge'a.
+    """
+    print("\n== jeden plik projektow (DEC-12) ==")
+    plik = ROOT / "perimeter/projects.yaml"
+    kopia = plik.read_text()
+
+    check("stary uklad zniknal: nie ma katalogu perimeter/members/",
+          not (ROOT / "perimeter/members").exists())
+
+    sys.path.insert(0, str(ROOT / "tools"))
+    for modul in ("projects_file",):
+        sys.modules.pop(modul, None)
+    import projects_file  # noqa: E402 — modul zyje w rozpakowanym repo, nie w starterze
+
+    try:
+        wpisy = projects_file.wczytaj(ROOT)["members"]
+        czlonek = wpisy[0]
+        check("klucz czlonka to `<dywizja>-<project_id>` (adres w stanie Terraforma)",
+              projects_file.klucz(czlonek) == f"{czlonek['division']}-{czlonek['project_id']}")
+
+        # --- NIEZMIENNIK: powtorne zgloszenie czlonka `enforced` ---------------------------------------
+        # Ustawiamy przykladowego czlonka na `enforced`, zeby test badal DOKLADNIE ten przypadek, ktory boli:
+        # utrate ochrony, a nie samo „nie dubluj wpisu".
+        dokument = projects_file.wczytaj(ROOT)
+        dokument["members"][0]["stage"] = "enforced"
+        projects_file.zapisz(ROOT, dokument)
+        przed = plik.read_text()
+
+        def zgloszenie(project_id, project_number, division=None):
+            return sh([sys.executable, "tools/render_member.py",
+                       "--division", division or czlonek["division"],
+                       "--project-id", project_id,
+                       "--project-number", str(project_number),
+                       "--owner-group", "grp-example@example.com",
+                       "--change-ref", "snow:RITM0000001",
+                       "--approved-by", "net-approver@example.com",
+                       "--profiles-json", json.dumps(czlonek["profiles"])], cwd=ROOT)
+
+        r = zgloszenie(czlonek["project_id"], czlonek["project_number"])
+        po = plik.read_text()
+        check("NIEZMIENNIK: powtorne zgloszenie czlonka `enforced` jest ODRZUCANE",
+              r.returncode != 0, (r.stdout + r.stderr)[-500:])
+        check("NIEZMIENNIK: odrzucone zgloszenie NIE TKNELO pliku (stage nadal `enforced`)",
+              po == przed and yaml.safe_load(po)["members"][0]["stage"] == "enforced",
+              f"stage po probie={yaml.safe_load(po)['members'][0].get('stage')!r}")
+        check("NIEZMIENNIK: komunikat mowi, ze projekt JUZ JEST czlonkiem (a nie o formacie wniosku)",
+              "juz opisuje ten projekt" in (r.stdout + r.stderr))
+
+        # Literowka w dywizji daje INNY klucz przy TYM SAMYM projekcie. Gdyby bramka pytala tylko o klucz
+        # (albo tylko o `project_id`), taki wniosek przeszedlby jako onboarding nowego czlonka.
+        r = zgloszenie(czlonek["project_id"], czlonek["project_number"], division="inna-dywizja")
+        check("NIEZMIENNIK: ten sam projekt pod INNA dywizja tez jest odrzucany",
+              r.returncode != 0 and plik.read_text() == przed, (r.stdout + r.stderr)[-400:])
+
+        r = zgloszenie("prj-example-inny-projekt", czlonek["project_number"])
+        check("NIEZMIENNIK: zgodny sam `project_number` (literowka w project_id) tez jest odrzucany",
+              r.returncode != 0 and plik.read_text() == przed, (r.stdout + r.stderr)[-400:])
+
+        # ANTY-TAUTOLOGIA: bramka, ktora odrzuca WSZYSTKO, przeszlaby trzy testy wyzej i nie bylaby bramka.
+        r = zgloszenie("prj-example-nowy-czlonek", "555555555555")
+        wpisy_po = projects_file.wczytaj(ROOT)["members"]
+        check("ANTY-TAUTOLOGIA: zgloszenie NOWEGO projektu jest przyjmowane i dopisane na koncu",
+              r.returncode == 0 and len(wpisy_po) == len(wpisy) + 1
+              and wpisy_po[-1]["project_id"] == "prj-example-nowy-czlonek",
+              (r.stdout + r.stderr)[-400:])
+        check("dopisanie wpisu NIE PRZEPISUJE reszty pliku (bajty sprzed zmiany zostaja prefiksem)",
+              plik.read_text().startswith(przed), "dopisanie zmodyfikowalo istniejaca tresc")
+        check("dopisany wpis ma `stage: dry-run` niezaleznie od tresci zgloszenia",
+              wpisy_po[-1]["stage"] == "dry-run")
+
+        # --- bramka duplikatu: cztery warstwy ---------------------------------------------------------
+        plik.write_text(kopia)
+
+        # (1) strict loader — duplikat klucza mapy WEWNATRZ wpisu. To jest typowy wynik `merge=union`
+        # na edycji tego samego wpisu i JEDYNY przypadek, ktorego nie widzi zadna regula o duplikatach:
+        # dla parsera wpis jest jeden, tylko cicho ma inna tresc, niz wyglada.
+        zdublowany_klucz = kopia.replace("  stage: dry-run\n", "  stage: dry-run\n  stage: enforced\n", 1)
+        try:
+            projects_file.dokument(zdublowany_klucz)
+            zlapal = False
+        except projects_file.BladPliku:
+            zlapal = True
+        check("bramka 1/4 (loader): duplikat klucza mapy w jednym wpisie RZUCA, a nie bierze ostatniego",
+              zlapal)
+        # ANTY-TAUTOLOGIA loadera: poprawny plik ma sie WCZYTAC.
+        check("ANTY-TAUTOLOGIA: ten sam loader wczytuje poprawny plik",
+              len(projects_file.dokument(kopia)["members"]) == len(wpisy))
+        # I kontrola, ze `yaml.safe_load` faktycznie tego NIE lapie — czyli ze warstwa 1 nie jest ozdoba.
+        check("premisa: `yaml.safe_load` na tym samym wejsciu MILCZY (bierze ostatni)",
+              yaml.safe_load(zdublowany_klucz)["members"][0]["stage"] == "enforced")
+
+        # (2) i (3) reguly OPA na surowej liscie + backstop na licznosci — przez realny kolektor.
+        if have("conftest"):
+            dokument = projects_file.wczytaj(ROOT)
+            duplikat = json.loads(json.dumps(dokument["members"][0]))
+            dokument["members"].append(duplikat)
+            projects_file.zapisz(ROOT, dokument)
+            decl = sh([sys.executable, "tools/collect_declarations.py"], cwd=ROOT)
+            (ROOT / "duplikat.json").write_text(decl.stdout)
+            r = sh(["conftest", "test", "--policy", "policy", "--namespace", "vpcsc.onboarding",
+                    "duplikat.json"], cwd=ROOT)
+            check("bramka 2/4 (OPA): zdublowany wpis jest ODRZUCANY",
+                  decl.returncode == 0 and r.returncode != 0, r.stdout[-800:])
+            check("bramka 3/4 (backstop): komunikat mowi o wpisie zgubionym przez mape",
+                  "po cichu zgubiony" in r.stdout, r.stdout[-800:])
+
+            # (4) renderer — ostatnia warstwa, ktorej nie da sie pominac ani zapomniec uruchomic.
+            #
+            # `terraform validate`, a NIE `terraform console`. Zmierzone przy pisaniu tego testu: console
+            # jest REPL-em i przy tym samym bledzie konczy sie kodem 0, wypisujac ostrzezenie „some
+            # expressions may produce unexpected results" i ZDEGRADOWANA wartosc (`1` zamiast bledu).
+            # Asercja na console przechodzilaby wiec zawsze — i to jest dokladnie ten rodzaj testu, ktory
+            # wyglada na uzbrojony. `validate` to zreszta ta sama komenda, ktora stoi w `validate.yml`.
+            if have("terraform"):
+                r = sh(["terraform", f"-chdir={ROOT / 'terraform'}", "validate", "-no-color"])
+                check("bramka 4/4 (terraform): zdublowany klucz wywraca `validate` (Duplicate object key)",
+                      r.returncode != 0 and "Duplicate object key" in (r.stdout + r.stderr),
+                      (r.stdout + r.stderr)[-500:])
+            plik.write_text(kopia)
+            if have("terraform"):
+                # ANTY-TAUTOLOGIA: ta sama komenda na poprawnym pliku MUSI byc zielona — inaczej mierzylibysmy
+                # zepsute srodowisko, a nie bramke.
+                r = sh(["terraform", f"-chdir={ROOT / 'terraform'}", "validate", "-no-color"])
+                check("ANTY-TAUTOLOGIA: `validate` na poprawnym pliku jest ZIELONY",
+                      r.returncode == 0, (r.stdout + r.stderr)[-400:])
+
+        # --- postac kanoniczna ------------------------------------------------------------------------
+        check("material startera jest w postaci kanonicznej",
+              projects_file.zrzut(projects_file.dokument(kopia)) == kopia)
+        niekanoniczny = "# komentarz, ktory pierwszy zapis bota skasowalby bez sladu\n" + kopia
+        check("ANTY-TAUTOLOGIA: plik z komentarzem NIE jest kanoniczny (guard ma co lapac)",
+              projects_file.zrzut(projects_file.dokument(niekanoniczny)) != niekanoniczny)
+
+        # --- `merge=union` — NIEOBECNY, i to jest sprzezenie do pilnowania ----------------------------
+        #
+        # ZMIERZONE (`experiments/konflikty-ukladow/`): union przy DODAWANIU wpisow daje 10/10 zielonych
+        # scalen i 201 wpisow zamiast 210 — zlepia bloki o identycznej strukturze w jeden wpis z dziesiecioma
+        # polami `project_id`. Nie kupuje wiec nic: konflikt WIDOCZNY zamienia na plik, ktory bramka i tak
+        # odrzuci, tyle ze po scaleniu. Kolizje rozwiazuje bot (`intake-rebase.yml`), nie sterownik scalania.
+        #
+        # Test pilnuje SPRZEZENIA, nie samej nieobecnosci: gdyby ktos kiedys union wlaczyl, wszystkie cztery
+        # warstwy bramki duplikatu musza byc na miejscu. Dzis warunek jest spelniony trywialnie (union nie
+        # ma), a asercja czeka na dzien, w ktorym przestanie byc trywialny.
+        attrs = (ROOT / ".gitattributes").read_text()
+        rego = (ROOT / "policy/onboarding.rego").read_text()
+        aktywne = [w for w in attrs.splitlines()
+                   if "merge=union" in w and not w.lstrip().startswith("#")]
+        bramka = "members_list" in rego and "po cichu zgubiony" in rego
+        check("`merge=union` NIE jest wlaczony na pliku czlonkow (zmierzone: gubi wpisy przy dodawaniu)",
+              not aktywne, str(aktywne))
+        check("gdyby `merge=union` byl wlaczony, bramka duplikatu MUSI istniec (sprzezenie)",
+              (not aktywne) or bramka, f"union={bool(aktywne)} bramka_duplikatu={bramka}")
+        check(".gitattributes TLUMACZY, dlaczego union jest nieobecny (odpowiedz na wracajaca propozycje)",
+              "merge=union" in attrs and "201" in attrs and "intake-rebase" in attrs)
+    finally:
+        plik.write_text(kopia)
+        for tymczasowy in ("duplikat.json",):
+            (ROOT / tymczasowy).unlink(missing_ok=True)
+
+
 def test_iam_bootstrap() -> None:
     """Stack nadający uprawnienia jest osobny (applikuje go zespół IAM), ale psuje się tak samo łatwo."""
     print("\n== iam-bootstrap ==")
@@ -1255,13 +1431,17 @@ def test_kanal_ticketowy() -> None:
     # ANTY-TAUTOLOGIA dla asercji wyzej: uruchamiamy renderer z polami, ktorych wnioskodawca nie ma prawa
     # ustawiac, i sprawdzamy, ze ich w wyniku NIE MA. Asercja „nie ma stringa w pliku workflow" byloby
     # tu za malo — mowi o ksztalcie kodu, nie o tym, co kod produkuje.
+    plik_czlonkow = ROOT / "perimeter/projects.yaml"
+    przed_renderem = plik_czlonkow.read_text()
     p = sh([sys.executable, "tools/render_member.py", "--division", "d1", "--project-id", "prj-alw-test",
             "--project-number", "123456789012", "--owner-group", "g@example.com",
             "--change-ref", "snow:RITM0000123", "--approved-by", "n@example.com",
-            "--profiles-json", '[{"name":"vertex-online-serving","params":{}}]',
-            "--out", "allowlist.yaml"], cwd=ROOT)
-    wynik = (ROOT / "allowlist.yaml").read_text() if (ROOT / "allowlist.yaml").exists() else ""
-    check("render_member.py sklada plik z listy dozwolonych pol (stage zawsze dry-run)",
+            "--profiles-json", '[{"name":"vertex-online-serving","params":{}}]'], cwd=ROOT)
+    # Renderer dopisuje wpis do WSPOLNEGO pliku (DEC-12), wiec „co wyprodukowal" to roznica wobec stanu
+    # sprzed wywolania — czyli dokladnie ten sam fragment, ktory zobaczy review w diffie pull requesta.
+    wynik = plik_czlonkow.read_text()[len(przed_renderem):] if p.returncode == 0 else ""
+    plik_czlonkow.write_text(przed_renderem)
+    check("render_member.py sklada wpis z listy dozwolonych pol (stage zawsze dry-run)",
           p.returncode == 0 and "stage: dry-run" in wynik, p.stdout + p.stderr)
     check("render_member.py NIE przepuszcza control_plane_exception ani niepustych exceptions",
           "control_plane_exception" not in wynik and "exceptions: []" in wynik, wynik[:300])
@@ -1419,7 +1599,7 @@ def test_external_egress_and_guard() -> None:
           "bigquery.googleapis.com" in prof and "aiplatform.googleapis.com" not in prof)
     check("profil zewnetrzny: risk high (jedyna regula wypuszczajaca dane z GCP)", "risk: high" in prof)
 
-    member = (ROOT / "perimeter/members/example-division-prj-example-vertex-dev.yaml").read_text()
+    member = (ROOT / "perimeter/projects.yaml").read_text()
     check("przykladowy czlonek uzywa profilu zewnetrznego (sciezka jest TESTOWANA)",
           "bq-omni-external-read" in member and "s3://" in member)
 
@@ -1555,12 +1735,12 @@ def test_acm_naming() -> None:
 
     # Poziomy używane przez członków i baseline też muszą istnieć — inaczej reguła autoryzuje nieistniejący kontekst.
     used = set()
-    for f in sorted((ROOT / "perimeter/members").glob("*.yaml")):
-        for prof in yaml.safe_load(f.read_text()).get("profiles", []):
+    for czlonek in yaml.safe_load((ROOT / "perimeter/projects.yaml").read_text())["members"]:
+        for prof in czlonek.get("profiles", []):
             used |= set(prof.get("params", {}).get("access_levels", []))
     for rule in policy.get("baseline_ingress", []):
         used |= set(rule.get("access_levels", []))
-    check("poziomy uzywane w members/baseline istnieja w katalogu", used <= known, f"brakuje: {sorted(used - known)}")
+    check("poziomy uzywane w projects.yaml/baseline istnieja w katalogu", used <= known, f"brakuje: {sorted(used - known)}")
 
 
 def test_rego() -> None:
@@ -1790,30 +1970,29 @@ def test_tools() -> None:
           ct[ct.find("contract_budget"):ct.find("contract_budget") + 300])
 
     # render_member.py MUSI wymuszać dry-run niezależnie od tego, co przyszło w payloadzie.
+    # Renderer dopisuje wpis do WSPÓLNEGO pliku (DEC-12), więc „co wyrenderował" to przyrost jego treści.
+    plik_czlonkow = ROOT / "perimeter/projects.yaml"
+    przed = plik_czlonkow.read_text()
     p = sh([sys.executable, "tools/render_member.py", "--division", "x", "--project-id", "prj-x-test",
             "--project-number", "123456789012", "--owner-group", "g@example.com",
             "--change-ref", "snow:RITM0000009", "--approved-by", "n@example.com",
             "--profiles-json", '[{"name":"vertex-online-serving","params":{}}]',
-            "--today", "2026-07-28", "--out", "rendered.yaml"], cwd=ROOT)
-    rendered = (ROOT / "rendered.yaml").read_text() if (ROOT / "rendered.yaml").exists() else ""
+            "--today", "2026-07-28"], cwd=ROOT)
+    rendered = plik_czlonkow.read_text()[len(przed):] if p.returncode == 0 else ""
+    plik_czlonkow.write_text(przed)
     check("render_member.py wymusza stage: dry-run", p.returncode == 0 and "stage: dry-run" in rendered,
           p.stderr[-300:] + rendered[:200])
     check("render_member.py ustawia date przegladu", "review_by: '2027-01-24'" in rendered or "review_by: 2027-01-24" in rendered,
           rendered[:300])
 
-    # NEGATYW: powtorne zgloszenie tego samego projektu NIE MOZE nadpisac istniejacego wpisu. Gdyby moglo,
-    # czlonek `enforced` wracalby do `dry-run` (render zawsze ustawia dry-run) — projekt tracilby ochrone
-    # PR-em wygladajacym na onboarding. Regula OPA tego nie zlapie: porownuje dwa PLIKI, a tu plik jest ten sam.
-    (ROOT / "istniejacy.yaml").write_text("division: x\nproject_id: prj-x-test\nstage: enforced\n")
-    p = sh([sys.executable, "tools/render_member.py", "--division", "x", "--project-id", "prj-x-test",
-            "--project-number", "123456789012", "--owner-group", "g@example.com",
-            "--change-ref", "snow:RITM0000009", "--approved-by", "n@example.com",
-            "--profiles-json", '[{"name":"vertex-online-serving","params":{}}]',
-            "--today", "2026-07-28", "--out", "istniejacy.yaml"], cwd=ROOT)
-    zachowany = (ROOT / "istniejacy.yaml").read_text()
-    check("render_member.py ODRZUCA nadpisanie istniejacego czlonka", p.returncode != 0,
-          p.stdout + p.stderr)
-    check("render_member.py NIE degraduje enforced do dry-run", "stage: enforced" in zachowany, zachowany[:200])
+    # Niezmiennik „nie nadpisuj istniejącego wpisu" ma pełny zestaw testów (w tym degradację `enforced`
+    # → `dry-run` i wariant z literówką w dywizji) w `test_jeden_plik_projektow`. Tutaj zostaje asercja
+    # o kształcie: renderer MUSI pytać o oba pola tożsamości projektu, nie o samą nazwę klucza — bo klucz
+    # zmienia się przy literówce w dywizji, a projekt nie.
+    rm = (ROOT / "tools/render_member.py").read_text()
+    check("render_member.py pyta o project_id ORAZ project_number (nie o sam klucz wpisu)",
+          "project_id=args.project_id" in rm and "project_number=str(args.project_number)" in rm,
+          rm[rm.find("znajdz"):rm.find("znajdz") + 300])
 
     # snow_verify.py fail-closed: ticket w innym stanie albo na inny projekt = brak PR-a.
     # Fixture'y bierzemy z tests/ — tych samych, które cytuje docs/5-servicenow-intake.md. Generowanie ich
@@ -2193,7 +2372,7 @@ def test_preflight() -> None:
 def test_workflows() -> None:
     print("\n== workflows ==")
     wf = sorted((ROOT / ".github/workflows").glob("*.yml"))
-    check("dwanascie workflow po rozpakowaniu", len(wf) == 12, str([f.name for f in wf]))
+    check("trzynascie workflow po rozpakowaniu", len(wf) == 13, str([f.name for f in wf]))
 
     if have("actionlint"):
         p = sh(["actionlint", *[str(f) for f in wf]])
@@ -2581,7 +2760,7 @@ def test_schemas() -> None:
         return
     pairs = [("schemas/policy.schema.json", ["perimeter/policy.yaml"]),
              ("schemas/profile.schema.json", sorted(str(p.relative_to(ROOT)) for p in (ROOT / "perimeter/profiles").glob("*.yaml"))),
-             ("schemas/member.schema.json", sorted(str(p.relative_to(ROOT)) for p in (ROOT / "perimeter/members").glob("*.yaml"))),
+             ("schemas/projects.schema.json", ["perimeter/projects.yaml"]),
              ("schemas/access-level.schema.json", sorted(str(p.relative_to(ROOT)) for p in (ROOT / "perimeter/access-levels").glob("*.yaml")))]
     for schema, files in pairs:
         p = sh(["check-jsonschema", "--schemafile", schema, *files], cwd=ROOT)
@@ -2591,7 +2770,7 @@ def test_schemas() -> None:
     # uruchomi reguły OPA (`additionalProperties: false` odrzuciłoby ją wcześniej). Gdyby jej tam brakło,
     # jedyną drogą przy realnej potrzebie byłoby usunięcie projektu z control_plane_projects — czyli
     # rozbrojenie bramki dla wszystkich członków naraz.
-    czlonek = yaml.safe_load((ROOT / "perimeter/members/example-division-prj-example-vertex-dev.yaml").read_text())
+    czlonek = yaml.safe_load((ROOT / "perimeter/projects.yaml").read_text())["members"][0]
     czlonek["control_plane_exception"] = {
         "justification": "stan Terraform przeniesiony poza perimetr, apply czyta go spoza granicy"}
     (ROOT / "czlonek-wyjatek.yaml").write_text(yaml.safe_dump(czlonek, sort_keys=False, allow_unicode=True))
@@ -2803,6 +2982,7 @@ def main() -> int:
     bootstrap()
     test_samodzielnosc()
     test_terraform()
+    test_jeden_plik_projektow()
     test_iam_bootstrap()
     test_deny_check()
     test_contract()

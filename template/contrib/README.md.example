@@ -32,7 +32,7 @@ w Google Cloud.
 > ta zmiana nie dokłada ani jednego uprawnienia. Obie kopie powstają z tego samego kroku apply i mają
 > sprawdzane md5, więc pytanie „która jest aktualna" nie ma jak powstać.
 
-> **Dlaczego nie submodule?** Submodule dałby ci CAŁE repozytorium perimetru — razem z `perimeter/members/`
+> **Dlaczego nie submodule?** Submodule dałby ci CAŁE repozytorium perimetru — razem z `perimeter/projects.yaml`
 > (konta serwisowe i grupy wszystkich dywizji) i `perimeter/access-levels/` (korporacyjne zakresy IP).
 > Do zwalidowania jednego swojego pliku potrzebujesz tylko **reguł** (paczka `gates.tar.gz` z release'u)
 > i **listy dostępnych opcji** (kontrakt). Żadne z nich nie mówi ci, kto jest w perimetrze.

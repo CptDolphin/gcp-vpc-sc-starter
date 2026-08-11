@@ -42,6 +42,11 @@ healthy_input := {
 	"policy": base_policy,
 	"profiles": base_profiles,
 	"members": {"example-prj-example-vertex-dev": healthy_member},
+	# `members_list` czytają WYŁĄCZNIE reguły o duplikatach i reguła o rozjeździe liczności. Pozostałe testy
+	# podmieniają członka przez `object.union`/`json.patch` na `members` i nie ruszają listy — to jest
+	# bezpieczne dokładnie dlatego, że tamte reguły pytają o LICZBĘ wpisów i o powtórzenia, a nie o treść.
+	# Testy samych bramek duplikatu budują oba pola jawnie (sekcja niżej).
+	"members_list": [healthy_member],
 	"contributors": contributors,
 	"today": "2026-07-20",
 	"violations_last_window": {"example-prj-example-vertex-dev": 0},
@@ -49,6 +54,93 @@ healthy_input := {
 
 test_healthy_member_passes if {
 	count(deny) == 0 with input as healthy_input
+}
+
+# --- duplikaty wpisów w jednym pliku (DEC-12) -------------------------------------------------------
+#
+# Bramka, dla której cały ten układ w ogóle wymagał zabezpieczenia: przy pliku na projekt duplikat był
+# widocznym konfliktem gita, przy pliku wspólnym bywa CICHYM wynikiem scalenia. Każdy test negatywny
+# ma tu parę pozytywną, bo reguła odrzucająca „dwa wpisy" byłaby regułą zakazującą drugiego członka.
+
+drugi_czlonek(nadpisania) := object.union(
+	object.union(healthy_member, {
+		"division": "market",
+		"project_id": "prj-example-vertex-prod",
+		"project_number": "222222222222",
+	}),
+	nadpisania,
+)
+
+# Wejście budowane OD ZERA z listy, a nie przez `object.union(healthy_input, …)`. `object.union` scala
+# GŁĘBOKO, więc podmiana `members` dokładałaby klucze do tych z `healthy_input` zamiast je zastąpić —
+# mapa miałaby wtedy o jeden wpis więcej niż lista i każdy test w tej sekcji przechodziłby na regule
+# o rozjeździe liczności, niezależnie od tego, co miał badać. Zmierzone: dokładnie tak padły dwa
+# pierwsze przebiegi tej sekcji.
+# `object.union_n` zamiast comprehension `{k: v | …}` — i to NIE jest styl. Comprehension w rego wywraca
+# ewaluację na duplikacie klucza (`eval_conflict_error: object keys must be unique`), więc test o duplikacie
+# klucza padałby BŁĘDEM zamiast sprawdzać bramkę. `union_n` zachowuje się tak, jak `collect_declarations.py`:
+# zostawia OSTATNI wpis i nie mówi nic — czyli odtwarza dokładnie ten tryb awarii, o który tu chodzi.
+wejscie_z_listy(lista) := {
+	"policy": base_policy,
+	"profiles": base_profiles,
+	"members": object.union_n(array.concat([{}], [{klucz_wpisu(m): m} | some m in lista])),
+	"members_list": lista,
+	"contributors": contributors,
+	"today": "2026-07-20",
+	"violations_last_window": object.union_n(array.concat([{}], [{klucz_wpisu(m): 0} | some m in lista])),
+}
+
+wejscie_dwoch(a, b) := wejscie_z_listy([a, b])
+
+# ANTY-TAUTOLOGIA — bez tego testu reguła „są dwa wpisy, więc odrzuć" przeszłaby wszystkie negatywy niżej.
+test_dwoch_roznych_czlonkow_przechodzi if {
+	count(deny) == 0 with input as wejscie_dwoch(healthy_member, drugi_czlonek({}))
+}
+
+# Ten sam projekt (numer) pod dwoma wpisami: dwie dywizje uważałyby się za właściciela, a każdy apply
+# kasowałby wpis tej drugiej.
+test_duplikat_project_number_denied if {
+	count(deny) > 0 with input as wejscie_dwoch(healthy_member, drugi_czlonek({"project_number": "111111111111"}))
+}
+
+# Ten sam `project_id` przy różnych numerach = literówka w numerze, czyli CUDZY projekt dopisany do
+# perimetru pod właściwie wyglądającą nazwą.
+test_duplikat_project_id_denied if {
+	count(deny) > 0 with input as wejscie_dwoch(healthy_member, drugi_czlonek({"project_id": "prj-example-vertex-dev"}))
+}
+
+# Dwa RÓŻNE projekty dające ten sam klucz `<dywizja>-<project_id>` — czyli jeden adres zasobu w stanie
+# Terraform. Nie wynika z reguł wyżej: id i numery są tu różne. Terraform odrzuciłby to dopiero na planie,
+# komunikatem o wyrażeniu `for`, którego wnioskodawca nigdy nie zobaczy.
+# TRZY TESTY NIŻEJ PYTAJĄ O TREŚĆ KOMUNIKATU, A NIE O `count(deny) > 0`. Powód jest konkretny: wejście
+# z duplikatem klucza łamie JEDNOCZEŚNIE regułę o kluczu i regułę o rozjeździe liczności (mapa zjada wpis),
+# więc samo „coś odrzuciło" nie odróżnia bramki działającej od bramki, której nie ma. Asercja na treści
+# przypina test do reguły, którą ma badać.
+test_duplikat_klucza_przy_roznych_projektach_denied if {
+	a := object.union(healthy_member, {"division": "risk-eu", "project_id": "prj-example-alpha"})
+	b := drugi_czlonek({"division": "risk", "project_id": "eu-prj-example-alpha"})
+	msgs := deny with input as wejscie_dwoch(a, b)
+	some m in msgs
+	contains(m, "dają ten sam klucz")
+}
+
+# BACKSTOP: mapa zjadła wpis (duplikat klucza w YAML-u, błąd kolektora, przyszła zmiana kluczowania).
+# Reguła nie pyta DLACZEGO — pyta, czy liczby się zgadzają, i to jest cała jej wartość.
+test_rozjazd_licznosci_mapy_i_listy_denied if {
+	bad := object.union(healthy_input, {"members_list": [healthy_member, healthy_member]})
+	msgs := deny with input as bad
+	some m in msgs
+	contains(m, "został po cichu zgubiony")
+}
+
+# Brak `members_list` w dokumencie (stare narzędzie, ręcznie sklecony declarations.json) ma ZATRZYMAĆ PR,
+# a nie po cichu wyłączyć bramki duplikatu. To jest kontrola na fail-open — najgroźniejszy tryb awarii
+# bramki, bo wygląda dokładnie tak samo jak jej brak przyczyny do zadziałania.
+test_brak_members_list_denied if {
+	bad := json.remove(healthy_input, ["members_list"])
+	msgs := deny with input as bad
+	some m in msgs
+	contains(m, "został po cichu zgubiony")
 }
 
 test_missing_aiplatform_denied if {
@@ -440,32 +532,5 @@ test_egress_access_levels_from_denied if {
 	count(deny) > 0 with input as bad
 }
 
-# --- jeden projekt = jeden wpis ---------------------------------------------------------------------
-
-test_duplicate_project_number_denied if {
-	dup := object.union(healthy_member, {"project_id": "prj-inna-nazwa", "division": "risk"})
-	bad := object.union(healthy_input, {"members": {
-		"example-prj-example-vertex-dev": healthy_member,
-		"risk-prj-inna-nazwa": dup,
-	}})
-	count(deny) > 0 with input as bad
-}
-
-test_same_project_id_different_number_denied if {
-	dup := object.union(healthy_member, {"project_number": "999999999999"})
-	bad := object.union(healthy_input, {"members": {
-		"example-prj-example-vertex-dev": healthy_member,
-		"example-prj-example-vertex-dev-2": dup,
-	}})
-	count(deny) > 0 with input as bad
-}
-
-# Dwa RÓŻNE projekty w dwóch plikach to normalny stan — bramka nie może go blokować.
-test_two_distinct_projects_pass if {
-	other := object.union(healthy_member, {"project_id": "prj-example-vertex-stg", "project_number": "222222222222"})
-	ok := object.union(healthy_input, {
-		"members": {"example-prj-example-vertex-dev": healthy_member, "example-prj-example-vertex-stg": other},
-		"violations_last_window": {"example-prj-example-vertex-dev": 0, "example-prj-example-vertex-stg": 0},
-	})
-	count(deny) == 0 with input as ok
-}
+# Reguła „jeden projekt = jeden wpis" ma testy wyżej, w sekcji o duplikatach w jednym pliku — razem
+# z przypadkami, które przy pliku na projekt nie mogły powstać (ten sam klucz, mapa gubiąca wpis).

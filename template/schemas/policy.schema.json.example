@@ -129,7 +129,7 @@
             "properties": {
               "member": {
                 "type": "string",
-                "description": "Nazwa pliku czlonka bez rozszerzenia (klucz w perimeter/members/)."
+                "description": "Klucz czlonka `<dywizja>-<project_id>` (ten sam, ktorym adresuje go renderer)."
               },
               "justification": {
                 "type": "string",

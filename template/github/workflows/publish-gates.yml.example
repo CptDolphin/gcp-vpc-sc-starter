@@ -3,7 +3,7 @@
 # swoje deklaracje u siebie — bez klonowania tego repozytorium.
 #
 # WHY this exists instead of „just use a submodule": a submodule gives the team the WHOLE repository, which
-# includes perimeter/members/ (every division's service accounts and user groups) and perimeter/access-levels/
+# includes perimeter/projects.yaml (every division's service accounts and user groups) and perimeter/access-levels/
 # (your corporate IP ranges). They need none of that to validate one file of their own. Sparse checkout does
 # not fix it either — the history still comes along, so `git show` reaches everything.
 #
@@ -56,7 +56,10 @@ jobs:
           cp -R schemas out/gates/
           cp -R policy out/gates/
           mkdir -p out/gates/tools
-          cp tools/collect_declarations.py out/gates/tools/
+          # `projects_file.py` jedzie razem z kolektorem, bo kolektor go IMPORTUJE. Paczka bez niego
+          # rozpakowuje sie poprawnie i wywala sie dopiero przy uruchomieniu, u dywizji, komunikatem
+          # o module — czyli bramka wysylana zespolom byla by zepsuta w sposob niewidoczny po naszej stronie.
+          cp tools/collect_declarations.py tools/projects_file.py out/gates/tools/
           cp contrib/validate-local.sh out/gates/
           tar -czf gates.tar.gz -C out gates
           sha256sum gates.tar.gz | tee gates.tar.gz.sha256

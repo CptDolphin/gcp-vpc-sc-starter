@@ -1,0 +1,39 @@
+# Sterowniki scalania.
+#
+# `merge=union` NA PLIKU CZŁONKÓW JEST TU ŚWIADOMIE NIEOBECNY. Ten plik istnieje po to, żeby odpowiedzieć,
+# DLACZEGO — bo to jest pierwsza rzecz, którą się proponuje, gdy lista projektów przenosi się do jednego
+# pliku, i bez zapisanej odpowiedzi wróci przy najbliższej fali onboardingów.
+#
+# CO MIAŁO ZROBIĆ. Przy konflikcie w tym pliku union bierze OBIE strony zamiast zatrzymać scalenie. Brzmi
+# jak dokładnie to, czego chcemy przy dopisywaniu niezależnych wpisów („weź oba wnioski").
+#
+# CO ROBI NAPRAWDĘ — ZMIERZONE (`experiments/konflikty-ukladow/`, 200 projektów, 10 równoległych wniosków):
+#
+#   * PRZY DODAWANIU: dziesięć zielonych scaleń i **201 wpisów zamiast 210**. Union nie scala YAML-a, tylko
+#     linie — a wpisy członków mają identyczną strukturę, więc dziesięć bloków zlepia się w JEDEN wpis
+#     z dziesięcioma polami `project_id`. Dziewięć zatwierdzonych projektów nie trafia do perimetru i nikt
+#     nie dostaje błędu.
+#   * PRZY EDYCJI: dwa pull requesty (promocja do `enforced` i zmiana właściciela) scalają się bez
+#     konfliktu, a we wpisie zostają PODWOJONE klucze `stage` i `owner_group`. `yaml.safe_load` czyta taki
+#     plik BEZ BŁĘDU i bierze ostatnie wystąpienie — czyli zatwierdzona promocja po cichu wraca do
+#     `dry-run`. Pull request przeszedł review, CI i merge, i nie zmienił niczego.
+#
+# CZYLI union nie kupuje nic: konflikt WIDOCZNY zamienia na plik, który bramka duplikatu i tak odrzuci —
+# tyle że po scaleniu i po tym, jak ktoś uwierzył, że wniosek wszedł. Bez bramki byłaby to cicha utrata.
+#
+# CO ZAMIAST TEGO. Kolizje przy dopisywaniu rozwiązuje bot: `.github/workflows/intake-rebase.yml` siada na
+# nowym `main` i RENDERUJE WPIS JESZCZE RAZ, zamiast odtwarzać patcha. Zmierzone na tym samym wejściu, na
+# którym układ bez bota daje 1/10: **10/10, komplet 210 wpisów, kosztem 9 ponowień**.
+#
+# GDYBY MIMO TO KTOŚ WŁĄCZAŁ UNION — WARUNEK JEST JEDEN I TWARDY: wolno to zrobić WYŁĄCZNIE razem z całą
+# bramką duplikatu, nigdy samo. Bramka ma cztery warstwy i żadna nie jest jedyna:
+#   1. `tools/projects_file.py` — loader rzucający na duplikacie klucza mapy NA DOWOLNYM POZIOMIE (to jest
+#      ta warstwa, która jako jedyna widzi wpis zlepiony przez union; `yaml.safe_load` go NIE widzi),
+#   2. `policy/onboarding.rego` — duplikat `project_id`, `project_number` i klucza `<dywizja>-<projekt>`,
+#      liczony na surowej liście, bo mapa duplikatu nie umie pokazać,
+#   3. ta sama reguła porównująca liczność listy z licznością mapy — backstop na przyczyny nieprzewidziane,
+#   4. `terraform validate` — `for` po liście wywraca się na „Duplicate object key"; ostatnia warstwa,
+#      której nie da się pominąć ani zapomnieć uruchomić.
+# Selftest pilnuje tego sprzężenia: włączenie union bez którejkolwiek z warstw zapala test na czerwono.
+#
+#   # perimeter/projects.yaml merge=union   <- NIE WŁĄCZAJ bez przeczytania powyższego

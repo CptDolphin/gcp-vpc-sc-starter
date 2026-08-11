@@ -37,15 +37,21 @@ etapie — to celowe: chcemy udowodnić, że kształt danych jest poprawny, zani
 Otwórz PR z celowo złym wpisem i sprawdź, że CI go zatrzymuje:
 
 ```bash
-cp perimeter/members/example-*.yaml perimeter/members/gate-test-prj-gate-test.yaml
-# w skopiowanym pliku ustaw:
+git checkout -b test/gate-check
+# dopisz do listy `members:` w perimeter/projects.yaml drugi wpis — skopiuj istniejący i podmień:
 #   division: gate-test
 #   project_id: prj-gate-test
+#   project_number: "123456789012"
 #   stage: enforced          <-- promocja bez ani jednego dnia w dry-run
 #   dry_run_since: <dzisiejsza data>
-git checkout -b test/gate-check && git add perimeter/members/gate-test-prj-gate-test.yaml
+git add perimeter/projects.yaml
 git commit -m "test: celowo zły wpis — bramka ma go odrzucić" && git push -u origin test/gate-check
 ```
+
+Drugi wariant tej samej próby, wart osobnego przebiegu, bo dotyczy bramki, która przy pliku na projekt nie
+mogła istnieć: **skopiuj istniejący wpis bez zmiany `project_id`**. Oczekiwany wynik to czerwony job
+`declarations` z komunikatem o duplikacie — a gdyby ktoś usunął reguły OPA, `terraform plan` i tak wywala się
+na `Duplicate object key`. Dwie warstwy, dwa różne komunikaty, obie do zobaczenia.
 
 Oczekiwany wynik: job `declarations` **czerwony**, z komunikatem o promocji przed oknem obserwacji i o braku
 raportu naruszeń. Zamknij PR bez merge'a i skasuj gałąź.
@@ -124,8 +130,9 @@ Dopiero teraz podłącz `intake.yml` (i integrację ServiceNow). Pierwszy człon
 zobaczyć cały przepływ bez zmiennej „czy bot dobrze wypełnił plik":
 
 ```bash
-cp perimeter/members/example-*.yaml perimeter/members/<dywizja>-<projekt>.yaml
-# uzupełnij, zostaw stage: dry-run
+# dopisz wpis na KOŃCU listy `members:` w perimeter/projects.yaml; zostaw stage: dry-run.
+# Kolejność nic nie znaczy (klucz członka bierze się z `division` + `project_id`), a dopisanie na końcu
+# daje najmniejsze okno konfliktu — DEC-12.
 ```
 
 Po apply sprawdź, że projekt jest w konfiguracji dry-run i **nie** w egzekwowanej:

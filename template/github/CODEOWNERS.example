@@ -26,8 +26,27 @@
 /contrib/                   @your-org/network-team @your-org/security-team
 
 # Membership. The bot opens these PRs; the networking team approves. Security is pulled in by the workflow
-# only when the file contains an `exceptions:` entry (a raw rule outside the profile catalogue).
-/perimeter/members/         @your-org/network-team
+# only when the entry contains an `exceptions:` block (a raw rule outside the profile catalogue).
+#
+# ONE FILE MEANS ONE OWNER, AND THAT IS A DECISION, NOT A SIDE EFFECT (DEC-12). Membership used to be one
+# file per project, so `/perimeter/members/risk-* @your-org/risk-team` was AVAILABLE — nobody had configured
+# it, but the option existed. With a single file, path-based ownership per division is gone: CODEOWNERS
+# matches paths, and every division's entry lives at the same path.
+#
+# WHAT IS ACTUALLY LOST — one future option, not a control that was in place. What a division may ask for
+# has never been decided by file ownership; it is decided by the CHANNEL:
+#   * `snow:` — the ticket is verified by calling ServiceNow back, and the answer names the project,
+#   * `pr:`  — `perimeter/contributors.yaml` maps repository to allowed projects, and that file lives HERE,
+#   * `manual:` — an approval under this very file, which is the only channel CODEOWNERS ever gated.
+# So "a division cannot onboard somebody else's project" holds exactly as before, and it never came from
+# this line.
+#
+# WHAT THIS COSTS AT THIRTY DIVISIONS: every membership change needs a review from the team below, which is
+# already true today, and self-service stays "the division opens a request, the platform approves" rather
+# than becoming "the division approves its own entry". If that ever has to change, the exit is a directory
+# shard (`perimeter/projects/<division>.yaml`) plus a renderer that reads `**/*.yaml` — a change of ADDRESSES
+# in Terraform state, so it goes as its own pull request with `moved{}`, never in passing.
+/perimeter/projects.yaml    @your-org/network-team
 
 # The renderer and the gates. Somebody who can edit these can neutralise every other line in this file.
 /terraform/                 @your-org/network-team @your-org/security-team

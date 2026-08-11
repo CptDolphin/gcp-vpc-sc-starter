@@ -160,7 +160,10 @@ jobs:
             python3 tools/snow_verify.py --ticket "$TICKET" --expect-project "$PROJECT_ID"
           fi
 
-      - name: render the member file
+      # The entry is APPENDED to the shared perimeter/projects.yaml (DEC-12). The script refuses when an
+      # entry already describes this project — by `project_id` OR by `project_number`, so a typo in the
+      # division cannot turn "change my membership" into "onboard me again with stage: dry-run".
+      - name: render the member entry
         env:
           DIVISION: ${{ inputs.division }}
           PROJECT_ID: ${{ inputs.project_id }}
@@ -177,8 +180,7 @@ jobs:
             --owner-group "$OWNER_GROUP" \
             --change-ref "$CHANGE_REF" \
             --approved-by "$APPROVED_BY" \
-            --profiles-json "$PROFILES_JSON" \
-            --out "perimeter/members/${DIVISION}-${PROJECT_ID}.yaml"
+            --profiles-json "$PROFILES_JSON"
 
       # THE SAME GATES THE OTHER CHANNELS RUN, AND THEY RUN HERE FOR A REASON THAT IS NOT SYMMETRY.
       # Before this, the ticketing channel opened its pull request without validating anything it had just
@@ -188,28 +190,31 @@ jobs:
       # park unexecuted; measured, see the pull-request step below). A channel whose gates live entirely
       # on the other side of a step that may not happen is not gated.
       - name: schema
-        run: check-jsonschema --schemafile schemas/member.schema.json perimeter/members/*.yaml
+        run: check-jsonschema --schemafile schemas/projects.schema.json perimeter/projects.yaml
 
       - name: ownership and onboarding rules
         run: |
           python3 tools/collect_declarations.py > declarations.json
           conftest test --policy policy --namespace vpcsc.onboarding declarations.json
 
-      # CO NAPRAWDE POWSTALO, w przebiegu, a nie tylko w pull requescie. Normalnie plik czlonka widac
-      # w diffie PR-a — ale gdy utworzenie PR-a zostanie odmowione (krok nizej), jedynym sladem po tym,
-      # co kanal wyrenderowal, byla nazwa pliku w logu. Wnioskodawca nie ma dostepu do repozytorium
-      # perimetru, wiec podsumowanie przebiegu jest dla niego JEDYNYM miejscem, w ktorym moze zobaczyc,
-      # jakie pola zostaly mu ustawione po tej stronie i ze `stage` to `dry-run`.
+      # CO NAPRAWDE POWSTALO, w przebiegu, a nie tylko w pull requescie. Normalnie zmiane widac w diffie
+      # PR-a — ale gdy utworzenie PR-a zostanie odmowione (krok nizej), jedynym sladem po tym, co kanal
+      # wyrenderowal, byl komunikat skryptu. Wnioskodawca nie ma dostepu do repozytorium perimetru, wiec
+      # podsumowanie przebiegu jest dla niego JEDYNYM miejscem, w ktorym moze zobaczyc, jakie pola zostaly
+      # mu ustawione po tej stronie i ze `stage` to `dry-run`.
+      #
+      # POKAZUJEMY DIFF, A NIE CALY PLIK — i to jest zmiana wymuszona przez uklad jednoplikowy. `cat`
+      # wspolnego pliku wysypalby wnioskodawcy CZLONKOSTWO CALEJ ORGANIZACJI (konta serwisowe i grupy
+      # wszystkich dywizji) do podsumowania przebiegu, ktore widzi kazdy z dostepem do Actions. Diff
+      # pokazuje dokladnie jego wpis. To jest ta sama granica, co w `publish-gates.yml`: na zewnatrz ida
+      # REGULY, nigdy dane o czlonkach.
       - name: what was rendered
-        env:
-          MEMBER_FILE: perimeter/members/${{ inputs.division }}-${{ inputs.project_id }}.yaml
         run: |
           {
-            echo "### Wyrenderowany plik czlonka — \`$MEMBER_FILE\`"
-            echo '```yaml'
-            cat "$MEMBER_FILE"
+            echo "### Dopisany wpis czlonka — \`perimeter/projects.yaml\`"
+            echo '```diff'
+            git --no-pager diff -- perimeter/projects.yaml
             echo '```'
-            echo "sha256: \`$(sha256sum "$MEMBER_FILE" | cut -d' ' -f1)\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
       # WHICH TOKEN OPENS THE PULL REQUEST DECIDES WHETHER THE PULL REQUEST IS EVER CHECKED — this is the

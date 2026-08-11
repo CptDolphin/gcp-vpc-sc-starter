@@ -175,6 +175,11 @@ print(json.dumps({
     "profiles": {p["name"]: {"name": p["name"], "parameters": [{"name": x} for x in p["parameters"]]}
                  for p in contract["profiles"]},
     "members": {name: member},
+    # `members_list` obok mapy — po tamtej stronie granicy czyta ją bramka duplikatu, a osobna reguła
+    # porównuje liczności obu. Bez tej linii lokalna walidacja padałaby na regule, której deklaracja
+    # dywizji nie może naruszyć (jeden wpis nie bywa duplikatem sam ze sobą) — czyli zespół dostawałby
+    # czerwone za cudzy plik. Z nią sprawdza DOKŁADNIE to samo wejście, które zobaczy monorepo.
+    "members_list": [member],
     "contributors": contract.get("contributors", []),
     "today": datetime.date.today().isoformat(),
     # Zespół nie ma raportu naruszeń — a bez niego promocja do enforced i tak zostanie odrzucona.

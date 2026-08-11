@@ -1,6 +1,6 @@
-# Decyzje, na których stoi ten starter (DEC-1…DEC-11)
+# Decyzje, na których stoi ten starter (DEC-1…DEC-12)
 
-Jedenaście rozstrzygnięć, które określają kształt repozytorium. Kod odsyła tutaj skrótem `DEC-1`…`DEC-11` — jeśli komentarz
+Dwanaście rozstrzygnięć, które określają kształt repozytorium. Kod odsyła tutaj skrótem `DEC-1`…`DEC-12` — jeśli komentarz
 w pliku mówi „(DEC-4)", to znaczy: „powód tej linijki jest opisany w DEC-4, nie zmieniaj jej bez przeczytania".
 
 Każda pozycja ma tę samą strukturę: **decyzja** · **dlaczego** · **co odrzucono i dlaczego**. Odrzucone warianty są
@@ -547,3 +547,84 @@ blokuje. Przy niepustej obowiązuje kolejność z DEC-10: najpierw krok addytywn
   niż głośne okno.
 - *Podniesienie limitu 6000.* Nie dotyczy problemu (replace nie ma nic wspólnego z budżetem) i nie jest kwotą
   do podniesienia w konsoli.
+
+---
+
+## DEC-12 — Członkostwo w JEDNYM `perimeter/projects.yaml`, jako lista, z bramką duplikatu i rebase-retry
+
+**Decyzja.** Członkowie perimetru mieszkają w jednym pliku `perimeter/projects.yaml`, pod kluczem `members`,
+jako **lista** wpisów. Renderer kluczuje członka po TREŚCI — `"${division}-${project_id}"` — czyli dokładnie
+tym samym ciągiem, którym wcześniej była nazwa pliku. Kanał wejściowy **dopisuje wpis na końcu** listy zamiast
+tworzyć plik. Układ jednoplikowy wchodzi **razem** z bramką duplikatu (cztery warstwy, fail-closed)
+i rebase-retry w bocie (`.github/workflows/intake-rebase.yml`). **`merge=union` NIE wchodzi** — pomiar
+niżej pokazał, że gubi wpisy; gdyby kiedyś wszedł, wolno mu wyłącznie razem z kompletem bramki, nigdy samemu.
+
+**To jest ODWRÓCENIE wcześniejszej decyzji** (plik na projekt) i odwrócenie oparte na pomiarze, który nadal
+jest prawdziwy — patrz `docs/6-uklad-repozytoriow.md` i `experiments/konflikty-ukladow/`. Powód nie jest taki,
+że tamten pomiar był zły, tylko że jego koszt dało się **domknąć**, a koszty układu wieloplikowego rosły
+z każdym członkiem.
+
+**Dlaczego jeden plik.** Trzy rzeczy, z których żadnej plik-na-projekt nie dawał:
+* „Kto jest w perimetrze" jest pytaniem o PLIK, nie o katalog. Każdy wniosek jest diffem na tle pozostałych
+  wpisów, a nie nowym plikiem, do którego review nie ma czego przyłożyć.
+* Duplikat projektu przestał być łapany wyłącznie regułą porównującą pliki. Najgroźniejszy przypadek —
+  **powtórne zgłoszenie tego samego projektu** — nie był dla tamtej reguły widoczny, bo tam plik był jeden
+  i ten sam; bronił przed nim `out.exists()`, czyli warunek o systemie plików, nie o członkostwie.
+* Sharding po dywizji, gdyby kiedyś był potrzebny, i tak wymagał zmiany renderera i przeadresowania zasobów
+  w stanie. Płaski katalog nie był etapem w drodze do niego — miał ten sam koszt wyjścia co układ jednoplikowy.
+
+**Dlaczego LISTA, a nie mapa `klucz → wpis`.** Zmierzone, nie wybrane: **duplikat klucza mapy jest CICHY**.
+`yamldecode` Terraforma 1.15.5 bierze ostatni wpis i nie mówi nic; `yaml.safe_load` zachowuje się identycznie.
+Przy pliku wspólnym duplikat nie jest egzotyką, tylko normalnym wynikiem scalenia — a „cicho wygrywa ostatni"
+znaczy tu: promocja do `enforced` po cichu cofnięta do `dry-run`, czyli projekt bez ochrony przy zielonym
+planie. W liście ten sam przypadek jest twardym błędem, zanim powstanie jakikolwiek zasób:
+`Error: Duplicate object key — Two different items produced the key "div-aaa" in this 'for' expression`.
+
+**Dlaczego klucz z treści, a nie nowe pole `key:`.** Klucz `for_each` JEST adresem zasobu w stanie Terraforma,
+a granularne reguły ACM nie mają w wariancie dry-run aktualizacji w miejscu (DEC-11) — przeadresowanie to
+`destroy` + `create` na żywej granicy. Wyliczenie klucza z `division` i `project_id` odtwarza dawną nazwę pliku
+1:1, więc **migracja nie miała w planie ani jednego `destroy`**. Osobne pole `key:` byłoby drugim źródłem
+prawdy do zsynchronizowania i polem, którym wnioskodawca mógłby wskazać cudzy adres.
+
+**Dlaczego wpis dopisujemy NA KOŃCU, a nie w miejscu z sortowania.** Posortowana lista kładzie wpisy jednej
+dywizji obok siebie, a dywizje onboardują się falami — to jest dokładnie układ, który w eksperymencie dał
+1/10 scaleń bez konfliktu. Kolejność w pliku nic nie znaczy, bo klucz pochodzi z treści.
+
+**Dlaczego postać kanoniczna pliku jest BRAMKĄ.** Plik zapisuje wyłącznie `tools/projects_file.py`, więc
+`dump(load(x)) == x`, a `validate.yml` to sprawdza. Bez tego przepisanie pliku przez sweeper albo break-glass
+dawałoby diff na 200 wpisów i chowało prawdziwą zmianę w szumie — akurat w commicie awaryjnym. Cena zapisana
+wprost: **w tym pliku nie ma komentarzy**, bo `yaml.safe_dump` ich nie zna i pierwszy zapis bota skasowałby je
+bez śladu. Uzasadnienia mieszkają w `change_ref` i w opisie pull requesta.
+
+**Niezmiennik, który musiał przetrwać zmianę układu.** Kanał wejściowy nie nadpisuje istniejącego członka.
+Przy pliku na projekt realizował to `out.exists()`; przy pliku wspólnym „plik istnieje" jest prawdą zawsze,
+więc warunek pyta teraz o WPIS — po `project_id` **oraz** po `project_number`, bo literówka w dywizji daje
+inny klucz przy tym samym projekcie. Bez tego powtórne zgłoszenie zapisałoby `stage: dry-run` członkowi, który
+jest `enforced`: projekt traci ochronę pull requestem wyglądającym na onboarding, przechodzącym wszystkie
+bramki i kwalifikującym się do auto-merge'a.
+
+**Odrzucone.**
+- *Mapa `klucz → wpis` w YAML-u.* Czytelniejsza i z kluczem zapisanym wprost, ale duplikat klucza jest w niej
+  cichy w OBU parserach, których używamy (zmierzone). Wybór między mapą a listą jest wyborem między cichą
+  wygraną ostatniego a zatrzymaniem planu — nie stylem.
+- *Jeden plik bez rebase-retry.* Wiersz „1/10" z eksperymentu opisuje przypadek normalny, nie skrajny.
+  Bez bota dziewięć z dziesięciu wniosków tej samej dywizji trafia do człowieka.
+- *`merge=union` na pliku członków — ODRZUCONE POMIAREM, nie z ostrożności.* Miało załatwić kolizje przy
+  dopisywaniu („weź oba wnioski"). Zmierzone 2026-08-11 na tym samym wejściu, na którym bot daje 10/10:
+  **10/10 zielonych scaleń i 201 wpisów zamiast 210.** Union scala LINIE, nie YAML, a wpisy członków mają
+  identyczną strukturę — dziesięć bloków zlepia się w jeden wpis z dziesięcioma polami `project_id`;
+  dziewięć zatwierdzonych projektów nie trafia do perimetru i nikt nie dostaje błędu. Przy EDYCJI (promocja
+  + zmiana właściciela) oba scalenia przechodzą, a we wpisie zostają podwojone `stage` i `owner_group` —
+  `yaml.safe_load` czyta to bez błędu i bierze ostatnie, czyli zatwierdzona promocja wraca do `dry-run`
+  po merge'u, który przeszedł review i CI. Union nie kupuje więc nic: konflikt WIDOCZNY zamienia na plik,
+  który bramka duplikatu i tak odrzuci — tyle że po scaleniu. Bez bramki byłaby to cicha utrata. Warunek
+  na przyszłość (pilnowany przez selftest): włączenie union wymaga kompletu czterech warstw bramki.
+- *`git rebase` w bocie zamiast ponowienia intencji.* Rebase odtwarza PATCH, a patch dopisujący linie na końcu
+  pliku, do którego ktoś inny też dopisał, to dokładnie ten konflikt, który mamy usunąć. Wpis jest DANYMI —
+  ponowienie polega na usiądnięciu na nowym `main` i dopisaniu go jeszcze raz.
+- *Sharding katalogowy `perimeter/projects/<dywizja>.yaml` od razu.* Rozwiązuje konflikty i CODEOWNERS per
+  dywizja, ale wymaga renderera na `**/*.yaml` i klucza z podmianą separatora — czyli innego adresu w stanie
+  niż dziś, więc `moved{}` dla WSZYSTKICH członków w tym samym kroku co zmiana źródła. Zostaje jako zapisane
+  wyjście, gdy self-service per dywizja stanie się wymaganiem; wtedy własnym pull requestem.
+- *`uniqueItems: true` w JSON Schema zamiast reguł OPA.* Porównuje CAŁE elementy, więc dwa wpisy o tym samym
+  projekcie i różnym właścicielu przechodzą — czyli dokładnie ten duplikat, który boli.

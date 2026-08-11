@@ -15,11 +15,38 @@ locals {
   # Domyślnie false — dokładamy tylko członków i reguły (patrz perimeter.manage_skeleton w policy.yaml).
   manage_skeleton = lookup(local.policy.perimeter, "manage_skeleton", false)
 
-  # Katalog członków i profili. `fileset` czyta stan katalogu przy planie — dodanie pliku przez bota
-  # jest równoważne dodaniu zasobu, bez żadnej listy do ręcznej aktualizacji.
+  # CZŁONKOWIE SIEDZĄ W JEDNYM PLIKU `perimeter/projects.yaml`, JAKO **LISTA** WPISÓW (DEC-12).
+  #
+  # Było: `fileset(".../members", "*.yaml")` i klucz z nazwy pliku. Zmieniło się źródło, NIE klucz — i to
+  # jest cała ostrożność tej zmiany. Klucz `<dywizja>-<project_id>` odtwarza DOKŁADNIE dawny `trimsuffix`
+  # nazwy pliku (bot zapisywał `perimeter/members/<dywizja>-<projekt>.yaml`), więc adresy w stanie zostają
+  # te same i `plan` po migracji nie ma czego zniszczyć. Gdyby klucz się zmienił, każda granularna reguła
+  # ACM dostałaby `destroy` + `create` — na konfiguracji egzekwowanej to okno bez autoryzacji na żywej
+  # granicy, a `create_before_destroy` nie jest wyjściem (DEC-11: wszystkie te zasoby mają w stanie ten sam
+  # `id`, bo provider realizuje je jako read-modify-write na jednej liście).
+  #
+  # DLACZEGO LISTA, A NIE MAPA `project_id → wpis` — ZMIERZONE, nie wybrane z gustu. W mapie duplikat
+  # klucza jest CICHY: `yamldecode` bierze ostatni wpis i nie mówi nic (sprawdzone na Terraformie 1.15.5;
+  # `yaml.safe_load` w Pythonie zachowuje się identycznie). Przy pliku wspólnym duplikat nie jest egzotyką,
+  # tylko normalnym wynikiem scalenia dwóch wniosków — a „cicho wygrywa ostatni" znaczy tu „promocja do
+  # `enforced` została po cichu cofnięta do `dry-run`". Przy liście ten sam przypadek jest TWARDYM BŁĘDEM
+  # planu, zanim powstanie jakikolwiek zasób:
+  #
+  #     Error: Duplicate object key
+  #     Two different items produced the key "div-aaa" in this 'for' expression.
+  #
+  # Czyli renderer — warstwa, której nie da się pominąć ani zapomnieć uruchomić — jest ostatnią bramką
+  # duplikatu. Pozostałe trzy (strict loader w `tools/projects_file.py`, reguły `vpcsc.onboarding`
+  # na `members_list`, porównanie liczności mapy i listy) łapią to WCZEŚNIEJ i z lepszym komunikatem,
+  # ale żadna z nich nie jest jedyna.
+  #
+  # `try(…, [])` NIE MA TU CELOWO. Plik bez klucza `members` albo z `members` innego kształtu ma wywrócić
+  # plan, a nie wyrenderować perimetr bez ani jednego członka — to drugie jest planem, który usuwa z
+  # granicy wszystkich naraz i wygląda przy tym na poprawny.
+  projects_file = yamldecode(file("${local.perimeter_dir}/projects.yaml"))
+
   members = {
-    for f in fileset("${local.perimeter_dir}/members", "*.yaml") :
-    trimsuffix(f, ".yaml") => yamldecode(file("${local.perimeter_dir}/members/${f}"))
+    for m in local.projects_file.members : "${m.division}-${m.project_id}" => m
   }
 
   profiles = {

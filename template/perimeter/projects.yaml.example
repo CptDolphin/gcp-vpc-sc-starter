@@ -1,0 +1,32 @@
+schema_version: 1
+members:
+- schema_version: 1
+  division: example-division
+  project_id: prj-example-vertex-dev
+  project_number: '000000000000'
+  owner_group: grp-example-division-cloud@example.com
+  change_ref: snow:RITM0000000
+  approved_by: net-approver@example.com
+  stage: dry-run
+  dry_run_since: '2026-07-28'
+  review_by: '2027-01-28'
+  profiles:
+  - name: vertex-online-serving
+    params:
+      caller_identities:
+      - serviceAccount:sa-scoring@prj-example-app-dev.iam.gserviceaccount.com
+      access_levels:
+      - corp_network
+  - name: corp-user-console-access
+    params:
+      user_groups:
+      - group:grp-example-division-ds@example.com
+      access_levels:
+      - corp_network
+  - name: bq-omni-external-read
+    params:
+      query_identities:
+      - serviceAccount:sa-analytics@prj-example-app-dev.iam.gserviceaccount.com
+      external_resources:
+      - s3://example-approved-dataset
+  exceptions: []

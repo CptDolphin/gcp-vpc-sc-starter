@@ -60,18 +60,37 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
+      # The member is addressed by its KEY (`<division>-<project_id>`) — the same string that used to be the
+      # file name and is still the Terraform state address. Nothing about the emergency path changed except
+      # where the entry lives (DEC-12).
+      #
+      # `projects_file` rather than `yaml.safe_load`: this step runs under an incident, with a token that
+      # can push to the default branch, and it REWRITES the file that lists every member of the boundary.
+      # A duplicate key silently resolved to "last one wins" here would demote a member nobody asked about
+      # and nobody would see it in the diff. The strict loader turns that into a stopped workflow.
       - name: demote the member to dry-run
         run: |
           pip install --quiet pyyaml
           python3 - "${{ github.event.inputs.member }}" <<'PY'
-          import pathlib, sys, yaml
-          f = pathlib.Path(f"perimeter/members/{sys.argv[1]}.yaml")
-          m = yaml.safe_load(f.read_text())
+          import sys
+          sys.path.insert(0, "tools")
+          import projects_file
+
+          nazwa = sys.argv[1]
+          doc = projects_file.wczytaj(".")
+          pasujace = [m for m in doc["members"] if projects_file.klucz(m) == nazwa]
+          if not pasujace:
+              sys.exit(f"nie ma wpisu {nazwa!r} w {projects_file.SCIEZKA} — sprawdz klucz <dywizja>-<project_id>")
+          # Nie moze sie zdarzyc (bramka duplikatu), wiec tym bardziej nie wolno tego zgadywac po cichu:
+          # demotowanie „pierwszego z dwoch" zostawiloby drugi wpis nadal w konfiguracji egzekwowanej.
+          if len(pasujace) > 1:
+              sys.exit(f"{projects_file.SCIEZKA}: {len(pasujace)} wpisow o kluczu {nazwa!r} — napraw plik przed break-glassem")
+          m = pasujace[0]
           if m["stage"] != "enforced":
-              sys.exit(f"{f} is already {m['stage']} — nothing to demote")
+              sys.exit(f"{nazwa} jest juz {m['stage']} — nie ma czego cofac")
           m["stage"] = "dry-run"
-          f.write_text(yaml.safe_dump(m, sort_keys=False, allow_unicode=True))
-          print(f"demoted {f}")
+          projects_file.zapisz(".", doc)
+          print(f"demoted {nazwa}")
           PY
 
       # The commit is the DURABLE half of the audit trail, so it carries the actor and the run URL. The
@@ -81,7 +100,7 @@ jobs:
         run: |
           git config user.name "vpc-sc-break-glass"
           git config user.email "noreply@example.com"
-          git add perimeter/members
+          git add perimeter/projects.yaml
           git commit -m "break-glass: demote ${{ github.event.inputs.member }} to dry-run (${{ github.event.inputs.incident }})
 
           ${{ github.event.inputs.reason }}
