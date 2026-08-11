@@ -42,8 +42,17 @@ resource "google_logging_metric" "vpcsc_violations_enforced" {
   name        = "vpcsc/violations_enforced"
   description = "Naruszenia perimetru VPC-SC w trybie egzekwowanym — każde z nich to odrzucone wywołanie API."
 
-  # dryRun="false" = realna odmowa. To jest jedyna metryka w tym pliku, która oznacza „coś się właśnie psuje".
-  filter = "${local.vpcsc_audit_filter} AND protoPayload.metadata.dryRun=\"false\""
+  # NEGACJA, NIE `dryRun="false"` — pole `dryRun` w wpisie o odmowie EGZEKWOWANEJ NIE ISTNIEJE. Pojawia się
+  # wyłącznie dla naruszeń dry-run, i wtedy ma wartość `true`. Zmierzone na żywej organizacji tuż po
+  # pierwszej realnej odmowie: `google.storage.buckets.list` z `RESOURCES_NOT_IN_SAME_SERVICE_PERIMETER`
+  # przyszedł BEZ pola `dryRun`, a to samo wywołanie sprzed promocji miało `dryRun=true`.
+  #
+  # `dryRun="false"` nie dopasowuje więc NICZEGO — nigdy, w żadnej organizacji. Metryka „ktoś jest blokowany
+  # TERAZ" zostawała pusta dokładnie wtedy, gdy miała rosnąć, a alert zbudowany na niej nie odpalił ani razu.
+  # Metryka, która nie liczy, jest gorsza od jej braku: brak widać, pustą metrykę bierze się za spokój.
+  #
+  # To jest jedyna metryka w tym pliku, która oznacza „coś się właśnie psuje".
+  filter = "${local.vpcsc_audit_filter} AND NOT protoPayload.metadata.dryRun=\"true\""
 
   metric_descriptor {
     metric_kind = "DELTA"
@@ -150,10 +159,15 @@ resource "google_monitoring_alert_policy" "vpcsc_enforced_denials" {
 
       ```
       gcloud logging read 'protoPayload.metadata."@type"="type.googleapis.com/google.cloud.audit.VpcServiceControlAuditMetadata"
-        AND protoPayload.metadata.dryRun="false"' --organization=ORG_ID --freshness=1h \
+        AND NOT protoPayload.metadata.dryRun="true"' --project=PROJEKT_CZLONKA --freshness=1h \
         --format='table(protoPayload.authenticationInfo.principalEmail, protoPayload.methodName,
                         protoPayload.metadata.violationReason, resource.labels.project_id)'
       ```
+
+      Dwie rzeczy, na ktorych ten odczyt lamie sie najczesciej — obie ZMIERZONE:
+      wpis o odmowie EGZEKWOWANEJ **nie ma pola `dryRun`** (pojawia sie tylko przy dry-run, z wartoscia
+      `true`), wiec filtr `dryRun="false"` nie zwraca nigdy niczego; oraz wpis lezy w logu **projektu
+      czlonkowskiego**, a nie organizacji — `--organization` na tym samym filtrze zwraca 0.
 
       **2. Zinterpretuj `violationReason`**
 

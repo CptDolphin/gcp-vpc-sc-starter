@@ -927,7 +927,12 @@ def test_monitoring() -> None:
 
     # Dwie metryki muszą być ROZŁĄCZNE: enforced page'uje, dry-run informuje. Wspólna metryka oznacza alert
     # odpalający przy normalnej pracy okna obserwacji — czyli alert, który po tygodniu jest ignorowany.
-    check("metryka enforced filtruje dryRun=false", 'dryRun=\\"false\\"' in body)
+    # NEGACJA, nie `dryRun="false"`. Wpis o odmowie EGZEKWOWANEJ nie ma pola `dryRun` w ogóle — pojawia się
+    # ono wyłącznie przy naruszeniach dry-run, z wartością `true` (zmierzone na żywej organizacji przy
+    # pierwszej realnej odmowie). Poprzednia asercja pilnowała więc, żeby filtr pozostał taki, przy którym
+    # metryka „ktoś jest blokowany TERAZ" nie policzy nigdy niczego — test strzegł defektu.
+    check("metryka enforced filtruje NEGACJA dryRun=true (pola nie ma przy enforced)",
+          'NOT protoPayload.metadata.dryRun=\\"true\\"' in body and 'dryRun=\\"false\\"' not in body)
     check("metryka dry-run filtruje dryRun=true", 'dryRun=\\"true\\"' in body)
 
     # Alert bez runbooka to zgadywanie o 3:00 (zasada repo: każdy critical niesie procedurę).
