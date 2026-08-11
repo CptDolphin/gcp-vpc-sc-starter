@@ -643,6 +643,28 @@ def test_deny_check() -> None:
           kody.get("403") != kody.get("404"), f"kody={kody}")
     shutil.rmtree(stub, ignore_errors=True)
 
+    # --- procedura testu warstwy Deny: MUSI niesc kontrole pozytywna ---------------------------------
+    # DLACZEGO TO JEST GUARD, A NIE AKAPIT W DOKUMENTACJI. Zmierzone na zywej organizacji: odmowa
+    # z polityki deny wyglada w API DOKLADNIE tak samo jak brak roli —
+    #   PERMISSION_DENIED: The caller does not have permission.
+    # bez nazwy polityki, reguly i bez slowa „deny". Procedura oparta na „komenda ma pasc" przechodzi
+    # wiec rowniez na wdrozeniu, ktore tej warstwy NIE MA — to jest ten falszywy dowod, ktory stal
+    # w tym README, dopoki polityki nie bylo. Rozstrzyga Policy Troubleshooter, i dopiero PARA krotek:
+    # zakazana (allow GRANTED + deny DENIED) oraz kontrolna (uprawnienie spoza polityki -> CAN_ACCESS).
+    # Sama krotka zakazana przeszlaby takze przy zepsutej impersonacji, ktora odmawia wszystkiego.
+    readme = (ROOT / "iam-bootstrap/README.md").read_text()
+    check("README deny: procedura wskazuje Policy Troubleshooter, nie tresc komunikatu bledu",
+          "policytroubleshooter.googleapis.com/v3/iam:troubleshoot" in readme)
+    check("README deny: dowodem jest PARA pol (allow GRANTED + deny DENIED), nie samo CANNOT_ACCESS",
+          "ALLOW_ACCESS_STATE_GRANTED" in readme and "DENY_ACCESS_STATE_DENIED" in readme)
+    check("README deny: procedura niesie KONTROLE POZYTYWNA (test anty-tautologiczny)",
+          "CAN_ACCESS" in readme
+          and "DENY_ACCESS_STATE_NOT_DENIED" in readme
+          and "servicePerimeters.update" in readme)
+    # Odpowiedz na pytanie, ktore pada przy kazdym wdrozeniu i decyduje, czy ta warstwa cokolwiek znaczy.
+    check("README deny: zapisane, KTO trzyma roles/iam.denyAdmin (rozlacznie z wlascicielem perimetru)",
+          "Kto ma trzymać `roles/iam.denyAdmin`" in readme)
+
 
 # --------------------------------------------------------------------- kontrakt
 def test_contract() -> None:
