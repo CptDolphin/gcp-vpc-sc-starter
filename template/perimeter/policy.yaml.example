@@ -71,6 +71,11 @@ vpc_accessible_services:
 # Sam typ pilnują dwie warstwy: schema (`type: string`) i osobna reguła OPA, bo cichy no-op guardu jest
 # gorszy od jego braku.
 #
+# PROJEKT BUCKETA STANU WPISZ OBIEMA FORMAMI — identyfikatorem I numerem. `tools/control_plane_check.py --live`
+# (plan.yml) pyta API, do jakiego projektu należy bucket stanu, a API odpowiada NUMEREM: lista złożona
+# z samych identyfikatorów nie da się z tą odpowiedzią porównać i bramka pada z instrukcją, zamiast
+# zgadywać. Identyfikator zostaw obok — dla człowieka czytającego diff.
+#
 # Pusta lista jest DOPUSZCZALNA i znaczy „w tej organizacji nie ma takich projektów". Sekcja jest za to
 # w schemacie WYMAGANA: brak sekcji i pusta lista dają ten sam skutek, więc różnicę między „zdecydowaliśmy"
 # a „nikt o tym nie pomyślał" musi wymusić schema, a nie pamięć autora.

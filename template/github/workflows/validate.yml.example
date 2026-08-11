@@ -69,6 +69,14 @@ jobs:
           check-jsonschema --schemafile schemas/projects.schema.json perimeter/projects.yaml
           check-jsonschema --schemafile schemas/access-level.schema.json perimeter/access-levels/*.yaml
 
+      # LISTA `control_plane_projects` MUSI OPISYWAĆ MIEJSCE, W KTÓRYM MASZYNERIA PERIMETRU NAPRAWDĘ LEŻY.
+      # Bramka OPA odrzuca członka wskazującego projekt Z TEJ LISTY — więc projekt płaszczyzny sterowania,
+      # którego na niej nie ma, przechodzi jak zwykły wniosek. Ten krok pilnuje spójności deklaracji między
+      # plikami (backend ↔ `contract.state_bucket`, `monitoring.project_id` ↔ lista, stack tożsamości ↔ lista);
+      # konfrontację z API robi `--live` w plan.yml, bo tylko tamten job ma poświadczenia.
+      - name: guard - lista control_plane_projects kontra reszta repo
+        run: python3 tools/control_plane_check.py
+
       # PLIK CZŁONKÓW MA BYĆ W POSTACI KANONICZNEJ — czyli dokładnie takiej, jaką zapisuje
       # `tools/projects_file.py`. To nie jest `fmt` dla estetyki, tylko warunek dwóch rzeczy naraz:
       #
