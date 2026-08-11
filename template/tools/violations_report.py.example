@@ -100,12 +100,48 @@ def identyfikatory_zapasowe(meta: dict, entry: dict) -> set:
     return ident
 
 
+def pokryte_przez_baseline(decl: dict, principal: str, service: str, method: str):
+    """Tytuł reguły `baseline_ingress`, która pokrywa TĘ tożsamość NA TEJ usłudze i metodzie — albo None.
+
+    DLACZEGO TO ISTNIEJE. `promotion_gate` pyta „czy okno obserwacji było czyste", czyli „czy jest przepływ,
+    który po promocji przestanie działać". Naruszenie od tożsamości PLATFORMY, dla której perimetr ma
+    JAWNĄ regułę baseline na dokładnie tej operacji, nie jest takim przepływem: po promocji reguła go
+    przepuści. Liczenie go blokuje promocję za coś, co promocji nie przetrwa tylko dlatego, że reguła
+    weszła w życie później niż wywołanie.
+
+    DLACZEGO TO NIE JEST „FILTR, KTÓRY UKRYWA NARUSZENIA" — bo nie jest listą tożsamości do pominięcia.
+    Wyklucza wyłącznie to, co konfiguracja perimetru już DEKLARUJE jako dozwolone, i to z dopasowaniem
+    na trzech wymiarach naraz: tożsamość ORAZ usługa ORAZ metoda. Ruch dywizji i ruch człowieka nie mają
+    jak w to wpaść, bo nie ma ich w `baseline_ingress` — a to jest dokładnie ten ruch, który bramka ma
+    łapać. Wykluczone wpisy i tak trafiają do raportu (sekcja „ruch platformy") i do osobnego artefaktu,
+    więc nic nie znika z oczu recenzenta.
+
+    UWAGA na konwencję nazw metod: audit-log niesie nazwę pełną (`google.logging.v2.LoggingServiceV2.
+    ListLogEntries`), a selektor w regule bywa skrócony (`LoggingServiceV2.ListLogEntries`) — ACM nie ma
+    tu jednej konwencji dla wszystkich usług. Dopasowujemy więc równość ALBO sufiks po kropce, nigdy
+    `in` na surowym stringu (to łapałoby `List` w `ListBuckets`).
+    """
+    for rule in decl.get("policy", {}).get("baseline_ingress", []) or []:
+        tozsamosci = {str(i).split(":", 1)[-1] for i in rule.get("identities", []) or []}
+        if principal not in tozsamosci:
+            continue
+        for op in rule.get("operations", []) or []:
+            if op.get("service") != service:
+                continue
+            for m in op.get("methods", []) or []:
+                if m == "*" or method == m or method.endswith("." + m):
+                    return rule.get("title", "?")
+    return None
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--logs", required=True, help="JSON z gcloud logging read")
     ap.add_argument("--declarations", required=True, help="wyjście collect_declarations.py")
     ap.add_argument("--json-out", default="violations.json")
     ap.add_argument("--markdown-out", default="violations.md")
+    ap.add_argument("--platform-json-out", default="violations-platform.json",
+                    help="wykluczone naruszenia platformy — publikowane obok dowodu, nie zamiast niego")
     args = ap.parse_args()
 
     surowe = json.loads(pathlib.Path(args.logs).read_text())
@@ -122,6 +158,8 @@ def main() -> int:
 
     counts = collections.Counter()
     detail = collections.defaultdict(collections.Counter)
+    platforma = collections.Counter()
+    platforma_detail = collections.defaultdict(collections.Counter)
     namiar = {}  # członek → jeden vpcServiceControlsUniqueId, gdy principal jest zredagowany
     obce = collections.Counter()
     nierozpoznane = []
@@ -131,6 +169,7 @@ def main() -> int:
         meta = pp.get("metadata", {})
         principal = pp.get("authenticationInfo", {}).get("principalEmail", "?")
         method = pp.get("methodName", "?")
+        service = pp.get("serviceName", "")
         reason = meta.get("violationReason") or ""
         if isinstance(reason, list):
             reason = ", ".join(str(r) for r in reason if r)
@@ -147,7 +186,14 @@ def main() -> int:
         if not czlonkowie:
             obce[f"{principal} → {method} ({reason})"] += 1
             continue
+        regula = pokryte_przez_baseline(decl, principal, service, method)
         for member in czlonkowie:  # jeden wpis może dotyczyć dwóch członków — liczy się obu raz
+            if regula:
+                # Ruch platformy pokryty jawną regułą baseline. NIE znika — idzie do własnego licznika,
+                # do raportu i do osobnego artefaktu; nie wchodzi tylko do liczby, którą czyta bramka.
+                platforma[member] += 1
+                platforma_detail[member][f"{principal} → {method} (pokrywa baseline_ingress[{regula}])"] += 1
+                continue
             counts[member] += 1
             detail[member][f"{principal} → {method} ({reason})"] += 1
             if unikat:
@@ -168,12 +214,32 @@ def main() -> int:
     result = {name: counts.get(name, 0) for name in decl["members"]}
     pathlib.Path(args.json_out).write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
 
+    # Wykluczenia jadą OSOBNYM plikiem, a nie dodatkowym kluczem w `violations.json`: ten plik jest
+    # wejściem OPA (`violations_last_window`), gdzie każdy klucz udaje nazwę członka. Osobny artefakt
+    # zachowuje kontrakt dowodu i jednocześnie nie pozwala schować wykluczeń przed recenzentem.
+    platform_out = {
+        name: {
+            "razem": platforma.get(name, 0),
+            "wpisy": dict(platforma_detail.get(name, {})),
+        }
+        for name in decl["members"]
+    }
+    pathlib.Path(args.platform_json_out).write_text(json.dumps(platform_out, indent=2, sort_keys=True) + "\n")
+
     lines = ["# Naruszenia dry-run — okno obserwacji", ""]
     for name in sorted(result):
         member = decl["members"][name]
         status = "czysto" if result[name] == 0 else f"**{result[name]} naruszeń**"
         lines.append(f"## {name} ({member['project_id']}, stage: {member['stage']}) — {status}")
         lines.append(f"właściciel: {member['owner_group']}")
+        if platforma.get(name):
+            # Świadomie NAD listą naruszeń dywizji: czytelnik ma zobaczyć, co zostało wyłączone z liczby,
+            # zanim uwierzy w słowo „czysto". Milczenie o wykluczeniach byłoby tym samym, co ich brak.
+            lines.append("")
+            lines.append(f"ruch platformy wyłączony z liczby (pokryty regułą `baseline_ingress`): "
+                         f"**{platforma[name]}** — pełna lista w `{args.platform_json_out}`")
+            for what, n in platforma_detail[name].most_common(10):
+                lines.append(f"- `{what}` × {n}")
         if result[name]:
             lines.append("")
             lines.append("Te wywołania PRZESTANĄ działać po promocji do enforced:")
@@ -196,7 +262,11 @@ def main() -> int:
             lines.append(f"- `{what}` × {n}")
 
     pathlib.Path(args.markdown_out).write_text("\n".join(lines) + "\n")
-    print(f"zapisano {args.json_out} i {args.markdown_out}")
+    print(f"zapisano {args.json_out}, {args.platform_json_out} i {args.markdown_out}")
+    if sum(platforma.values()):
+        print(f"UWAGA: {sum(platforma.values())} naruszeń zaklasyfikowano jako ruch platformy "
+              f"(pokryty regułą baseline_ingress) i NIE wchodzi do liczby czytanej przez promotion_gate — "
+              f"rozpiska w {args.platform_json_out}", file=sys.stderr)
     return 0
 
 

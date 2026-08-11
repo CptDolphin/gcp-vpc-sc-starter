@@ -12,37 +12,128 @@
 # UWAGA na `command = plan`: przy `manage_skeleton: false` i pustym katalogu members plan nie tworzy niczego,
 # więc testy operują na `local.*` przez asercje na wyrażeniach, nie na atrybutach zasobów.
 
-# --- 1. Świeże repo nie blokuje nikomu ruchu ---------------------------------------------------------
-# Najważniejsza własność startera. Gdyby domyślny stan produkował choć jedną regułę egzekwowaną, pierwszy
-# apply na środowisku docelowym mógłby odciąć ruch — a to jest dokładnie ten błąd, którego cała konstrukcja ma nie popełnić.
-run "swieze_repo_zero_regul_egzekwowanych" {
+# --- 1. Reguła egzekwowana powstaje WYŁĄCZNIE dla członka `stage: enforced` --------------------------
+#
+# TU BYŁA ASERCJA „świeże repo ma zero reguł egzekwowanych" i BYŁ TO BŁĄD KATEGORII. Ten plik jedzie
+# `install.sh` do repozytorium docelowego i tam wykonuje się na JEGO deklaracjach, a nie na przykładzie
+# ze startera. Własność „zero enforced" jest prawdziwa dla świeżego szablonu i przestaje być prawdziwa
+# w chwili, w której ktoś użyje produktu zgodnie z przeznaczeniem — czyli promuje pierwszego członka.
+# Zmierzone na wdrożeniu: pierwsza legalna promocja zapaliła `validate` na czerwono i zablokowała sama
+# siebie, a komunikat mówił „sprawdź stage w members/" przy `stage` ustawionym dokładnie tak, jak trzeba.
+# Bramka, która blokuje jedyną operację, dla której system istnieje, nie chroni niczego — uczy obchodzenia.
+#
+# Własność świeżego szablonu ZOSTAJE, tylko tam, gdzie da się ją sprawdzić uczciwie: w selfteście, który
+# instaluje szablon do katalogu tymczasowego i pyta `terraform console` o `local.ingress_rules_enforced`
+# (test „swieze repo nie ma zadnej reguly egzekwowanej"). Tam „świeże" znaczy świeże.
+#
+# Tutaj zostaje niezmiennik, który jest prawdziwy ZAWSZE i łapie ten sam realny tryb awarii — regułę
+# egzekwowaną, której nikt nie zamawiał: żadna reguła nie może wejść do konfiguracji egzekwowanej dla
+# członka, który nie jest `enforced`.
+run "enforced_tylko_dla_czlonka_enforced" {
   command = plan
 
   assert {
-    condition     = length(local.enforced_members) == 0
-    error_message = "Przykładowy członek nie jest w dry-run — świeże repo nie może mieć członków egzekwowanych."
+    condition = alltrue([
+      for k, r in local.ingress_rules_enforced : local.members[r.member].stage == "enforced"
+    ])
+    error_message = "Reguła ingress trafiła do konfiguracji egzekwowanej dla członka, który nie jest w stage: enforced."
   }
 
   assert {
-    condition     = length(local.ingress_rules_enforced) == 0 && length(local.egress_rules_enforced) == 0
-    error_message = "Świeże repo wyrenderowało regułę egzekwowaną. Sprawdź `stage` w perimeter/members/."
+    condition = alltrue([
+      for k, r in local.egress_rules_enforced : local.members[r.member].stage == "enforced"
+    ])
+    error_message = "Reguła egress trafiła do konfiguracji egzekwowanej dla członka, który nie jest w stage: enforced."
+  }
+
+  assert {
+    condition = alltrue([
+      for k, m in local.enforced_members : m.stage == "enforced"
+    ])
+    error_message = "local.enforced_members zawiera członka spoza stage: enforced."
   }
 }
 
-# --- 2. Każdy członek trafia do konfiguracji dry-run ------------------------------------------------
-# To fundament addytywnej promocji (DEC-6): dry-run zawiera WSZYSTKICH, więc zmiana `stage`
-# tylko dokłada zasób enforced i nie ma momentu, w którym projekt nie należy do żadnej konfiguracji.
-run "wszyscy_czlonkowie_w_dry_run" {
+# --- 2. Promocja jest ADDYTYWNA: dry-run zawiera wszystko, co egzekwowane ---------------------------
+#
+# To fundament DEC-6: dry-run zawiera WSZYSTKICH, więc zmiana `stage` tylko dokłada zasób enforced i nie
+# ma momentu, w którym projekt nie należy do żadnej konfiguracji.
+#
+# POPRZEDNIA WERSJA TEGO TESTU PORÓWNYWAŁA DWA RÓŻNE ZBIORY i przez to nie sprawdzała niczego, co
+# deklarowała: `ingress_rules_all` to alias na reguły Z PROFILI, a `ingress_rules_enforced` filtruje
+# `ingress_rules_effective`, czyli profile PLUS baseline. Przy pierwszej promocji dało to `2 >= 3` → false
+# i test padał na własnym błędzie, a nie na naruszeniu niezmiennika. Zbiór, który realnie ląduje
+# w konfiguracji dry-run (zasób `..._dry_run_ingress_policy`), to `ingress_rules_effective` — i to jego
+# trzeba porównywać. Sprawdzamy przez KLUCZE, nie przez liczności: równa liczność przy rozjechanych
+# kluczach wygląda tak samo jak zgodność.
+run "promocja_jest_addytywna" {
   command = plan
 
   assert {
-    condition     = length(local.ingress_rules_all) >= length(local.ingress_rules_enforced)
+    condition = alltrue([
+      for k, _ in local.ingress_rules_enforced : contains(keys(local.ingress_rules_effective), k)
+    ])
+    error_message = "Reguła ingress jest w konfiguracji egzekwowanej, ale nie ma jej w dry-run — promocja przestała być addytywna."
+  }
+
+  assert {
+    condition = alltrue([
+      for k, _ in local.egress_rules_enforced : contains(keys(local.egress_rules_all), k)
+    ])
+    error_message = "Reguła egress jest w konfiguracji egzekwowanej, ale nie ma jej w dry-run — promocja przestała być addytywna."
+  }
+
+  assert {
+    condition     = length(local.ingress_rules_effective) >= length(local.ingress_rules_enforced)
     error_message = "Konfiguracja dry-run musi zawierać co najmniej to, co egzekwowana."
   }
 
   assert {
     condition     = length(local.members) > 0
     error_message = "Brak członków do przetestowania — przykładowy plik zniknął z perimeter/members/."
+  }
+}
+
+# --- 2a. Reguła baseline MUSI mieć źródło — inaczej nie autoryzuje niczego ---------------------------
+#
+# ZMIERZONE na żywym ACM: reguła baseline bez ani jednego `sources` stała w konfiguracji dry-run osiem
+# minut, a wywołanie dokładnie tej tożsamości na dokładnie tej metodzie i tak wygenerowało naruszenie
+# z `violationReason: NO_MATCHING_ACCESS_LEVEL`. `ingress_from` bez źródła jest dla API regułą, która nie
+# pasuje do niczego — a wygląda w konsoli i w planie na obecną.
+#
+# Skutek dotyczy dokładnie tych przepływów, dla których baseline istnieje (skaner, raport naruszeń), więc
+# ochrona znikała w momencie, w którym zaczynała być potrzebna: przy pierwszej promocji.
+run "baseline_ma_zrodlo" {
+  command = plan
+
+  assert {
+    condition = alltrue([
+      for k, r in local.baseline_rules_all : length(r.access_levels) > 0
+    ])
+    error_message = "Reguła baseline bez ani jednego źródła (`sources`) nie autoryzuje niczego — API czyta ją jako NO_MATCHING_ACCESS_LEVEL."
+  }
+
+  # Kontrola anty-tautologiczna: gdyby baseline zniknął z policy.yaml, asercja wyżej przechodziłaby na
+  # pustym zbiorze i nie badała niczego. Materiał startera deklaruje baseline, więc tu musi ich być >0.
+  assert {
+    condition     = length(local.baseline_rules_all) > 0
+    error_message = "Brak reguł baseline do przetestowania — asercja o źródłach byłaby pusta."
+  }
+
+  # Reguła z jawnym `allow_without_access_level` renderuje się jako „dowolne pochodzenie sieciowe" (`*`),
+  # a nie jako nazwa access levelu. To jedyny kształt, który API honoruje dla autoryzacji samą tożsamością.
+  assert {
+    condition = alltrue(flatten([
+      for r in local.baseline_ingress : [
+        for k, br in local.baseline_rules_all :
+        # Porównanie przez długość i element, nie `== ["*"]`: literał jest krotką, a wyrenderowana wartość
+        # przychodzi z wyrażenia warunkowego, więc równość na całych kolekcjach potrafi wywrócić się na
+        # typie (tuple vs list) przy identycznej treści — czyli test padałby na czymś innym, niż bada.
+        length(br.access_levels) == 1 && br.access_levels[0] == "*"
+        if endswith(br.title, "--baseline--${r.title}")
+      ] if lookup(r, "allow_without_access_level", false) && length(lookup(r, "access_levels", [])) == 0
+    ]))
+    error_message = "Reguła baseline z allow_without_access_level nie wyrenderowała źródła `*`."
   }
 }
 

@@ -99,7 +99,8 @@ jobs:
         run: |
           python3 tools/violations_report.py \
             --logs raw.json --declarations declarations.json \
-            --json-out violations.json --markdown-out violations.md
+            --json-out violations.json --markdown-out violations.md \
+            --platform-json-out violations-platform.json
           cat violations.md >> "$GITHUB_STEP_SUMMARY"
 
       # violations.json is the artifact a promotion PR must attach. The rego rule treats a MISSING entry as
@@ -111,4 +112,5 @@ jobs:
           path: |
             violations.json
             violations.md
+            violations-platform.json
           retention-days: 30
