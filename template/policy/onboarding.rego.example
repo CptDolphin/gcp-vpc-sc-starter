@@ -182,6 +182,55 @@ control_plane_exception_justified(m) if {
 
 # --- promocja do enforced ---------------------------------------------------------------------------
 
+# WYJĄTEK OD BRAMKI PROMOCJI — dlaczego w ogóle istnieje.
+#
+# Bramka bez udokumentowanej ścieżki wyjątku nie jest bramką rygorystyczną, tylko bramką, która zostanie
+# WYŁĄCZONA. Pierwszy przypadek, w którym okno obserwacji nie da się spełnić w rozsądnym czasie (migracja
+# z terminem, projekt utworzony pod sam test, naruszenia wygenerowane przez własny audyt), kończy się
+# obniżeniem `dry_run_min_days` w baseline — czyli poluzowaniem reżimu dla WSZYSTKICH dywizji naraz,
+# bezterminowo i bez śladu, kto i po co o to poprosił.
+#
+# Wyjątek jest odwrotnością tamtego ruchu na czterech osiach:
+#   * ZAKRES — dotyczy JEDNEGO członka po nazwie, nie całej organizacji;
+#   * CZAS — ma `expires`; po tej dacie przestaje działać sam, bez niczyjej pamięci;
+#   * WŁASNOŚĆ — mieszka w `policy.yaml`, czyli pod CODEOWNERS Security. Gdyby siedział w pliku członka,
+#     dywizja zwalniałaby się z bramki własnym PR-em, a to jest definicja bramki, która nie bramkuje;
+#   * ILOŚĆ — `accept_violations_up_to` jest LICZBĄ, nie flagą „ignoruj". Wyjątek na 2 naruszenia nie
+#     przepuści trzeciego: jeśli w oknie pojawi się nowy przepływ, promocja znów staje.
+#
+# Uzasadnienie ma minimum 40 znaków — dwa razy tyle, co przy `exceptions` w pliku członka. Świadomie:
+# tamto opisuje pojedynczą regułę, to zwalnia z warunku, który chroni całą dywizję przed odcięciem ruchu.
+promotion_waivers := object.get(object.get(input.policy, "onboarding", {}), "promotion_waivers", [])
+
+# Wyjątek jest WAŻNY, gdy dotyczy tego członka, nie wygasł i niesie uzasadnienie. Każdy z tych warunków
+# osobno: wygasły wyjątek z dobrym uzasadnieniem jest tak samo nieważny jak świeży bez uzasadnienia.
+wazne_wyjatki(name) := [w |
+	some w in promotion_waivers
+	w.member == name
+	w.expires >= input.today # ISO YYYY-MM-DD porównuje się leksykograficznie
+	count(object.get(w, "justification", "")) >= 40
+]
+
+# DWA PREDYKATY Z `default`, A NIE `object.get` NA WYNIKU FUNKCJI. Funkcja bez pasującego wyjątku jest
+# NIEZDEFINIOWANA, a niezdefiniowane wyrażenie w ciele reguły `deny` unieważnia CAŁĄ regułę — czyli brak
+# wyjątku przepuszczałby promocję zamiast ją zatrzymać. Bramka fail-open jest gorsza od jej braku, bo
+# wygląda na obecną. Stąd jawne wartości domyślne: „brak wyjątku" = nie zwalnia i pokrywa 0 naruszeń.
+default wyjatek_zwalnia_z_okna(_) := false
+
+wyjatek_zwalnia_z_okna(name) if {
+	some w in wazne_wyjatki(name)
+	object.get(w, "accept_dry_run_days_below_minimum", false)
+}
+
+default wyjatek_pokrywa_naruszen(_) := 0
+
+wyjatek_pokrywa_naruszen(name) := n if {
+	n := max([x |
+		some w in wazne_wyjatki(name)
+		x := object.get(w, "accept_violations_up_to", 0)
+	])
+}
+
 # Okno obserwacji: minimum dni w dry-run. Bez tej bramki „promocja" staje się formalnością zaraz po
 # merge'u wniosku — a wtedy cała dwustopniowość jest teatrem (DEC-4).
 deny contains msg if {
@@ -189,6 +238,7 @@ deny contains msg if {
 	m.stage == "enforced"
 	days := days_between(m.dry_run_since, input.today)
 	days < input.policy.onboarding.dry_run_min_days
+	not wyjatek_zwalnia_z_okna(name)
 	msg := sprintf(
 		"members/%s: promocja do enforced po %d dniach dry-run, wymagane minimum %d (perimeter/policy.yaml)",
 		[name, days, input.policy.onboarding.dry_run_min_days],
@@ -197,6 +247,10 @@ deny contains msg if {
 
 # Raport naruszeń (violations-report.yml) wstrzykuje `violations_last_window` per członek. Brak klucza =
 # brak dowodu, że okno było czyste — a „nie mamy danych" nie jest tym samym co „nie było naruszeń".
+#
+# TEJ reguły wyjątek NIE zwalnia i to jest świadome: „nie zmierzyliśmy" nie jest stanem, o którym da się
+# podjąć decyzję. Wyjątek mówi „widzieliśmy N naruszeń i bierzemy je na siebie" — więc najpierw musi być co
+# zobaczyć. Zwolnienie z dowodu zamieniłoby wyjątek w wyłącznik całej bramki.
 deny contains msg if {
 	some name, m in input.members
 	m.stage == "enforced"
@@ -209,7 +263,27 @@ deny contains msg if {
 	m.stage == "enforced"
 	count := input.violations_last_window[name]
 	count > 0
-	msg := sprintf("members/%s: %d naruszeń w oknie obserwacji — napraw przepływy albo dodaj profil przed promocją", [name, count])
+	count > wyjatek_pokrywa_naruszen(name)
+	msg := sprintf(
+		"members/%s: %d naruszeń w oknie obserwacji — napraw przepływy albo dodaj profil przed promocją (wyjątek pokrywa do %d)",
+		[name, count, wyjatek_pokrywa_naruszen(name)],
+	)
+}
+
+# Wyjątek dla członka, którego nie ma — zwykle literówka w nazwie pliku. Cichy no-op wyglądałby jak
+# działający wyjątek do czasu, aż ktoś zdziwi się, czemu promocja stoi. Fail-loud, nie fail-silent.
+deny contains msg if {
+	some w in promotion_waivers
+	not input.members[w.member]
+	msg := sprintf("policy.yaml onboarding.promotion_waivers: wyjątek wskazuje członka %q, którego nie ma w perimeter/members/", [w.member])
+}
+
+# Wyjątek, który nie zwalnia z niczego, jest wpisem-widmem: wygląda w diffie jak decyzja, a nie robi nic.
+deny contains msg if {
+	some w in promotion_waivers
+	not object.get(w, "accept_dry_run_days_below_minimum", false)
+	object.get(w, "accept_violations_up_to", 0) == 0
+	msg := sprintf("policy.yaml onboarding.promotion_waivers[%q]: wyjątek nie zwalnia z niczego — ustaw accept_dry_run_days_below_minimum albo accept_violations_up_to", [w.member])
 }
 
 # --- kanały wejścia ---------------------------------------------------------------------------------

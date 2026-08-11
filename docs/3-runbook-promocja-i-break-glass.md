@@ -22,6 +22,46 @@ Wszystkie warunki muszą być spełnione (bramka `promotion_gate` w `policy/onbo
 > **Nie skracaj okna „bo zielono od trzech dni".** Dry-run rejestruje tylko to, co faktycznie zaszło.
 > Najczęstszy tryb awarii po promocji to zadanie, które uruchamia się raz w miesiącu.
 
+### Gdy warunku naprawdę nie da się spełnić — wyjątek, nie obniżenie baseline
+
+Prędzej czy później trafi się przypadek, w którym okno obserwacji nie da się przeczekać (migracja
+z terminem, projekt utworzony pod jeden pomiar) albo naruszenia w oknie pochodzą z audytu, a nie z ruchu
+dywizji. Odruch jest jeden: obniżyć `dry_run_min_days` w `policy.yaml`. **To jest najgorsze z możliwych
+wyjść** — poluzowuje reżim dla wszystkich dywizji naraz, bezterminowo i bez śladu, kto o to poprosił.
+
+Do tego służy `onboarding.promotion_waivers` — wyjątek **per członek**, z datą ważności:
+
+```yaml
+onboarding:
+  dry_run_min_days: 14
+  clean_window_days: 7
+  promotion_waivers:
+    - member: <NAZWA_PLIKU_CZLONKA_BEZ_ROZSZERZENIA>
+      justification: "<40+ znakow: dlaczego warunku nie da sie spelnic i czemu promocja mimo to jest bezpieczna>"
+      approved_by: <KTO_ZATWIERDZIL>
+      expires: "<YYYY-MM-DD>"
+      accept_dry_run_days_below_minimum: true
+      accept_violations_up_to: 2
+```
+
+Co ten kształt wymusza i dlaczego:
+
+| Własność | Po co |
+|---|---|
+| `member` — jeden członek | decyzja nie rozlewa się na organizację; wyjątek na nieistniejącego członka jest **odrzucany**, żeby literówka nie udawała działającego wyjątku |
+| `expires` — obowiązkowe | wyjątek przestaje działać sam. Bezterminowy jest obniżeniem baseline pod inną nazwą |
+| mieszka w `policy.yaml` | ten plik jest pod CODEOWNERS Security. W pliku członka dywizja zwalniałaby się z bramki własnym PR-em |
+| `accept_violations_up_to` — **liczba** | wyjątek na 2 naruszenia nie przepuści trzeciego: nowy przepływ w oknie znów zatrzymuje promocję |
+| dwa osobne pola | zgoda na krótsze okno nie jest zgodą na naruszenia. Dwa warunki, dwie decyzje |
+| uzasadnienie ≥ 40 znaków | dwa razy tyle, co przy `exceptions` członka — to zwalnia z warunku chroniącego dywizję przed odcięciem ruchu |
+
+**Czego wyjątek NIE robi: nie zwalnia z obowiązku posiadania raportu naruszeń.** „Nie zmierzyliśmy" nie
+jest stanem, o którym da się podjąć decyzję — wyjątek mówi „widzieliśmy N naruszeń i bierzemy je na
+siebie", więc najpierw musi być co zobaczyć. Zwolnienie z dowodu zamieniłoby wyjątek w wyłącznik bramki.
+
+Po promocji **usuń wyjątek** tym samym PR-em co następna zmiana konfiguracji — albo pozwól mu wygasnąć.
+Wyjątek, który przeżył swój powód, jest dokładnie tym, przed czym broni `expires`.
+
 ### Kroki
 
 0. **Sprawdź, czy to repo nie odstaje od startera — PRZED raportem, nie po nim:**
