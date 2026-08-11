@@ -41,6 +41,21 @@ channels:
   security:
     email: "example-secops@example.com"
 
+  # KANAL MASZYNOWY (OPCJONALNY) — Pub/Sub. Nie budzi nikogo; odpowiada na inne pytanie: „czym UDOWODNIC,
+  # ze alert naprawde odpalil". Cloud Monitoring NIE MA publicznego API do listowania incydentow
+  # (`/v3/projects/X/incidents` = 404 „Method not found"), wiec bez tego kanalu jedynym dowodem zadzialania
+  # alertu jest wiadomosc w cudzej skrzynce albo zrzut z konsoli — czyli nic, co da sie zapisac w runbooku
+  # albo sprawdzic automatem. Wiadomosc Pub/Sub niesie pelny obiekt incydentu (`incident.state`, polityka,
+  # warunek, zaobserwowana wartosc), wiec test negatywny przestaje byc deklaracja.
+  #
+  # DRUGIE ZASTOSOWANIE, dla ktorego ten kanal zostaje na stale: to jest wejscie dla SIEM-u. Alerty granicy
+  # trafiaja tam ta sama droga co reszta telemetrii bezpieczenstwa, bez parsowania maili.
+  #
+  # Temat MUSI istniec i miec prawo publikacji dla agenta powiadomien Monitoringu — tworzy go
+  # `iam-bootstrap` (stack czlowieka), NIE pipeline perimetru. Brak klucza = kanal nie powstaje.
+  machine:
+    pubsub_topic: "projects/example-monitoring/topics/example-vpcsc-alerts"
+
 # --- PROGI ------------------------------------------------------------------------------------------
 thresholds:
   # Budzet atrybutow — prog STATYCZNY, ten sam, ktorego pilnuje bramka `tools/attribute_budget.py` na PR-ze.

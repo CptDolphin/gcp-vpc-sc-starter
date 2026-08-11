@@ -16,6 +16,11 @@ output "deny_policy_managed_here" {
   value       = var.manage_deny_policy
 }
 
+output "alert_topic" {
+  description = "PELNA sciezka tematu Pub/Sub — do wklejenia w `perimeter/alerting.yaml` jako `channels.machine.pubsub_topic`. Cloud Monitoring przyjmuje wylacznie te postac; sama nazwa daje kanal, ktory powstaje i nie publikuje niczego."
+  value       = local.zarzadza_tematem_alertow == 0 ? "" : "projects/${var.monitoring_project_id}/topics/${google_pubsub_topic.alerty[0].name}"
+}
+
 output "watch_service_account" {
   description = "Adres konta obserwatora — do wpisania jako zmienna repozytorium `WATCH_SERVICE_ACCOUNT` (używa jej `watch.yml`). Pusty string = sekcja `monitoring` wyłączona, więc obserwatora nie ma i workflow nie ruszy: to jest poprawny stan wdrożenia bez alertów, a nie brak konfiguracji."
   value       = var.monitoring_project_id == "" ? "" : google_service_account.watch[0].email

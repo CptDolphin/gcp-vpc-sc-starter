@@ -90,6 +90,15 @@ resource "google_organization_iam_custom_role" "perimeter_writer" {
 # przypisanie i tylko je usuwa przy destroy.
 
 locals {
+  # KANAL MASZYNOWY ZA FLAGA — dokladnie tak samo jak warstwa IAM Deny nizej, i z dwoch powodow.
+  # (1) To jest sciezka WYPROWADZENIA DANYCH: temat Pub/Sub z prawem publikacji dla agenta chmury.
+  #     Wdrozenie, ktore go nie chce, ma go NIE MIEC, a nie „miec i nie uzywac".
+  # (2) Zasoby `google_project_service` i `google_project_service_identity` WYMAGAJA POSWIADCZEN JUZ NA
+  #     ETAPIE `plan` (provider konfiguruje sie leniwie, a te dwa zasoby go budza). Reszta tego stacku
+  #     planuje sie BEZ poswiadczen — i to jest wlasnosc, ktorej pilnuje selftest, bo dzieki niej bramka
+  #     na pull requescie nie potrzebuje dostepu do chmury. Domyslnie wylaczone = niezmiennik zostaje.
+  zarzadza_tematem_alertow = (var.monitoring_project_id != "" && var.manage_alert_topic) ? 1 : 0
+
   plan_org_roles = [
     "roles/accesscontextmanager.policyReader", # odczyt perimetru do terraform plan
     "roles/cloudasset.viewer",                 # pre-flight: czy projekt istnieje, czy nie jest w innym perimetrze
@@ -326,6 +335,87 @@ resource "google_project_iam_member" "apply_monitoring" {
   project = var.monitoring_project_id
   role    = google_project_iam_custom_role.monitoring_writer[0].id
   member  = "serviceAccount:${google_service_account.apply.email}"
+}
+
+# --- 3e. kanal maszynowy alertow (Pub/Sub) --------------------------------------------------------
+# DLACZEGO TO STOI W STACKU CZLOWIEKA, A NIE W REPO PERIMETRU. Temat Pub/Sub to sciezka WYPROWADZENIA
+# DANYCH: kto moze go utworzyc i nadac na nim prawo publikacji, ten moze zbudowac kanal wynoszacy
+# telemetrie gdzie indziej. Rola `vpcScMonitoringWriter` swiadomie nie ma ani sinkow, ani kubelkow, ani
+# IAM — i Pub/Sub do niej nie wchodzi z tego samego powodu. Pipeline perimetru tworzy WYLACZNIE `kanal`
+# wskazujacy na ten temat (`notificationChannels.create`, ktore juz ma), a temat i grant dostaje gotowe.
+#
+# PO CO TEN KANAL W OGOLE, skoro nikogo nie budzi: Cloud Monitoring NIE MA publicznego API do listowania
+# incydentow (`GET /v3/projects/<p>/incidents` odpowiada `404 Method not found` — sprawdzone). Bez kanalu
+# maszynowego jedynym dowodem, ze alert odpalil, jest wiadomosc w cudzej skrzynce albo zrzut z konsoli —
+# czyli nic, co da sie zapisac w runbooku i sprawdzic automatem. Wiadomosc Pub/Sub niesie pelny obiekt
+# incydentu (`incident.state`, polityka, warunek, zaobserwowana wartosc). Drugie, trwale zastosowanie:
+# to jest wejscie dla SIEM-u — alerty granicy ida tam ta sama droga co reszta telemetrii bezpieczenstwa.
+# API Pub/Suba bywa WYLACZONE w projekcie, ktory dotad go nie uzywal — i wtedy `terraform apply` pada na
+# `SERVICE_DISABLED`, wskazujac link do konsoli (zmierzone na wdrozeniu). Wlaczamy je tutaj, zeby wdrozenie
+# od zera nie wymagalo ani jednego kliknięcia. `disable_on_destroy = false`: `terraform destroy` tego stacku
+# NIE MA prawa wylaczac uslugi, z ktorej moze korzystac cokolwiek innego w tym projekcie.
+resource "google_project_service" "pubsub" {
+  count = local.zarzadza_tematem_alertow
+
+  project            = var.monitoring_project_id
+  service            = "pubsub.googleapis.com"
+  disable_on_destroy = false
+}
+
+resource "google_pubsub_topic" "alerty" {
+  count = local.zarzadza_tematem_alertow
+
+  project = var.monitoring_project_id
+  name    = var.alert_topic_name
+
+  depends_on = [google_project_service.pubsub]
+}
+
+# Subskrypcja istnieje po to, zeby wiadomosci PRZETRWALY do momentu, w ktorym ktos po nie siegnie.
+# Temat bez subskrypcji wyrzuca kazda wiadomosc natychmiast — dowod odpalenia alertu przepadalby dokladnie
+# wtedy, gdy nikt nie patrzyl, czyli w jedynym przypadku, ktory ma znaczenie.
+resource "google_pubsub_subscription" "alerty" {
+  count = local.zarzadza_tematem_alertow
+
+  project = var.monitoring_project_id
+  name    = "${var.alert_topic_name}-ewidencja"
+  topic   = google_pubsub_topic.alerty[0].id
+
+  message_retention_duration = "604800s" # 7 dni
+  retain_acked_messages      = true
+  expiration_policy {
+    ttl = "" # nigdy nie wygasa — subskrypcja bez ruchu przez 31 dni jest kasowana domyslnie
+  }
+}
+
+# AGENT POWIADOMIEN TRZEBA WYWOLAC DO ISTNIENIA, ZANIM NADA MU SIE ROLE. Konto
+# `service-<numer>@gcp-sa-monitoring-notification.iam.gserviceaccount.com` powstaje LENIWIE — dopoki nie
+# istnieje, grant pada twardo: `Error 400: Service account … does not exist` (zmierzone na wdrozeniu).
+#
+# UWAGA NA NAZWE USLUGI: identity tworzy sie dla `monitoring.googleapis.com`, mimo ze POWSTAJACE konto
+# nazywa sie `gcp-sa-monitoring-NOTIFICATION`. Intuicyjne `monitoring-notification.googleapis.com` NIE
+# ISTNIEJE jako usluga (`SERVICE_CONFIG_NOT_FOUND_OR_PERMISSION_DENIED`) — sprawdzone, zeby nikt nie
+# tracil na to czasu drugi raz.
+resource "google_project_service_identity" "monitoring_notification" {
+  count = local.zarzadza_tematem_alertow
+
+  provider = google-beta
+  project  = var.monitoring_project_id
+  service  = "monitoring.googleapis.com"
+}
+
+# Agent powiadomien Monitoringu musi miec prawo PUBLIKACJI na tym temacie. Bez tego kanal powstaje,
+# konsola pokazuje go jako aktywny, a nie przychodzi ANI JEDNA wiadomosc — czyli kanal, ktory wyglada
+# na uzbrojony i milczy. To ten sam ksztalt awarii co pusta lista `notificationChannels`.
+resource "google_pubsub_topic_iam_member" "monitoring_publisher" {
+  count = local.zarzadza_tematem_alertow
+
+  project = var.monitoring_project_id
+  topic   = google_pubsub_topic.alerty[0].name
+  role    = "roles/pubsub.publisher"
+  # Bierzemy adres Z ZASOBU, nie sklejamy go z numeru projektu: dzieki temu zaleznosc jest jawna, a grant
+  # nie powstanie, zanim konto zaczne istniec.
+  member = "serviceAccount:${google_project_service_identity.monitoring_notification[0].email}"
 }
 
 # --- 4. Workload Identity Federation ---------------------------------------------------------------

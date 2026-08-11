@@ -29,6 +29,21 @@
         },
         "security": {
           "$ref": "#/$defs/channel"
+        },
+        "machine": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Kanał maszynowy (Pub/Sub) — OPCJONALNY. Nie budzi nikogo; niesie pełny obiekt incydentu, więc jest jedynym dowodem odpalenia alertu możliwym do sprawdzenia automatem (Cloud Monitoring nie ma publicznego API do listowania incydentów). Drugie zastosowanie: wejście dla SIEM-u.",
+          "required": [
+            "pubsub_topic"
+          ],
+          "properties": {
+            "pubsub_topic": {
+              "type": "string",
+              "pattern": "^projects/[a-z0-9-]+/topics/[A-Za-z0-9._~%+-]+$",
+              "description": "PEŁNA ścieżka tematu (`projects/<projekt>/topics/<temat>`), nie sama nazwa — Cloud Monitoring przyjmuje wyłącznie tę postać, a sama nazwa daje kanał, który powstaje i nie publikuje niczego."
+            }
+          }
         }
       }
     },
