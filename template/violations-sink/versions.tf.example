@@ -1,0 +1,26 @@
+terraform {
+  required_version = ">= 1.8, < 2.0"
+
+  required_providers {
+    google = {
+      source  = "hashicorp/google"
+      version = "~> 7.0"
+    }
+  }
+
+  # Backend GCS — stan warstwy AGREGACJI LOGÓW. Osobny prefiks, bo osobny właściciel: ten stack applikuje
+  # człowiek z org-level `logging.configWriter`, a nie pipeline perimetru.
+  #
+  # UWAGA NA KSZTAŁT PREFIKSU (ten sam footgun co w iam-bootstrap): `iam-bootstrap/main.tf` daje kontom
+  # `sa-vpcsc-plan`/`sa-vpcsc-apply` `storage.objectAdmin` na buckecie stanu z warunkiem
+  # `resource.name.startsWith(".../objects/vpc-sc/perimeter")`. Prefiks zaczynający się od `vpc-sc/perimeter`
+  # (np. `vpc-sc/perimeter-sink`) wpadłby POD ten warunek i oddał ten stan pipeline'owi — czyli tożsamość,
+  # której logi ten sink zbiera, mogłaby przestawić jego cel. `vpc-sc/violations-sink` jest rozłączny
+  # na pierwszym członie po `vpc-sc/`.
+  backend "gcs" {
+    bucket = "bkt-tf-state-vpcsc"
+    prefix = "vpc-sc/violations-sink"
+  }
+}
+
+provider "google" {}

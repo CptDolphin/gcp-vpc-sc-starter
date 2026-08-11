@@ -1,0 +1,180 @@
+# Agregacja naruszeń VPC-SC z CAŁEJ organizacji do jednego kubełka logów.
+#
+# KTO TO APPLIKUJE: człowiek z org-level `roles/logging.configWriter` — NIE pipeline perimetru.
+# To nie jest ostrożność, tylko ta sama granica, którą `iam-bootstrap/main.tf` uzasadnia przy roli
+# `vpcScMonitoringWriter`: para `monitoring.editor` + `logging.configWriter` daje tworzenie SINKÓW,
+# kubełków i uprawnień do nich, czyli ścieżkę wyprowadzenia logów gdzie indziej. Konto `sa-vpcsc-apply`
+# świadomie tego nie ma i mieć nie ma — więc sink org-level nie może powstawać w stacku, który to konto
+# applikuje. Stąd osobny katalog, osobny prefiks stanu, osobny właściciel.
+#
+# PROBLEM, KTÓRY TO ROZWIĄZUJE (zmierzony 2026-08-10 i powtórzony 2026-08-11)
+# --------------------------------------------------------------------------
+# Wpis audytowy VPC-SC ląduje w logu PROJEKTU będącego właścicielem chronionego zasobu, nie organizacji:
+#
+#   gcloud logging read '<filtr>' --organization=123456789012    ->  0 wpisów
+#   gcloud logging read '<filtr>' --project=prj-example-vertex-prod -> 41 wpisów
+#
+# Raport czytał więc każdy projekt członkowski OSOBNO. Przy kilkuset projektach to kilkaset wywołań
+# `logging read` na przebieg — wolno, drogo i krucho: jeden projekt bez uprawnień wywraca całość, a
+# `violations.json` jest DOWODEM dla bramki `promotion_gate`, więc jego niekompletność przepuszcza
+# promocję, która nie powinna przejść.
+#
+# DLACZEGO KUBEŁEK LOGÓW, A NIE BIGQUERY (rozstrzygnięte kosztem i tym, czego raport realnie potrzebuje)
+# -------------------------------------------------------------------------------------------------------
+# Koszt NIE rozstrzyga — oba wychodzą 0 EUR przy tej skali (rachunek w README.md §Koszt). Rozstrzyga
+# kształt danych i powierzchnia awarii:
+#
+#   * Raport przypisuje naruszenie do członka WYŁĄCZNIE po zagnieżdżonych tablicach
+#     `metadata.ingressViolations[].targetResource` / `metadata.egressViolations[].source`. Kubełek oddaje
+#     dokładnie ten sam JSON, który parser już czyta — zero zmian w parserze, fixture testowy zostaje ważny.
+#     Sink do BigQuery wkłada `protoPayload.metadata` do kolumny STRING `metadataJson` (BQ nie ma typu dla
+#     `Any`), więc raport musiałby ją odparsować z powrotem — nowy tryb awarii na ścieżce niosącej DOWÓD,
+#     za zero funkcji.
+#   * Fail-closed stoi na kodzie wyjścia `gcloud logging read` (przy odmowie wypisuje `[]` na stdout).
+#     Odczyt z kubełka zachowuje tę własność 1:1; `bq query` dokłada drugą powierzchnię uprawnień na
+#     ścieżce dowodu.
+#   * Trend/raport per dywizja „bez przetwarzania w skrypcie" to jedyna realna przewaga BigQuery — i nie
+#     jest wymagana przez żadne kryterium odbioru. Agregacja per członek to ~40 przetestowanych linii
+#     Pythona, które już istnieją.
+#   * Kubełek daje WIDOK z własnym IAM (`logging.viewAccessor` na jednym widoku). W BigQuery odpowiednikiem
+#     jest ACL datasetu, a wiersz-po-wierszu dopiero row-level security. Przy strumieniu pokazującym całej
+#     organizacji, kto próbuje sięgać gdzie, to nie jest kosmetyka.
+
+locals {
+  # Filtr sinka. TRZY decyzje, każda z powodem:
+  #
+  # 1. BEZ predykatu na `dryRun`. Pole `dryRun` istnieje WYŁĄCZNIE przy naruszeniu dry-run (z wartością
+  #    `true`); wpis o odmowie EGZEKWOWANEJ nie ma go w ogóle. Filtr `dryRun="false"` nie dopasowuje więc
+  #    NICZEGO — nigdy, w żadnej organizacji (ten defekt siedział w metryce alertu, w sondzie i w asercji
+  #    selftestu, która go utrwalała, #1941). Brak predykatu łapie OBA rodzaje; rozróżnia je raport.
+  # 2. BEZ predykatu na `violationReason`. Zmierzone: 24/24 wpisy je mają, ale sink ma ZBIERAĆ szeroko —
+  #    nowy kształt wpisu ma trafić do kubełka i wywrócić raport (fail-closed), a nie zniknąć w filtrze.
+  # 3. BEZ listy członków. To jest wymóg, nie uproszczenie: kandydat w pre-flighcie i projekt świeżo
+  #    wyprowadzony (offboarding) NIE SĄ członkami, a ich naruszenia są dokładnie tym, co trzeba zobaczyć.
+  #    Filtruje się przy RAPORTOWANIU (`violations_report.py` zna listę członków), nie przy zbieraniu —
+  #    inaczej dowód znika w chwili, w której zmienia się konfiguracja.
+  sink_filter = "protoPayload.metadata.\"@type\"=\"type.googleapis.com/google.cloud.audit.VpcServiceControlAuditMetadata\""
+
+  bucket_name = "projects/${var.sink_project_id}/locations/${var.bucket_location}/buckets/${var.bucket_id}"
+  view_name   = "${local.bucket_name}/views/${var.bucket_id}"
+}
+
+# --- 1. kubełek docelowy ----------------------------------------------------------------------------
+
+resource "google_logging_project_bucket_config" "violations" {
+  project   = var.sink_project_id
+  location  = var.bucket_location
+  bucket_id = var.bucket_id
+
+  # 30 dni = sufit darmowy Cloud Logging. Powyżej płaci się 0,01 USD/GiB/mies. — przy zmierzonych
+  # ~3,3 KB/wpis trzeba by ~300 tys. wpisów miesięcznie, żeby rachunek urósł do jednego centa. Zostaje 30,
+  # bo pokrywa okno bramki (14 + 7 dni) z zapasem i trzyma odpowiedź „0 EUR" DOKŁADNĄ, a nie „pomijalną".
+  retention_days = var.retention_days
+
+  description = "Naruszenia VPC-SC (dry-run i egzekwowane) z całej organizacji — jedno miejsce zamiast N odczytów per projekt. Wejście dla violations-report.yml."
+
+  # ŚWIADOMIE BEZ `locked = true`. Blokada retencji jest NIEODWRACALNA i uniemożliwia skasowanie kubełka
+  # przed upływem retencji — a ten kubełek jest wejściem narzędzia, nie archiwum dowodowym. Gdyby dowód
+  # miał być niepodważalny (SOX/WORM), właściwym miejscem jest osobny sink do bucketu GCS z Bucket Lock,
+  # a nie zablokowany kubełek logów; to osobna decyzja, nie efekt uboczny tej.
+}
+
+# --- 2. sink org-level -------------------------------------------------------------------------------
+
+resource "google_logging_organization_sink" "violations" {
+  name   = var.bucket_id
+  org_id = var.org_id
+
+  # NAJWAŻNIEJSZE POLE W TYM PLIKU. Bez `include_children` sink org-level widzi wyłącznie logi zapisane
+  # NA organizacji (`organizations/<id>/logs/…`) — czyli dokładnie ten pusty zbiór, od którego zaczął się
+  # ten problem: `--organization=` zwracało 0 przy 41 wpisach w projekcie członka. Z `include_children`
+  # sink przejmuje logi wszystkich folderów i projektów poniżej.
+  include_children = true
+
+  destination = "logging.googleapis.com/${local.bucket_name}"
+  filter      = local.sink_filter
+
+  depends_on = [google_logging_project_bucket_config.violations]
+}
+
+# --- 3. prawo zapisu dla tożsamości sinka -----------------------------------------------------------
+# Sink pisze WŁASNĄ tożsamością (`writer_identity`), nie tożsamością twórcy. Bez tego grantu sink istnieje,
+# raportuje się jako zdrowy i po cichu nie dostarcza ani jednego wpisu — awaria nierozróżnialna od
+# „czystego okna", czyli dokładnie ta klasa błędu, którą ten stack ma zlikwidować.
+
+resource "google_project_iam_member" "sink_writer" {
+  project = var.sink_project_id
+  role    = "roles/logging.bucketWriter"
+  member  = google_logging_organization_sink.violations.writer_identity
+
+  # Warunek zawęża prawo zapisu do JEDNEGO kubełka. `logging.bucketWriter` bez warunku pozwoliłby tej
+  # tożsamości pisać do KAŻDEGO kubełka w projekcie — w tym do `_Default`, czyli wstrzykiwać wpisy do
+  # strumienia, na który patrzą alerty.
+  condition {
+    title      = "only-vpcsc-violations-bucket"
+    expression = "resource.name.endsWith(\"locations/${var.bucket_location}/buckets/${var.bucket_id}\")"
+  }
+}
+
+# --- 4. widok — jednostka dostępu do surowego strumienia odmów ---------------------------------------
+# DLACZEGO WIDOK, A NIE SAM KUBEŁEK: uprawnienie nadaje się na widoku, więc czytelnik raportu nie dostaje
+# przy okazji wszystkiego innego, co kiedyś trafi do tego projektu. Widok jest granicą na WYPADEK, gdyby
+# ktoś skierował tu drugi sink — konto raportu ma widzieć odmowy, nie „co się nazbierało w projekcie".
+#
+# FILTR WIDOKU NIE MOŻE POWTÓRZYĆ FILTRA SINKA — zmierzone na API 2026-08-11:
+#
+#   Error 400: Invalid view filter. View filters may only contain restrictions on log source, valid
+#   resource types, apphub fields, user-defined labels, or log ID
+#
+# `protoPayload.metadata."@type"` nie należy do żadnej z tych kategorii, więc widok zawężamy najwęższą
+# LEGALNĄ restrykcją: identyfikatorem logu. Zmierzone: 24/24 wpisy o naruszeniu VPC-SC mają
+# `logName = …/logs/cloudaudit.googleapis.com%2Fpolicy`. To jest NADZBIÓR filtra sinka (log „policy" niesie
+# też inne odmowy polityk), ale w tym kubełku i tak leży wyłącznie to, co sink wpuścił — a przy przyszłym
+# drugim sinku odcina wszystko, co policy-auditem nie jest. Zapisane, bo bez tego akapitu kolejna osoba
+# „poprawi" filtr widoku na ten z sinka i dostanie 400 na apply.
+resource "google_logging_log_view" "violations" {
+  name        = var.bucket_id
+  bucket      = google_logging_project_bucket_config.violations.id
+  description = "Odmowy polityk (audit log `policy`) — jednostka nadawania dostępu do strumienia naruszeń VPC-SC."
+  filter      = "LOG_ID(\"cloudaudit.googleapis.com/policy\")"
+}
+
+# --- 5. kto czyta ------------------------------------------------------------------------------------
+# DECYZJA: dostęp do KUBEŁKA jest węższy niż do RAPORTU, i to jest zamierzone.
+#
+# Raport (`violations.md` / `violations.json`) mówi „członek X ma N naruszeń" i jest artefaktem GitHub
+# Actions — widzi go każdy z dostępem do repozytorium perimetru. Kubełek niesie surowe odmowy z CAŁEJ
+# organizacji: tożsamości, metody, nazwy zasobów po obu stronach granicy i tokeny troubleshootera. To jest
+# mapa tego, kto próbuje sięgać gdzie — łącznie z projektami, które członkami nie są (kandydaci,
+# offboarding). Dlatego czytają go DOKŁADNIE dwa kręgi:
+#
+#   * `report_service_account` — maszyna, która produkuje dowód. Nic poza nią z pipeline'u tu nie sięga;
+#     konto `apply` dostępu NIE MA i nie potrzebuje.
+#   * `violations_reader_principals` — jawna, imienna lista ludzi (Security). Domyślnie PUSTA: brak wpisu
+#     znaczy „nikt nie ma tu wglądu z urzędu", a nie „zapomniano skonfigurować".
+#
+# ŚWIADOMY BRAK: `restricted_fields` na kubełku (field-level ACL na `principalEmail`). Raport MUSI nazwać
+# wołającego, żeby właściciel dywizji wiedział, który jego workload przestanie działać — ukrycie tego pola
+# zamieniłoby dowód w statystykę. Anonimizacja jest tu sprzeczna z celem, a nie pominięta przez przeoczenie.
+
+resource "google_logging_log_view_iam_member" "report" {
+  parent   = "projects/${var.sink_project_id}"
+  location = google_logging_project_bucket_config.violations.location
+  bucket   = google_logging_project_bucket_config.violations.bucket_id
+  name     = google_logging_log_view.violations.name
+
+  role   = "roles/logging.viewAccessor"
+  member = "serviceAccount:${var.report_service_account}"
+}
+
+resource "google_logging_log_view_iam_member" "readers" {
+  for_each = toset(var.violations_reader_principals)
+
+  parent   = "projects/${var.sink_project_id}"
+  location = google_logging_project_bucket_config.violations.location
+  bucket   = google_logging_project_bucket_config.violations.bucket_id
+  name     = google_logging_log_view.violations.name
+
+  role   = "roles/logging.viewAccessor"
+  member = each.value
+}
