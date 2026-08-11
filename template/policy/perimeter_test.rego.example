@@ -106,6 +106,33 @@ test_ingress_without_access_level_denied if {
 	count(deny) > 0 with input as plan_with([bad])
 }
 
+# Reguła baseline WOLNO mieć bez access levelu — ale tylko ta, której tytuł stoi w `policy.yaml`.
+test_baseline_without_access_level_allowed if {
+	bez_zrodla := json.patch(good_rule, [{"op": "replace", "path": "/values/ingress_from/0/sources", "value": []}])
+	baseline := json.patch(bez_zrodla, [{"op": "add", "path": "/values/title", "value": "baseline--security-scanner-read"}])
+	count(deny) == 0 with input as plan_with([baseline])
+		with data.baseline_ingress as [{"title": "security-scanner-read"}]
+}
+
+# ANTY-OBEJŚCIE. Poprzedni warunek szukał podciągu `--baseline--`, a tytuł reguły profilowej powstaje jako
+# `<członek>--<tytuł z profilu>` — więc profil nazwany `-baseline--cokolwiek` produkował tytuł zawierający
+# ten podciąg i wyłączał sobie wymóg access levelu plikiem, który dywizja pisze sama. Tytuł spoza
+# `policy.yaml` MUSI być odrzucony, choćby wyglądał baseline'owo.
+test_baseline_lookalike_title_denied if {
+	bez_zrodla := json.patch(good_rule, [{"op": "replace", "path": "/values/ingress_from/0/sources", "value": []}])
+	podszywka := json.patch(bez_zrodla, [{"op": "add", "path": "/values/title", "value": "dywizja---baseline--wlasna-regula"}])
+	count(deny) > 0 with input as plan_with([podszywka])
+		with data.baseline_ingress as [{"title": "security-scanner-read"}]
+}
+
+# Bez `--data perimeter/policy.yaml` zbiór tytułów jest PUSTY, więc wyjątek nie obowiązuje nikogo. Zapomniane
+# `--data` ma zamykać furtkę, nie otwierać ją wszystkim (ta sama zasada co przy `uslugi_bez_selektorow_metod`).
+test_baseline_exception_closed_without_data if {
+	bez_zrodla := json.patch(good_rule, [{"op": "replace", "path": "/values/ingress_from/0/sources", "value": []}])
+	baseline := json.patch(bez_zrodla, [{"op": "add", "path": "/values/title", "value": "baseline--security-scanner-read"}])
+	count(deny) > 0 with input as plan_with([baseline])
+}
+
 test_perimeter_without_aiplatform_denied if {
 	skeleton := {
 		"address": "google_access_context_manager_service_perimeter.this[0]",

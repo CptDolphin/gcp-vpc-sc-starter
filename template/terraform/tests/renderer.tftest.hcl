@@ -32,11 +32,28 @@
 run "enforced_tylko_dla_czlonka_enforced" {
   command = plan
 
+  # Filtr `if r.scope == "profile"` NIE jest osłabieniem asercji, tylko warunkiem jej sensowności: po kolapsie
+  # reguła baseline nie ma JEDNEGO właściciela (`member = null`), więc `local.members[r.member]` wywróciłby
+  # test na indeksie, a nie na naruszeniu niezmiennika. Baseline pilnuje osobna, MOCNIEJSZA asercja niżej —
+  # tam sprawdzamy komplet zasobów reguły zbiorczej, a nie etap pojedynczego członka.
   assert {
     condition = alltrue([
-      for k, r in local.ingress_rules_enforced : local.members[r.member].stage == "enforced"
+      for k, r in local.ingress_rules_enforced :
+      local.members[r.member].stage == "enforced" if r.scope == "profile"
     ])
     error_message = "Reguła ingress trafiła do konfiguracji egzekwowanej dla członka, który nie jest w stage: enforced."
+  }
+
+  # Reguła baseline w konfiguracji EGZEKWOWANEJ celuje DOKŁADNIE w członków `stage: enforced`. Za szeroko =
+  # perimetr autoryzuje w statusie projekt, którego w statusie nie ma; za wąsko = skaner traci dostęp do
+  # projektu w chwili jego promocji. Jedno i drugie jest ciche — reguła w konsoli wygląda tak samo.
+  assert {
+    condition = alltrue([
+      for k, r in local.ingress_rules_enforced :
+      r.resources == sort([for mk, m in local.enforced_members : "projects/${m.project_number}"])
+      if r.scope == "baseline"
+    ])
+    error_message = "Reguła baseline w konfiguracji egzekwowanej nie celuje dokładnie w członków stage: enforced."
   }
 
   assert {
@@ -130,7 +147,7 @@ run "baseline_ma_zrodlo" {
         # przychodzi z wyrażenia warunkowego, więc równość na całych kolekcjach potrafi wywrócić się na
         # typie (tuple vs list) przy identycznej treści — czyli test padałby na czymś innym, niż bada.
         length(br.access_levels) == 1 && br.access_levels[0] == "*"
-        if endswith(br.title, "--baseline--${r.title}")
+        if br.title == "baseline--${r.title}"
       ] if lookup(r, "allow_without_access_level", false) && length(lookup(r, "access_levels", [])) == 0
     ]))
     error_message = "Reguła baseline z allow_without_access_level nie wyrenderowała źródła `*`."
@@ -264,22 +281,51 @@ run "kontrakt_nie_zawiera_tozsamosci_ani_regul" {
   }
 }
 
-# --- 10. Reguły baseline trafiają do KAŻDEGO członka ------------------------------------------------
-# To jest cały powód, dla którego baseline nie jest profilem: profil trzeba wybrać, a baseline obowiązuje
-# bez pamiętania o nim. Test pilnuje, że renderer faktycznie mnoży je przez członków.
-run "baseline_dotyczy_kazdego_czlonka" {
+# --- 10. Baseline: JEDNA reguła na tytuł, obejmująca KAŻDEGO członka --------------------------------
+# Baseline nie jest profilem, bo profil trzeba wybrać, a baseline obowiązuje bez pamiętania o nim — i to się
+# nie zmieniło. Zmienił się KSZTAŁT: zamiast `liczba_członków × liczba_reguł` zasobów powstaje `liczba_reguł`,
+# a przynależność członka wyraża JEDNA POZYCJA w `ingress_to.resources`. Powód jest policzalny: przy starym
+# kształcie baseline kosztował 21 atrybutów na członka przy limicie 6000 na konfigurację (sufit ~230 członków).
+run "baseline_jest_jedna_regula_na_tytul" {
   command = plan
 
   assert {
-    condition     = length(local.baseline_rules_all) == length(local.members) * length(local.baseline_ingress)
-    error_message = "Reguły baseline nie zostały wyrenderowane dla każdego członka — skaner wypadnie z części projektów."
+    condition     = length(local.baseline_rules_all) == length(local.baseline_ingress)
+    error_message = "Liczba reguł baseline zależy od liczby członków — kolaps się cofnął, a z nim sufit członków."
   }
 
+  # NAJMOCNIEJSZA asercja tego runa i jednocześnie ANTY-TAUTOLOGIA odporna na liczbę członków: przy JEDNYM
+  # członku „jedna reguła na tytuł" i „jedna reguła na członka × tytuł" dają tę samą LICZBĘ, więc sama
+  # liczność niczego by nie rozstrzygała w materiale startera. Klucz rozstrzyga zawsze — stary kształt
+  # wkładał w niego nazwę członka (`<członek>--baseline--<tytuł>`), nowy nie może jej zawierać.
   assert {
     condition = alltrue([
-      for k, r in local.baseline_rules_all : strcontains(k, "--baseline--")
+      for k, r in local.baseline_rules_all :
+      alltrue([for mkey, _ in local.members : !strcontains(k, mkey)])
     ])
-    error_message = "Klucz reguły baseline musi zawierać `--baseline--` — po tym rozpoznaje ją reguła OPA o access levelu."
+    error_message = "Klucz reguły baseline zawiera nazwę członka — reguła znów renderuje się per członek."
+  }
+
+  # Reguła zbiorcza MUSI celować w KOMPLET członków. Za wąsko = członek wypada ze skanowania (i nikt tego nie
+  # zauważy, bo brak findingów wygląda jak brak problemów). Za szeroko = reguła wskazuje projekt spoza
+  # perimetru. `sort` po obu stronach, bo kolejność iteracji mapy nie jest częścią kontraktu.
+  assert {
+    condition = alltrue([
+      for k, r in local.baseline_rules_all :
+      r.resources == sort([for mkey, m in local.members : "projects/${m.project_number}"])
+    ])
+    error_message = "Reguła baseline nie obejmuje dokładnie wszystkich członków — skaner wypadnie z części projektów."
+  }
+
+  # Tytuł jest tym, po czym bramka OPA rozpoznaje wyjątek „ingress bez access levelu". Rozjazd tytułu
+  # z `policy.yaml` nie wywala planu — po prostu wyjątek przestaje obowiązywać i legalna reguła baseline
+  # zapala bramkę (albo, w drugą stronę, przestaje być rozpoznawalna jako baseline w audycie).
+  assert {
+    condition = alltrue([
+      for r in local.baseline_ingress :
+      contains(keys(local.baseline_rules_all), "baseline--${r.title}")
+    ])
+    error_message = "Tytuł reguły baseline nie ma postaci `baseline--<tytuł z policy.yaml>` — bramka OPA jej nie rozpozna."
   }
 
   # Zasoby renderują się z `ingress_rules_effective`, więc suma musi się zgadzać. Gdyby ktoś podmienił

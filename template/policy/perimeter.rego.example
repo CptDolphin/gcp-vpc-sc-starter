@@ -139,7 +139,18 @@ deny contains msg if {
 # WYJĄTEK: reguły baseline (skanery, monitoring) wołają z własnej infrastruktury dostawcy i nie spełnią
 # korporacyjnego access levelu. Muszą być oznaczone `allow_without_access_level: true` w policy.yaml —
 # czyli świadomie, w pliku pod CODEOWNERS security, a nie przez pominięcie pola w cichym PR-ze.
-# Rozpoznajemy je po tytule: renderer nadaje im postać <członek>--baseline--<tytuł>.
+#
+# ROZPOZNAJEMY JE PO DOKŁADNYM TYTULE Z `policy.yaml`, NIE PO PODCIĄGU. Renderer nadaje regule zbiorczej
+# postać `baseline--<tytuł>` (jedna reguła na tytuł, lista zasobów wszystkich członków). Poprzedni warunek
+# szukał podciągu `--baseline--` w tytule i był SPRAWDZALNIE OBCHODZALNY: tytuł reguły profilowej powstaje
+# jako `<członek>--<tytuł z profilu>`, więc profil z tytułem zaczynającym się od `-baseline--` dawał tytuł
+# zawierający ten podciąg — i dywizja wyłączała sobie wymóg access levelu własnym plikiem. Porównanie ze
+# zbiorem tytułów zadeklarowanych w `policy.yaml` (plik pod CODEOWNERS security) tej furtki nie ma.
+baseline_titles contains t if {
+	some r in data.baseline_ingress
+	t := sprintf("baseline--%s", [r.title])
+}
+
 deny contains msg if {
 	some r in planned
 	r.type in {
@@ -148,7 +159,7 @@ deny contains msg if {
 	}
 	some block in object.get(r.values, "ingress_from", [])
 	count(object.get(block, "sources", [])) == 0
-	not contains(object.get(r.values, "title", ""), "--baseline--")
+	not object.get(r.values, "title", "") in baseline_titles
 	msg := sprintf("%s: ingress bez access levelu — dodaj warunek kontekstu (sieć / urządzenie)", [r.address])
 }
 

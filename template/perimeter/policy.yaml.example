@@ -144,8 +144,15 @@ contract:
 # To jest ta klasa przepływów, o której ludzie zapominają przed pierwszym enforce: „to nasze własne narzędzia",
 # a perimetr nie zna tej kategorii — widzi wywołanie API spoza granicy i odrzuca je.
 #
-# Każda reguła tutaj konsumuje budżet atrybutów × liczbę członków, więc trzymamy je WĄSKO: konkretne
-# tożsamości, konkretne metody read-only.
+# KSZTAŁT RENDEROWANIA — to nie jest szczegół implementacyjny, tylko sufit organizacji. Każda reguła stąd
+# renderuje się jako JEDNA reguła ingress z listą zasobów wszystkich członków (`baseline--<title>`), a nie
+# jako osobna reguła per członek. Koszt: `stały + 1 atrybut na członka na regułę` zamiast `cała reguła na
+# członka`. Zmierzone na żywym ACM: stary kształt kosztował 21 atrybutów na członka przy limicie 6000 NA
+# KONFIGURACJĘ, czyli sufit ~230 członków; nowy — 2 na członka. Konsekwencja, którą trzeba znać przy edycji:
+# jedna reguła = jeden blast-radius, więc błąd tutaj dotyka WSZYSTKICH członków naraz (DEC-10).
+#
+# Trzymamy je WĄSKO mimo tego: konkretne tożsamości, konkretne metody read-only. Stała część reguły (usługi
+# i metody) nadal liczy się do budżetu — po prostu raz, a nie tyle razy, ilu jest członków.
 baseline_ingress:
   - title: security-scanner-read
     # Konta serwisowe skanerów (CNAPP typu Wiz, SCC, agentless). Imiennie — nigdy ANY_SERVICE_ACCOUNT.

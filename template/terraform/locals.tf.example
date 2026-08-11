@@ -55,9 +55,14 @@ locals {
       for mkey, m in local.members : [
         for p in m.profiles : [
           for rule in lookup(local.profiles[p.name], "ingress", []) : {
-            key           = "${mkey}--${p.name}--${rule.title}"
-            member        = mkey
-            stage         = m.stage
+            key    = "${mkey}--${p.name}--${rule.title}"
+            member = mkey
+            stage  = m.stage
+            # `scope` mówi, SKĄD reguła pochodzi, i jest jedynym rozróżnieniem, po którym wolno filtrować:
+            # profilowa ma właściciela (`member`), baseline'owa nie ma go od kolapsu (patrz niżej). Kod, który
+            # zakłada `local.members[r.member]` dla każdej reguły, wywraca się na regule zbiorczej — a robi to
+            # w teście albo w bramce, czyli tam, gdzie awaria wygląda na naruszenie niezmiennika.
+            scope         = "profile"
             title         = "${mkey}--${rule.title}"
             identities    = lookup(p.params, rule.identities_from, [])
             access_levels = [for a in lookup(p.params, lookup(rule, "access_levels_from", "__none__"), []) : "accessPolicies/${local.policy_id}/accessLevels/${a}"]
@@ -96,29 +101,82 @@ locals {
   # z approvalem Security. Tutaj tylko przestajemy renderowac ksztalt, ktorego API nie honoruje.
   baseline_source_any = "*"
 
+  # BASELINE RENDERUJE SIĘ JAKO **JEDNA REGUŁA NA TYTUŁ**, Z LISTĄ ZASOBÓW WSZYSTKICH CZŁONKÓW.
+  #
+  # `ingress_to.resources` przyjmuje LISTĘ projektów, a baseline jest z definicji identyczny dla każdego
+  # członka: te same tożsamości, to samo źródło, te same operacje. Renderowanie go per członek powielało
+  # więc CAŁĄ regułę, żeby zmienić w niej jedno pole — i to powielenie płaciło się z budżetu, którego
+  # perimetr ma 6000 atrybutów NA KONFIGURACJĘ (osobno spec i status).
+  #
+  # ZMIERZONE na żywym perimetrze (`perimeters describe`, niezależne policzenie z odpowiedzi API):
+  #   przed:  2 reguły baseline × 2 członków = 42 atrybuty, czyli 21 NA CZŁONKA
+  #           (security-scanner-read 16 = ident 1 + źródło 1 + zasób 1 + 4 usługi + 9 metod,
+  #            platform-violations-read 5 = ident 1 + źródło 1 + zasób 1 + 1 usługa + 1 metoda)
+  #   po:     (15 + N) + (4 + N) = 19 + 2N, czyli **2 atrybuty na członka** — po jednym zasobie na regułę.
+  # Przy 500 członkach: 10500 atrybutów przed (limit 6000 — konfiguracja NIE POWSTAJE), 1019 po.
+  #
+  # TRADE-OFF, ŚWIADOMY (DEC-10): jedna reguła = jeden blast-radius. Per-członkowe reguły niosły
+  # audytowalność „kto ma co" w samym kształcie zasobu i pozwalały zepsuć baseline JEDNEMU członkowi.
+  # Teraz zła zmiana baseline'u dotyka wszystkich naraz. Kolapsujemy WYŁĄCZNIE baseline, bo on jest wspólny
+  # z definicji; reguły profilowe zostają per członek, bo tam różnice między zespołami są realne i tam
+  # per-członkowa audytowalność coś znaczy.
+  #
+  # `sort()` daje kolejność niezależną od kolejności iteracji mapy: bez niego dodanie członka potrafi
+  # przetasować listę i wyprodukować diff w regule, w której nic się nie zmieniło.
+  baseline_targets_all      = sort([for mkey, m in local.members : "projects/${m.project_number}"])
+  baseline_targets_enforced = sort([for mkey, m in local.enforced_members : "projects/${m.project_number}"])
+
+  # Kształt reguły BEZ celu — cel dokłada każda konfiguracja osobno (dry-run: wszyscy, enforced: tylko
+  # promowani). Jedna definicja tożsamości/źródeł/operacji, żeby obie konfiguracje nie mogły się rozjechać.
+  baseline_rules_shape = {
+    for rule in local.baseline_ingress : "baseline--${rule.title}" => {
+      identities = rule.identities
+      # Warunek pyta o JAWNA flage, a nie tylko o pusta liste. Bramka OPA i tak nie przepusci reguly
+      # baseline bez access levels i bez `allow_without_access_level: true`, ale gdyby ktos ja obszedl,
+      # renderer ma sie zdegradowac w strone BEZPIECZNA (regula bez zrodla = nie autoryzuje nic),
+      # a nie dorysowac `*` samemu.
+      access_levels = length(lookup(rule, "access_levels", [])) > 0 ? [
+        for a in rule.access_levels : "accessPolicies/${local.policy_id}/accessLevels/${a}"
+        ] : (
+        lookup(rule, "allow_without_access_level", false) ? [local.baseline_source_any] : []
+      )
+      operations = rule.operations
+    }
+  }
+
+  # Warunek `length(...) > 0` NIE jest kosmetyką: reguła ingress bez ani jednego zasobu jest przez API
+  # odrzucana albo — gorzej — interpretowana szerzej, niż wygląda. Zero członków musi dawać BRAK reguły,
+  # nie regułę bez celu (ta sama bezpieczna degradacja co przy egressie bez celu niżej).
   baseline_rules_all = {
-    for r in flatten([
-      for mkey, m in local.members : [
-        for rule in local.baseline_ingress : {
-          key        = "${mkey}--baseline--${rule.title}"
-          member     = mkey
-          stage      = m.stage
-          title      = "${mkey}--baseline--${rule.title}"
-          identities = rule.identities
-          # Warunek pyta o JAWNA flage, a nie tylko o pusta liste. Bramka OPA i tak nie przepusci reguly
-          # baseline bez access levels i bez `allow_without_access_level: true`, ale gdyby ktos ja obszedl,
-          # renderer ma sie zdegradowac w strone BEZPIECZNA (regula bez zrodla = nie autoryzuje nic),
-          # a nie dorysowac `*` samemu.
-          access_levels = length(lookup(rule, "access_levels", [])) > 0 ? [
-            for a in rule.access_levels : "accessPolicies/${local.policy_id}/accessLevels/${a}"
-            ] : (
-            lookup(rule, "allow_without_access_level", false) ? [local.baseline_source_any] : []
-          )
-          resources  = ["projects/${m.project_number}"]
-          operations = rule.operations
-        }
-      ]
-    ]) : r.key => r
+    for k, r in local.baseline_rules_shape : k => {
+      key           = k
+      title         = k
+      scope         = "baseline"
+      member        = null # reguła zbiorcza nie ma JEDNEGO właściciela — filtruj po `scope`, nie po `member`
+      stage         = null # ...i nie ma etapu: o tym, kto jest w konfiguracji, decyduje lista `resources`
+      identities    = r.identities
+      access_levels = r.access_levels
+      resources     = local.baseline_targets_all
+      operations    = r.operations
+    } if length(local.baseline_targets_all) > 0
+  }
+
+  # Wariant dla konfiguracji EGZEKWOWANEJ — ta sama reguła, ale celuje wyłącznie w członków `stage: enforced`.
+  # DLACZEGO osobna mapa, a nie filtr po `stage` jak przy profilach: po kolapsie reguła nie należy do jednego
+  # członka, więc „etap reguły" przestał istnieć jako pojęcie. Różnica między konfiguracjami siedzi teraz
+  # w LIŚCIE ZASOBÓW i tylko tam — inaczej perimetr autoryzowałby w statusie projekt, którego w statusie nie ma.
+  baseline_rules_enforced = {
+    for k, r in local.baseline_rules_shape : k => {
+      key           = k
+      title         = k
+      scope         = "baseline"
+      member        = null
+      stage         = null
+      identities    = r.identities
+      access_levels = r.access_levels
+      resources     = local.baseline_targets_enforced
+      operations    = r.operations
+    } if length(local.baseline_targets_enforced) > 0
   }
 
   # Egress renderujemy TYLKO gdy członek podał niepusty cel — projekt W GCP (`to_projects_from`) albo zasób
@@ -141,6 +199,7 @@ locals {
             # zamieniłaby literówkę w cichy dostęp do innego bucketa.
             external_resources = lookup(p.params, lookup(rule, "to_external_from", "__none__"), [])
             operations         = rule.operations
+            scope              = "profile"
           } if length(lookup(p.params, lookup(rule, "to_projects_from", "__none__"), [])) > 0
           || length(lookup(p.params, lookup(rule, "to_external_from", "__none__"), [])) > 0
         ]
@@ -153,11 +212,20 @@ locals {
   # członka wyjmowałaby go z dry-run i wkładała do enforced, tworząc moment, w którym nie należy do żadnej
   # konfiguracji. Przy tym układzie promocja jest czysto addytywna: dochodzi zasób enforced, dry-run zostaje.
   # Reguły baseline i profilowe idą do tych samych zasobów — z punktu widzenia API to po prostu ingress.
-  # Trzymamy je w osobnych locals tylko po to, żeby plan i testy pokazywały, skąd reguła się wzięła.
+  # Trzymamy je w osobnych locals po to, żeby plan i testy pokazywały, skąd reguła się wzięła, ORAZ dlatego,
+  # że po kolapsie mają różną kardynalność: profilowe są per (członek × profil), baseline jest jeden na tytuł.
   ingress_rules_effective = merge(local.ingress_rules_all, local.baseline_rules_all)
 
-  ingress_rules_enforced = { for k, r in local.ingress_rules_effective : k => r if r.stage == "enforced" }
-  egress_rules_enforced  = { for k, r in local.egress_rules_all : k => r if r.stage == "enforced" }
+  # Filtr po `stage` obowiązuje TYLKO reguły profilowe — one wciąż należą do jednego członka. Baseline po
+  # kolapsie wchodzi do konfiguracji egzekwowanej własnym wariantem, który różni się listą zasobów.
+  # Gdyby zostawić tu jeden filtr po `stage`, baseline (stage = null) wypadłby z konfiguracji egzekwowanej
+  # CICHO: promocja przechodziłaby zielonym planem, a skaner i raport naruszeń traciłyby dostęp dokładnie
+  # w chwili, w której zaczyna być potrzebny — dokładnie ta awaria, po którą baseline w ogóle istnieje.
+  ingress_rules_enforced = merge(
+    { for k, r in local.ingress_rules_all : k => r if r.stage == "enforced" },
+    local.baseline_rules_enforced,
+  )
+  egress_rules_enforced = { for k, r in local.egress_rules_all : k => r if r.stage == "enforced" }
 
   # --- budżet atrybutów: JEDNA definicja liczenia ---------------------------------------------------
   #
