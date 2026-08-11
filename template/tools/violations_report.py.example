@@ -31,24 +31,47 @@ CZEGO TEN RAPORT NIE OBIECUJE: `principalEmail` w logach `cloudaudit.googleapis.
 GCP zredagowany (`m...@ra...m`) i wtedy raport nie nazwie wołającego. Do namierzenia wywołania służy
 `vpcServiceControlsUniqueId` — dlatego trafia do raportu markdown.
 
-SKĄD BRAĆ WEJŚCIE — zakres organizacji NIE WYSTARCZA. Wpis audytowy VPC-SC ląduje w logu PROJEKTU, który
-jest właścicielem chronionego zasobu, czyli członka; `--organization=` czyta wyłącznie `organizations/<id>/
-logs/…` i nic poniżej. Zmierzone na żywym perimetrze: zakres organizacji zwrócił **0** wpisów, a projekt
-członka **30** — ten sam filtr, to samo okno 14 dni. To zero jest nieodróżnialne od czystego okna, więc sam
-zły zakres wystarczał, by `promotion_gate` przepuścił członka z 30 naruszeniami. Czytaj organizację ORAZ
-każdy projekt z `perimeter/members/` i scal wyniki po `insertId` (zakresy mogą się pokrywać) — tak robi to
-`.github/workflows/violations-report.yml`.
+SKĄD BRAĆ WEJŚCIE — jedno zapytanie do sinka, nie N do projektów. Wpis audytowy VPC-SC ląduje w logu
+PROJEKTU będącego właścicielem chronionego zasobu, czyli członka; `--organization=` czyta wyłącznie
+`organizations/<id>/logs/…` i nic poniżej. Zmierzone na żywym perimetrze: zakres organizacji zwrócił **0**
+wpisów, a pojedynczy projekt członka **41** — ten sam filtr, to samo okno. To zero jest nieodróżnialne od
+czystego okna, więc sam zły zakres wystarczał, by `promotion_gate` przepuścił członka z 41 naruszeniami.
 
-Sprawdź też kod wyjścia: przy odmowie `gcloud logging read` i tak wypisuje na stdout `[]`, więc samo
+Odczyt każdego członka OSOBNO usuwał tę ślepotę i wprowadzał inną: przy kilkuset projektach to kilkaset
+wywołań `logging read` na przebieg, a JEDEN projekt bez uprawnień wywracał całość — czyli dowód. Dlatego
+wejściem jest teraz **sink org-level** (`include_children`) zbierający naruszenia z całej organizacji do
+jednego kubełka logów w projekcie administracyjnym; raport czyta go jednym zapytaniem. Terraform sinka:
+`violations-sink/`. Zmierzona równoważność (2026-08-11, okno 11m47s): sink = 16 wpisów w 1 zapytaniu,
+suma odczytów per projekt = 16 wpisów w 3 zapytaniach, **identyczne zbiory `insertId`**.
+
+Ten plik NIE ZMIENIŁ SIĘ przy tej migracji ani o linijkę logiki — i to był argument za kubełkiem logów
+przeciwko BigQuery. Kubełek oddaje ten sam JSON, który parser niżej już czyta (zagnieżdżone
+`ingressViolations`/`egressViolations`); sink do BigQuery wkłada `protoPayload.metadata` do kolumny STRING
+`metadataJson`, więc trzeba by ją odparsować z powrotem — nowy tryb awarii na ścieżce niosącej DOWÓD.
+
+Filtr sinka NIE MA predykatu na `dryRun` i to jest celowe: pole istnieje wyłącznie przy naruszeniu dry-run
+(wartość `true`), a odmowa EGZEKWOWANA nie ma go w ogóle, więc `dryRun="false"` nie łapie nigdy niczego.
+Zmierzone na 25 żywych wpisach: sam filtr po typie dał 16 dry-run + 9 egzekwowanych, a dołożenie
+`dryRun="false"` dało 0.
+
+Sink celowo NIE filtruje po liście członków — niesie też naruszenia projektów, które członkami jeszcze nie
+są (kandydaci w pre-flighcie) albo już nie są (offboarding). Filtruje się TUTAJ, przy raportowaniu: obcy
+ruch idzie do sekcji „Naruszenia spoza listy członków", zamiast zniknąć w zbieraniu.
+
+Sprawdź kod wyjścia: przy odmowie `gcloud logging read` i tak wypisuje na stdout `[]`, więc samo
 przekierowanie do pliku zamienia „nie wolno mi było przeczytać" w „nie było naruszeń":
 
   set -o pipefail
-  for ZAKRES in --organization=<ORG_ID> --project=<PROJEKT_CZLONKA>; do
-    gcloud logging read \\
-      'protoPayload.metadata."@type"="type.googleapis.com/google.cloud.audit.VpcServiceControlAuditMetadata"
-       AND protoPayload.metadata.dryRun="true"' \\
-      "$ZAKRES" --freshness=14d --format=json > "raw-${ZAKRES#--}.json" || exit 1
-  done
+  gcloud logging read \\
+    'protoPayload.metadata."@type"="type.googleapis.com/google.cloud.audit.VpcServiceControlAuditMetadata"' \\
+    --project=<PROJEKT_ADM> --bucket=<KUBELEK> --location=<LOKALIZACJA> --view=<WIDOK> \\
+    --freshness=14d --format=json > raw.json || exit 1
+
+I JESZCZE JEDNO, ZMIERZONE PRZY ZAKŁADANIU SINKA: sink, który nie dostarcza, wygląda identycznie jak czyste
+okno. Zanim grant `logging.bucketWriter` dla jego tożsamości się rozpropagował, 9 z 18 wpisów przepadło
+BEZPOWROTNIE (ponowny odczyt tego samego, zamkniętego okna 3 minuty później: te same 9 braków), a
+`sinks describe` przez cały ten czas raportował sink jako zdrowy. Po każdej zmianie sinka potwierdź
+DOSTARCZANIE, a nie konfigurację — i nie licz okna obserwacji od chwili sprzed tego potwierdzenia.
 
 Użycie:
     python3 tools/violations_report.py --logs raw.json --declarations declarations.json \\

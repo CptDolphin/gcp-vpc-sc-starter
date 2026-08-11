@@ -1,0 +1,37 @@
+# Skopiuj do terraform.tfvars i uzupełnij. Wszystkie wartości są jawne (nie sekrety).
+#
+# Ten stack applikuje CZŁOWIEK z org-level `roles/logging.configWriter` — nie pipeline perimetru.
+# Powód w main.tf: para „sink + kubełek + IAM do niego" jest ścieżką wyprowadzenia logów gdziekolwiek,
+# więc konto `apply` świadomie jej nie ma.
+
+org_id = "123456789012" # gcloud organizations list
+
+# Projekt, w którym powstaje kubełek. MUSI być poza perimetrem i MUSI być tym samym projektem płaszczyzny
+# sterowania, który jest wpisany w `control_plane_projects` w perimeter/policy.yaml. Kubełek WEWNĄTRZ
+# granicy odciąłby raport od dowodu dokładnie w chwili pierwszej promocji.
+sink_project_id = "prj-example-adm"
+
+# Konto, którym `violations-report.yml` czyta dowód — to samo, co `PLAN_SERVICE_ACCOUNT` w zmiennych repo.
+# Dostaje `logging.viewAccessor` WYŁĄCZNIE na widoku tego kubełka.
+report_service_account = "sa-vpcsc-plan@prj-example-adm.iam.gserviceaccount.com"
+
+# Domyślne — zmieniaj tylko świadomie:
+#
+# bucket_location: sprawdź `constraints/gcp.resourceLocations` PRZED apply. W organizacji z ograniczeniem
+# lokalizacji (`in:eu-locations`) wartość `global` pada komunikatem o polityce, a nie o złym polu.
+# bucket_location = "eu"
+#
+# retention_days: 30 = SUFIT DARMOWY Cloud Logging i z zapasem pokrywa okno bramki promocji
+# (`onboarding.dry_run_min_days` + `clean_window_days`). Podniesienie to świadoma decyzja o koszcie
+# (0,008778 EUR/GiB-mies. powyżej 30 dni), nie odruch „na wszelki wypadek".
+# retention_days = 30
+#
+# bucket_id: zmieniaj tylko przed pierwszym apply — zmiana później tworzy NOWY kubełek, a stary zostaje
+# z dotychczasowym dowodem i własnym rachunkiem za retencję.
+# bucket_id = "vpcsc-violations"
+
+# Kto POZA pipeline'em raportu widzi surowy strumień odmów z całej organizacji. Świadomie WĘŻSZE niż krąg
+# czytelników raportu: raport mówi „członek X ma N naruszeń", a kubełek pokazuje, kto próbuje sięgać gdzie —
+# łącznie z projektami, które członkami nie są. Wpisz grupę dyżurną Security, nie osobę; pusta lista jest
+# poprawnym ustawieniem i znaczy „nikt nie ma tu wglądu z urzędu".
+# violations_reader_principals = ["group:grp-example-security@example.com"]

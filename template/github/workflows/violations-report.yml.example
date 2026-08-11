@@ -38,62 +38,75 @@ jobs:
           pip install --quiet pyyaml
           python3 tools/collect_declarations.py > declarations.json
 
-      # dryRun=true is the whole filter: these are the calls that WOULD have been blocked. After a member is
-      # promoted the same calls appear with dryRun=false and an actual denial — which is what we are avoiding.
+      # ONE query, not N — and this is the whole point of the step.
       #
-      # WHY EVERY MEMBER PROJECT IS READ SEPARATELY, and not just the organization. A VPC-SC audit entry is
-      # written to the log bucket of the project that OWNS the protected resource — i.e. the member — not to
-      # the organization's. `--organization=` reads `organizations/<id>/logs/…` and nothing below it, so the
-      # scope that looks the most complete is the one that sees the least. Measured on the live perimeter:
-      # organization scope returned 0 entries while the single member project held 30 for the same filter
-      # and the same 14-day window. That zero is indistinguishable from a clean window, and a clean window
-      # is exactly what promotion_gate accepts as proof — so the wrong scope alone was enough to promote a
-      # member with 30 violations. The organization scope stays in the list because org-level resources do
-      # log there; it is added to the member scopes, not chosen instead of them.
+      # A VPC-SC audit entry is written to the log of the project that OWNS the protected resource, i.e. the
+      # member, so the scope that looks the most complete is the one that sees the least. Measured on the live
+      # perimeter: `--organization=` returned 0 entries while a single member project held 41, same filter,
+      # same window. That zero is indistinguishable from a clean window, and a clean window is exactly what
+      # promotion_gate accepts as PROOF — so the wrong scope alone was enough to promote a member with 41
+      # violations.
       #
-      # The explicit `|| exit 1` is not belt-and-braces. Measured: on a denied read `gcloud logging read`
+      # Reading every member separately fixed the blindness and bought a different failure: at the target
+      # scale (several hundred projects) that is several hundred `logging read` calls per run — slow, and
+      # brittle in the way that matters, because ONE project the account cannot read takes down the whole
+      # report, i.e. the evidence.
+      #
+      # An organization-level sink with `include_children` routes every VPC-SC violation in the organization
+      # into one log bucket in the administrative project, and this step reads that bucket with a single
+      # query. Measured equivalence on one window (2026-08-11, 11m47s, 3 services, 2 member projects):
+      # sink = 16 entries in 1 query, union of per-project reads = 16 entries in 3 queries, identical
+      # `insertId` sets — nothing missing, nothing extra. Terraform for the sink: `violations-sink/`.
+      #
+      # THE FILTER HAS NO `dryRun` PREDICATE, deliberately. The field exists ONLY on dry-run violations (with
+      # value `true`); an ENFORCED denial carries no `dryRun` field at all, so `dryRun="false"` matches
+      # nothing, ever, in any organization. Measured on the same 25 live entries: the type filter alone
+      # returned 16 dry-run + 9 enforced, while adding `dryRun="false"` returned 0. Both kinds belong in the
+      # report — dry-run is what promotion_gate weighs, enforced means someone is being blocked right now.
+      #
+      # The sink also carries violations from projects that are NOT members: pre-flight candidates and freshly
+      # offboarded projects. That is required, not sloppy. Filtering by member list belongs in the REPORT
+      # (`violations_report.py` has the list and puts strangers in their own section), never in the sink —
+      # otherwise the evidence disappears at the exact moment the configuration changes.
+      #
+      # The explicit `|| exit 1` stays, for the reason it was measured: on a denied read `gcloud logging read`
       # prints `[]` on STDOUT and the error only on stderr, so a bare redirect turns "I was not allowed to
-      # read the logs" into "there were no violations" — a clean window manufactured from a permission
-      # failure. The exit code is the only signal that tells those two apart, so it has to be checked.
+      # read" into "there were no violations" — a clean window manufactured from a permission failure.
       - name: read audit logs
         env:
           ORG_ID: ${{ vars.ORG_ID }}
+          SINK_PROJECT: ${{ vars.VIOLATIONS_SINK_PROJECT }}
+          SINK_BUCKET: ${{ vars.VIOLATIONS_SINK_BUCKET }}
+          SINK_LOCATION: ${{ vars.VIOLATIONS_SINK_LOCATION }}
           DAYS: ${{ github.event.inputs.days || '14' }}
         run: |
           set -o pipefail
-          FILTER='protoPayload.metadata."@type"="type.googleapis.com/google.cloud.audit.VpcServiceControlAuditMetadata"
-                  AND protoPayload.metadata.dryRun="true"'
-          mkdir -p .logs
-          czytaj() {  # $1 = scope flag, $2 = output file stem
-            gcloud logging read "$FILTER" "$1" --freshness="${DAYS}d" --format=json > ".logs/$2.json" || {
-              echo "::error::gcloud logging read $1 failed — no report, no evidence, promotion stays blocked"
-              exit 1
-            }
+          FILTER='protoPayload.metadata."@type"="type.googleapis.com/google.cloud.audit.VpcServiceControlAuditMetadata"'
+
+          # GUARD PRZED ODCZYTEM, i to nie jest ozdoba. Sink, który nie dostarcza, wygląda DOKŁADNIE tak samo
+          # jak czyste okno: pusty kubełek, zielony przebieg, `violations.json` z zerami i przepuszczona
+          # promocja. Zmierzone 2026-08-11 przy zakładaniu sinka — zanim grant `logging.bucketWriter` dla jego
+          # tożsamości się rozpropagował, 9 z 18 wpisów przepadło BEZPOWROTNIE, a `sinks describe` przez cały
+          # ten czas raportował sink jako zdrowy. Sprawdzamy więc, że sink ISTNIEJE, ma `includeChildren` i ma
+          # ten sam filtr co odczyt — bo zerowy wynik wolno raportować dopiero wtedy, gdy wiadomo, skąd jest.
+          SINK_CFG=$(gcloud logging sinks describe "$SINK_BUCKET" --organization="$ORG_ID" \
+            --format='value(filter,includeChildren)') || {
+            echo "::error::nie umiem odczytać konfiguracji sinka $SINK_BUCKET — pusty wynik byłby nieodróżnialny od czystego okna"
+            exit 1
           }
-          czytaj "--organization=$ORG_ID" org
-          python3 -c 'import json;[print(m["project_id"]) for m in json.load(open("declarations.json"))["members"].values()]' > members.txt
-          i=0
-          while IFS= read -r pid; do
-            [ -n "$pid" ] || continue
-            i=$((i + 1))
-            czytaj "--project=$pid" "member-$i"
-          done < members.txt
-          echo "scopes read: organization + $i member project(s)"
-          # De-duplicated by insertId: organization and project scopes may legitimately overlap, and a
-          # violation counted twice would inflate the number the promotion gate reads.
-          python3 -c '
-          import json, pathlib
-          seen, out = set(), []
-          for p in sorted(pathlib.Path(".logs").glob("*.json")):
-              for e in json.loads(p.read_text()):
-                  k = e.get("insertId")
-                  if k in seen:
-                      continue
-                  seen.add(k)
-                  out.append(e)
-          json.dump(out, open("raw.json", "w"))
-          print("entries:", len(out))
-          '
+          echo "sink: $SINK_CFG"
+          case "$SINK_CFG" in
+            *VpcServiceControlAuditMetadata*True) : ;;
+            *) echo "::error::sink $SINK_BUCKET ma inny filtr albo includeChildren=False — dowód byłby niepełny"; exit 1 ;;
+          esac
+
+          gcloud logging read "$FILTER" \
+            --project="$SINK_PROJECT" --bucket="$SINK_BUCKET" --location="$SINK_LOCATION" --view="$SINK_BUCKET" \
+            --freshness="${DAYS}d" --format=json > raw.json || {
+            echo "::error::gcloud logging read z sinka nie powiódł się — bez raportu nie ma dowodu, promocja zostaje zablokowana"
+            exit 1
+          }
+          python3 -c 'import json;print("entries:", len(json.load(open("raw.json"))))'
 
       - name: build the report
         run: |
