@@ -95,6 +95,8 @@ test_wildcard_still_denied_for_other_service if {
 		with data.services_without_method_selectors as ["aiplatform.googleapis.com"]
 }
 
+# Reguła DYWIZJI z gwiazdką w celu = „napisana dla jednego zespołu, działa na projektach wszystkich".
+# Zakaz jest bezwarunkowy i wyjątek go nie dotyka: `good_rule` ma tytuł spoza `policy.yaml`.
 test_wildcard_resources_denied if {
 	bad := json.patch(good_rule, [{"op": "replace", "path": "/values/ingress_to/0/resources", "value": ["*"]}])
 	count(deny) > 0 with input as plan_with([bad])
@@ -106,31 +108,130 @@ test_ingress_without_access_level_denied if {
 	count(deny) > 0 with input as plan_with([bad])
 }
 
-# Reguła baseline WOLNO mieć bez access levelu — ale tylko ta, której tytuł stoi w `policy.yaml`.
-test_baseline_without_access_level_allowed if {
-	bez_zrodla := json.patch(good_rule, [{"op": "replace", "path": "/values/ingress_from/0/sources", "value": []}])
-	baseline := json.patch(bez_zrodla, [{"op": "add", "path": "/values/title", "value": "baseline--security-scanner-read"}])
-	count(deny) == 0 with input as plan_with([baseline])
-		with data.baseline_ingress as [{"title": "security-scanner-read"}]
+# --- wyjątki dla baseline'u: rozpoznanie PO TREŚCI, nie po nazwie -------------------------------------
+#
+# Deklaracja odwzorowuje `policy.yaml §baseline_ingress` i jest WSPÓLNYM wejściem obu wyjątków (gwiazdka
+# w `resources`, brak access levelu). Testy niżej mutują po jednym elemencie naraz — to jedyny sposób,
+# żeby pokazać, KTÓRY warunek trzyma bramkę, a nie że „jakoś przechodzi".
+baseline_declaration := [{
+	"title": "security-scanner-read",
+	"identities": ["serviceAccount:sa-scanner@prj-example.iam.gserviceaccount.com"],
+	"operations": [{"service": "storage.googleapis.com", "methods": ["google.storage.buckets.get"]}],
+}]
+
+# Reguła zbiorcza baseline tak, jak renderuje ją `terraform/locals.tf`: tytuł `baseline--<tytuł>`,
+# źródło `*` (z `allow_without_access_level`), cel `*` (nie lista projektów).
+baseline_rule := {
+	"address": "google_access_context_manager_service_perimeter_dry_run_ingress_policy.rule[\"baseline--security-scanner-read\"]",
+	"type": "google_access_context_manager_service_perimeter_dry_run_ingress_policy",
+	"values": {
+		"title": "baseline--security-scanner-read",
+		"ingress_from": [{
+			"identities": ["serviceAccount:sa-scanner@prj-example.iam.gserviceaccount.com"],
+			"sources": [{"access_level": "*"}],
+		}],
+		"ingress_to": [{"resources": ["*"], "operations": [{
+			"service_name": "storage.googleapis.com",
+			"method_selectors": [{"method": "google.storage.buckets.get", "permission": null}],
+		}]}],
+	},
 }
 
-# ANTY-OBEJŚCIE. Poprzedni warunek szukał podciągu `--baseline--`, a tytuł reguły profilowej powstaje jako
-# `<członek>--<tytuł z profilu>` — więc profil nazwany `-baseline--cokolwiek` produkował tytuł zawierający
-# ten podciąg i wyłączał sobie wymóg access levelu plikiem, który dywizja pisze sama. Tytuł spoza
-# `policy.yaml` MUSI być odrzucony, choćby wyglądał baseline'owo.
+test_baseline_wildcard_resources_allowed if {
+	count(deny) == 0 with input as plan_with([baseline_rule])
+		with data.baseline_ingress as baseline_declaration
+}
+
+# Reguła baseline WOLNO mieć bez access levelu — ten sam predykat rozstrzyga oba wyjątki.
+test_baseline_without_access_level_allowed if {
+	bez_zrodla := json.patch(baseline_rule, [
+		{"op": "replace", "path": "/values/ingress_from/0/sources", "value": []},
+		{"op": "replace", "path": "/values/ingress_to/0/resources", "value": ["projects/111111111111"]},
+	])
+	count(deny) == 0 with input as plan_with([bez_zrodla])
+		with data.baseline_ingress as baseline_declaration
+}
+
+# ANTY-OBEJŚCIE nr 1 (historyczne). Poprzednia generacja bramki szukała PODCIĄGU `--baseline--`, a tytuł
+# reguły profilowej powstaje jako `<członek>--<tytuł z profilu>` — więc profil nazwany `-baseline--cokolwiek`
+# wyłączał sobie wymóg access levelu plikiem, który dywizja pisze sama.
 test_baseline_lookalike_title_denied if {
 	bez_zrodla := json.patch(good_rule, [{"op": "replace", "path": "/values/ingress_from/0/sources", "value": []}])
 	podszywka := json.patch(bez_zrodla, [{"op": "add", "path": "/values/title", "value": "dywizja---baseline--wlasna-regula"}])
 	count(deny) > 0 with input as plan_with([podszywka])
-		with data.baseline_ingress as [{"title": "security-scanner-read"}]
+		with data.baseline_ingress as baseline_declaration
 }
 
-# Bez `--data perimeter/policy.yaml` zbiór tytułów jest PUSTY, więc wyjątek nie obowiązuje nikogo. Zapomniane
+# ANTY-OBEJŚCIE nr 2 (to, które zamyka ta zmiana). Klucz członka bierze się z NAZWY PLIKU w
+# `perimeter/members/`, więc plik `baseline.yaml` + profil o tytule zadeklarowanym w baseline dawał tytuł
+# DOKŁADNIE równy `baseline--security-scanner-read`. Sam tytuł przestał więc wystarczać: reguła musi zgadzać
+# się z deklaracją także TOŻSAMOŚCIAMI. Tu zgadza się wszystko poza nimi — i to ma wystarczyć do odmowy,
+# bo inaczej dywizja wpuszczałaby WŁASNE konto na projekty wszystkich pozostałych.
+test_baseline_wildcard_denied_for_foreign_identity if {
+	podszywka := json.patch(baseline_rule, [{
+		"op": "replace",
+		"path": "/values/ingress_from/0/identities",
+		"value": ["serviceAccount:sa-dywizji@prj-example.iam.gserviceaccount.com"],
+	}])
+	count(deny) > 0 with input as plan_with([podszywka])
+		with data.baseline_ingress as baseline_declaration
+}
+
+# Ta sama tożsamość i ten sam tytuł, ale SZERSZY zakres operacji niż zatwierdzony. Bez tego testu wyjątek
+# przepuszczałby „baseline plus jedna metoda ekstra" — czyli poszerzenie zakresu ukryte pod nazwą baseline'u.
+test_baseline_wildcard_denied_for_extra_method if {
+	podszywka := json.patch(baseline_rule, [{
+		"op": "add",
+		"path": "/values/ingress_to/0/operations/0/method_selectors/-",
+		"value": {"method": "google.storage.objects.delete", "permission": null},
+	}])
+	count(deny) > 0 with input as plan_with([podszywka])
+		with data.baseline_ingress as baseline_declaration
+}
+
+# ...i to samo dla DRUGIEGO pola `methodSelectors`. Pilnowanie tylko `method` było już raz luką w tym pliku.
+test_baseline_wildcard_denied_for_extra_permission if {
+	podszywka := json.patch(baseline_rule, [{
+		"op": "add",
+		"path": "/values/ingress_to/0/operations/0/method_selectors/-",
+		"value": {"method": null, "permission": "storage.objects.delete"},
+	}])
+	count(deny) > 0 with input as plan_with([podszywka])
+		with data.baseline_ingress as baseline_declaration
+}
+
+# Dołożona USŁUGA też musi wywrócić wyjątek — zbiór metod porównuje pary (usługa, metoda), więc usługa
+# bez ani jednego selektora przeszłaby przez porównanie metod niezauważona.
+test_baseline_wildcard_denied_for_extra_service if {
+	podszywka := json.patch(baseline_rule, [{
+		"op": "add",
+		"path": "/values/ingress_to/0/operations/-",
+		"value": {"service_name": "bigquery.googleapis.com", "method_selectors": []},
+	}])
+	count(deny) > 0 with input as plan_with([podszywka])
+		with data.baseline_ingress as baseline_declaration
+}
+
+# Gwiazdka BEZ źródła to najgorszy możliwy kształt: maksymalny zasięg i zerowa autoryzacja (zmierzone —
+# `NO_MATCHING_ACCESS_LEVEL` mimo obecnej reguły). Zgodność z deklaracją go NIE ratuje.
+test_baseline_wildcard_denied_without_sources if {
+	bez_zrodla := json.patch(baseline_rule, [{"op": "replace", "path": "/values/ingress_from/0/sources", "value": []}])
+	count(deny) > 0 with input as plan_with([bez_zrodla])
+		with data.baseline_ingress as baseline_declaration
+}
+
+# Bez `--data perimeter/policy.yaml` deklaracji nie ma, więc żaden wyjątek nie obowiązuje nikogo. Zapomniane
 # `--data` ma zamykać furtkę, nie otwierać ją wszystkim (ta sama zasada co przy `uslugi_bez_selektorow_metod`).
 test_baseline_exception_closed_without_data if {
-	bez_zrodla := json.patch(good_rule, [{"op": "replace", "path": "/values/ingress_from/0/sources", "value": []}])
-	baseline := json.patch(bez_zrodla, [{"op": "add", "path": "/values/title", "value": "baseline--security-scanner-read"}])
-	count(deny) > 0 with input as plan_with([baseline])
+	count(deny) > 0 with input as plan_with([baseline_rule])
+}
+
+test_baseline_without_access_level_closed_without_data if {
+	bez_zrodla := json.patch(baseline_rule, [
+		{"op": "replace", "path": "/values/ingress_from/0/sources", "value": []},
+		{"op": "replace", "path": "/values/ingress_to/0/resources", "value": ["projects/111111111111"]},
+	])
+	count(deny) > 0 with input as plan_with([bez_zrodla])
 }
 
 test_perimeter_without_aiplatform_denied if {
@@ -218,6 +319,18 @@ test_egress_wildcard_method_denied if {
 test_egress_wildcard_resources_denied if {
 	bad := json.patch(good_egress, [{"op": "replace", "path": "/values/egress_to/0/resources", "value": ["*"]}])
 	count(deny) > 0 with input as plan_with([bad])
+}
+
+# WYJATEK BASELINE'U NIE PRZECIEKA NA EGRESS — i to jest asymetria SWIADOMA, nie przeoczenie. Ingressowe
+# `*` znaczy „dowolny zasob W perimetrze" (zbior zamkniety, ktory sami kontrolujemy), egressowe `*` znaczy
+# „dowolny zasob POZA nim". Regula o tytule i tresci baseline'u, ale w kierunku wyjscia, ma byc odrzucona.
+test_egress_wildcard_resources_denied_nawet_dla_baseline if {
+	bad := json.patch(good_egress, [
+		{"op": "add", "path": "/values/title", "value": "baseline--security-scanner-read"},
+		{"op": "replace", "path": "/values/egress_to/0/resources", "value": ["*"]},
+	])
+	count(deny) > 0 with input as plan_with([bad])
+		with data.baseline_ingress as baseline_declaration
 }
 
 # LUKA ZMIERZONA 2026-08-11: `roles` to trzecia droga wyrazenia zakresu i zadna bramka na metody jej nie widzi.

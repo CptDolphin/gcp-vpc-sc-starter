@@ -101,30 +101,58 @@ locals {
   # z approvalem Security. Tutaj tylko przestajemy renderowac ksztalt, ktorego API nie honoruje.
   baseline_source_any = "*"
 
-  # BASELINE RENDERUJE SIĘ JAKO **JEDNA REGUŁA NA TYTUŁ**, Z LISTĄ ZASOBÓW WSZYSTKICH CZŁONKÓW.
+  # BASELINE RENDERUJE SIĘ JAKO **JEDNA REGUŁA NA TYTUŁ**, CELUJĄCA W `*` — „dowolny zasób w TEJ
+  # konfiguracji perimetru" — A NIE W WYLICZONĄ LISTĘ PROJEKTÓW CZŁONKÓW (DEC-10 + DEC-11).
   #
   # `ingress_to.resources` przyjmuje LISTĘ projektów, a baseline jest z definicji identyczny dla każdego
   # członka: te same tożsamości, to samo źródło, te same operacje. Renderowanie go per członek powielało
   # więc CAŁĄ regułę, żeby zmienić w niej jedno pole — i to powielenie płaciło się z budżetu, którego
-  # perimetr ma 6000 atrybutów NA KONFIGURACJĘ (osobno spec i status).
+  # perimetr ma 6000 atrybutów NA KONFIGURACJĘ (osobno spec i status). Kolaps N reguł w jedną (DEC-10)
+  # zdjął to powielenie, ale zostawił w regule listę, która nadal rośnie z każdym członkiem — i to
+  # kosztowało DRUGI raz, w innej walucie niż budżet:
   #
-  # ZMIERZONE na żywym perimetrze (`perimeters describe`, niezależne policzenie z odpowiedzi API):
-  #   przed:  2 reguły baseline × 2 członków = 42 atrybuty, czyli 21 NA CZŁONKA
-  #           (security-scanner-read 16 = ident 1 + źródło 1 + zasób 1 + 4 usługi + 9 metod,
-  #            platform-violations-read 5 = ident 1 + źródło 1 + zasób 1 + 1 usługa + 1 metoda)
-  #   po:     (15 + N) + (4 + N) = 19 + 2N, czyli **2 atrybuty na członka** — po jednym zasobie na regułę.
-  # Przy 500 członkach: 10500 atrybutów przed (limit 6000 — konfiguracja NIE POWSTAJE), 1019 po.
+  # `ingress_to.resources` JEST `ForceNew` w providerze `hashicorp/google` (zmierzone na 7.43.0), więc
+  # dopisanie jednego projektu do listy nie jest aktualizacją reguły, tylko jej ZASTĄPIENIEM. ZMIERZONE
+  # (stan żywy 3 członków + jeden nowy członek w konfiguracji, `terraform plan -refresh=false`):
+  #
+  #     # …dry_run_ingress_policy.rule["baseline--platform-violations-read"] must be replaced
+  #           ~ resources = [ # forces replacement
+  #     # …dry_run_ingress_policy.rule["baseline--security-scanner-read"]    must be replaced
+  #           ~ resources = [ # forces replacement
+  #     Plan: 4 to add, 1 to change, 2 to destroy.
+  #
+  # Terraform kasuje PRZED utworzeniem, a `create_before_destroy` nie jest tu wyjściem (DEC-11: wszystkie
+  # granularne reguły mają w stanie TEN SAM `id` — sam perimetr — więc „nowy obok starego" znaczy dwie
+  # reguły o tym samym tytule w jednej liście). W konfiguracji dry-run replace jest nieszkodliwy, bo ona
+  # niczego nie autoryzuje. W konfiguracji EGZEKWOWANEJ to okno, w którym ŻADEN promowany członek nie ma
+  # reguły skanera ani reguły raportu naruszeń — dokładnie ta awaria, po którą baseline w ogóle istnieje,
+  # tyle że powtarzalna przy KAŻDYM wniosku i KAŻDEJ promocji, a nie jednorazowa jak sam kolaps.
+  #
+  # `*` USUWA PRZYCZYNĘ, A NIE OBJAW: reguła przestaje zależeć od członkostwa, więc nie ma czego
+  # replace'ować. Dokumentacja VPC-SC (ingress-egress-rules) mówi o tym polu wprost — `*` dopasowuje
+  # wszystkie zasoby WEWNĄTRZ perimetru, a `spec` i `status` to dwie osobne konfiguracje perimetru z
+  # własnymi listami `resources`. Reguła zbiorcza w `spec` obejmuje więc członków dry-run, ta sama reguła
+  # w `status` — wyłącznie promowanych. To jest ta sama granica, którą do tej pory wypisywaliśmy ręcznie.
+  #
+  # CO SIĘ PRZY TYM POSZERZA — dokładnie jedna rzecz, nazwana wprost: lista wypisana ręcznie obejmowała
+  # projekty zadeklarowane W TYM REPO, `*` obejmuje zasoby, które W PERIMETRZE SĄ. Przy `manage_skeleton:
+  # false` (brownfield, domyślnie) właścicielem szkieletu jest ktoś inny i może dołożyć zasób poza tym
+  # repo — taki zasób baseline obejmie automatycznie. Świadomie: baseline to skaner i raport naruszeń,
+  # więc „zasób w perimetrze, którego nie skanujemy" jest gorszym stanem niż „skanujemy też cudzy wpis".
+  # Poszerzenie idzie WYŁĄCZNIE po stronie CELU (`ingress_to`); tożsamości i operacje zostają bez zmian,
+  # więc reguła nadal wpuszcza dokładnie te same konta na dokładnie te same metody.
+  #
+  # ZYSK POBOCZNY, POLICZONY: koszt baseline spada z „19 + 2N" do STAŁYCH 21 atrybutów (15 + 1 oraz 4 + 1),
+  # czyli **0 atrybutów na członka**. Sufit rośnie z ~521 do ~629 członków przy realistycznej mieszance
+  # profili i z 854 do ~1195 przy monoprofilu.
   #
   # TRADE-OFF, ŚWIADOMY (DEC-10): jedna reguła = jeden blast-radius. Per-członkowe reguły niosły
   # audytowalność „kto ma co" w samym kształcie zasobu i pozwalały zepsuć baseline JEDNEMU członkowi.
   # Teraz zła zmiana baseline'u dotyka wszystkich naraz. Kolapsujemy WYŁĄCZNIE baseline, bo on jest wspólny
   # z definicji; reguły profilowe zostają per członek, bo tam różnice między zespołami są realne i tam
-  # per-członkowa audytowalność coś znaczy.
-  #
-  # `sort()` daje kolejność niezależną od kolejności iteracji mapy: bez niego dodanie członka potrafi
-  # przetasować listę i wyprodukować diff w regule, w której nic się nie zmieniło.
-  baseline_targets_all      = sort([for mkey, m in local.members : "projects/${m.project_number}"])
-  baseline_targets_enforced = sort([for mkey, m in local.enforced_members : "projects/${m.project_number}"])
+  # per-członkowa audytowalność coś znaczy. `*` w regule PROFILOWEJ jest i zostaje zakazane (bramka OPA
+  # `vpcsc.perimeter`) — tam znaczyłoby „reguła jednej dywizji działa na projektach wszystkich".
+  baseline_target_any = "*"
 
   # Kształt reguły BEZ celu — cel dokłada każda konfiguracja osobno (dry-run: wszyscy, enforced: tylko
   # promowani). Jedna definicja tożsamości/źródeł/operacji, żeby obie konfiguracje nie mogły się rozjechać.
@@ -144,27 +172,38 @@ locals {
     }
   }
 
-  # Warunek `length(...) > 0` NIE jest kosmetyką: reguła ingress bez ani jednego zasobu jest przez API
-  # odrzucana albo — gorzej — interpretowana szerzej, niż wygląda. Zero członków musi dawać BRAK reguły,
-  # nie regułę bez celu (ta sama bezpieczna degradacja co przy egressie bez celu niżej).
+  # Warunek „w tej konfiguracji jest ktokolwiek" ZOSTAJE mimo `*`, ale pilnuje już czego innego i to jest
+  # jedyny powód, dla którego wciąż tu jest. Wcześniej chronił przed regułą BEZ celu (API odrzuca ją albo
+  # interpretuje szerzej, niż wygląda). Teraz chroni przed regułą, która ma cel ZBYT szeroki wobec intencji:
+  # przy `manage_skeleton: false` perimetr może zawierać zasoby, których to repo nie zadeklarowało, więc
+  # baseline z `*` w perimetrze BEZ ANI JEDNEGO NASZEGO CZŁONKA sięgałby wyłącznie cudzych wpisów. Zero
+  # członków ma dawać BRAK reguły — tak jak dziś (ta sama bezpieczna degradacja co przy egressie bez celu).
   baseline_rules_all = {
     for k, r in local.baseline_rules_shape : k => {
       key           = k
       title         = k
       scope         = "baseline"
       member        = null # reguła zbiorcza nie ma JEDNEGO właściciela — filtruj po `scope`, nie po `member`
-      stage         = null # ...i nie ma etapu: o tym, kto jest w konfiguracji, decyduje lista `resources`
+      stage         = null # ...i nie ma etapu: o tym, kto jest w konfiguracji, decyduje SAMA KONFIGURACJA
       identities    = r.identities
       access_levels = r.access_levels
-      resources     = local.baseline_targets_all
+      resources     = [local.baseline_target_any]
       operations    = r.operations
-    } if length(local.baseline_targets_all) > 0
+    } if length(local.members) > 0
   }
 
-  # Wariant dla konfiguracji EGZEKWOWANEJ — ta sama reguła, ale celuje wyłącznie w członków `stage: enforced`.
-  # DLACZEGO osobna mapa, a nie filtr po `stage` jak przy profilach: po kolapsie reguła nie należy do jednego
-  # członka, więc „etap reguły" przestał istnieć jako pojęcie. Różnica między konfiguracjami siedzi teraz
-  # w LIŚCIE ZASOBÓW i tylko tam — inaczej perimetr autoryzowałby w statusie projekt, którego w statusie nie ma.
+  # Wariant dla konfiguracji EGZEKWOWANEJ. TREŚĆ JEST IDENTYCZNA — po przejściu na `*` różnica między
+  # konfiguracjami przestała siedzieć w regule i siedzi tam, gdzie siedziała od początku: w LIŚCIE
+  # `resources` samego perimetru (`spec` = wszyscy członkowie, `status` = tylko `stage: enforced`).
+  # Dwie mapy zostają, bo różnią się WARUNKIEM ISTNIENIA, a nie zawartością: reguła egzekwowana powstaje
+  # dopiero, gdy jest ktokolwiek promowany. Dzięki temu `status` pustego wdrożenia zostaje pusty, a nie
+  # dostaje reguły, która czeka z otwartym `*` na pierwszy zasób dołożony do perimetru spoza tego repo.
+  #
+  # KONSEKWENCJA, KTÓRĄ TRZEBA ZNAĆ: przy PIERWSZEJ promocji te reguły powstają (create), a `depends_on`
+  # w rules.tf każe im czekać na wejście projektu do konfiguracji egzekwowanej — jest więc krótkie okno
+  # „projekt chroniony, baseline jeszcze nie". Przy KAŻDEJ NASTĘPNEJ promocji reguła już istnieje i nie
+  # zmienia się wcale, więc okna nie ma. To jest cała zmiana wobec stanu sprzed tej poprawki: było jedno
+  # okno NA KAŻDĄ promocję (replace), jest jedno okno NA CAŁE WDROŻENIE (pierwszy create).
   baseline_rules_enforced = {
     for k, r in local.baseline_rules_shape : k => {
       key           = k
@@ -174,11 +213,27 @@ locals {
       stage         = null
       identities    = r.identities
       access_levels = r.access_levels
-      resources     = local.baseline_targets_enforced
+      resources     = [local.baseline_target_any]
       operations    = r.operations
-    } if length(local.baseline_targets_enforced) > 0
+    } if length(local.enforced_members) > 0
   }
 
+  # EGRESS ZOSTAJE PER CZŁONEK I `*` GO NIE DOTYCZY — sprawdzone, nie założone.
+  #
+  # `egress_to.resources` jest w providerze `ForceNew` TAK SAMO jak ingressowe (zmierzone: dopisanie
+  # drugiego projektu do `data_source_projects` jednego członka dało
+  # `…dry_run_egress_policy.rule[…] must be replaced / ~ resources = [ # forces replacement`).
+  # Defekt „każdy wniosek replace'uje regułę wspólną" jednak tu NIE WYSTĘPUJE, bo reguły egress nie są
+  # skolapsowane: klucz to `(członek × profil × tytuł)`, więc nowy członek dokłada własną regułę i nie
+  # dotyka cudzych. Replace zdarza się wyłącznie wtedy, gdy członek zmienia SWOJĄ listę celów — czyli
+  # dokładnie w regule, którą ten wniosek zmienia, i tylko jemu.
+  #
+  # GDYBY KTOŚ KIEDYŚ SKOLAPSOWAŁ EGRESS „dla budżetu", ten sam defekt wróci — i wtedy poprawka z ingressu
+  # NIE JEST DOSTĘPNA: `egress_to.resources = ["*"]` nie znaczy „dowolny zasób w perimetrze", tylko
+  # „dowolny zasób POZA nim", czyli zniesienie granicy w kierunku, dla którego ta granica istnieje (bramka
+  # OPA odrzuca ten kształt bezwarunkowo i ma tak zostać). Wyjściem byłoby wtedy grupowanie po IDENTYCZNYM
+  # celu albo pozostawienie egressu per członek — nigdy gwiazdka.
+  #
   # Egress renderujemy TYLKO gdy członek podał niepusty cel — projekt W GCP (`to_projects_from`) albo zasób
   # ZEWNĘTRZNY (`to_external_from`, wyłącznie BigQuery Omni: s3:// / azure://). Pusty cel = brak reguły
   # (bezpieczna degradacja: brak egressu jest zawsze bezpieczniejszym stanem domyślnym niż szeroki egress).

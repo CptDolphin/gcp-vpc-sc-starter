@@ -17,19 +17,20 @@ CO LICZYMY, A CZEGO NIE: limit dotyczy atrybutów W REGUŁACH ingress/egress (od
 access levels, selektorów metod, tożsamości i ról). `restricted_services`, `vpc_accessible_services` i sama
 lista członków perimetru mają WŁASNE, osobne limity — doliczanie ich tutaj mieszałoby dwa różne budżety.
 
-BASELINE MA KOSZT STAŁY PLUS JEDEN ATRYBUT NA CZŁONKA — i to jest cały sens jego kolapsu. `policy.yaml
-§baseline_ingress` renderuje się jako JEDNA reguła na tytuł, z listą zasobów wszystkich członków
-(terraform/locals.tf: `baseline_rules_all`), więc koszt to `stały_koszt_reguł + liczba_członków × liczba_reguł`,
-a nie `koszt_reguł × liczba_członków`. Ta różnica decyduje o suficie perimetru: przy dwóch regułach baseline
-(zmierzone na żywym ACM) było to 21 atrybutów na członka i sufit ~230 członków, po kolapsie 2 na członka.
+BASELINE MA KOSZT STAŁY I ZERO ATRYBUTÓW NA CZŁONKA. `policy.yaml §baseline_ingress` renderuje się jako
+JEDNA reguła na tytuł, celująca w `*` — „dowolny zasób w tej konfiguracji perimetru" (terraform/locals.tf:
+`baseline_rules_all`) — więc koszt to `stały_koszt_reguł`, niezależnie od liczby członków. Historia tej
+liczby ma dwa kroki i oba są policzalne: `koszt_reguł × członkowie` (21 na członka, sufit ~230 członków)
+→ kolaps do jednej reguły z listą, DEC-10 (2 na członka) → gwiazdka zamiast listy, DEC-11 (0 na członka).
 
 Model liczenia MUSI odwzorowywać renderer, nie deklarację. Dwa miejsca, w których to boli:
   * `sources` — reguła z `allow_without_access_level: true` renderuje JEDEN blok źródła (`accessLevel: "*"`),
     mimo że `access_levels` w YAML jest puste. Liczenie samej listy z YAML dawało wynik mniejszy o 1 na regułę
     niż to, co API realnie trzyma — czyli guard niedoszacowywał dokładnie te reguły, które są wspólne dla
     wszystkich członków (a więc te, które przy skali kosztują najwięcej).
-  * cele — po kolapsie baseline liczy tyle zasobów, ilu jest członków W DANEJ KONFIGURACJI (dry-run: wszyscy,
-    enforced: tylko promowani), a nie „1", bo reguła nie należy już do jednego członka.
+  * cele — baseline liczy DOKŁADNIE JEDEN zasób (`*`) w każdej regule, niezależnie od liczby członków
+    w konfiguracji. Model „tyle zasobów, ilu członków" opisywał kształt sprzed DEC-11 i przy 500 członkach
+    zawyżałby budżet o ~1000 atrybutów — czyli dokładnie o ten zapas, którym ta zmiana ma się wykazać.
 
 Użycie:
     python3 tools/collect_declarations.py | python3 tools/attribute_budget.py
@@ -109,10 +110,11 @@ def main() -> int:
 
     baseline = doc["policy"].get("baseline_ingress", []) or []
 
-    # Baseline po kolapsie ma DWA składniki i tylko drugi rośnie z organizacją. Rozdzielamy je, bo to jest
-    # liczba, którą planuje się pojemność: „ile jeszcze członków się zmieści" = (limit − stały) / marginalny.
-    baseline_fixed = sum(baseline_fixed_cost(r) for r in baseline)
-    baseline_per_member = len(baseline)  # jeden zasób (`projects/<numer>`) w każdej regule baseline
+    # Baseline jest kosztem CAŁKOWICIE stałym: `stały_koszt_reguł + 1 zasób (`*`) na regułę`. Zostawiamy
+    # rozbicie na dwie liczby, bo to jest ta arytmetyka, którą planuje się pojemność: „ile jeszcze członków
+    # się zmieści" = (limit − stały) / marginalny, a marginalny to od DEC-11 same reguły profilowe.
+    baseline_fixed = sum(baseline_fixed_cost(r) + 1 for r in baseline)  # +1 = cel `*`
+    baseline_per_member = 0  # DEC-11: cel reguły baseline nie zależy od członkostwa
 
     per_member = {}  # koszt REGUŁ PROFILOWYCH członka — te zostały per członek świadomie (DEC-10)
     dry_run_members = 0
@@ -140,8 +142,9 @@ def main() -> int:
             enforced_members += 1
             enforced_total += cost
 
-    # Reguła bez ani jednego celu nie powstaje (renderer: `if length(baseline_targets_*) > 0`), więc przy
-    # zerze członków baseline nie kosztuje nic. Doliczanie go „na zapas" zawyżałoby o konfigurację, której nie ma.
+    # Reguła baseline nie powstaje w konfiguracji, w której nie ma ani jednego członka (renderer:
+    # `if length(local.members) > 0` oraz `if length(local.enforced_members) > 0`), więc przy zerze członków
+    # baseline nie kosztuje nic. Doliczanie go „na zapas" zawyżałoby o konfigurację, której nie ma.
     if dry_run_members:
         dry_run_total += baseline_fixed + baseline_per_member * dry_run_members
     if enforced_members:
@@ -169,7 +172,7 @@ def main() -> int:
         print(f"{bullet}dry-run : {dry_run_total} ({round(100 * dry_run_total / limit, 1)}%)")
         print(f"{bullet}enforced: {enforced_total} ({round(100 * enforced_total / limit, 1)}%)")
         print(f"{bullet}baseline: {baseline_fixed} stałe + {baseline_per_member} na członka "
-              f"({len(baseline)} reguł zbiorczych)")
+              f"({len(baseline)} reguł zbiorczych, cel `*`)")
         print(f"{bullet}koszt marginalny najdroższego członka: {marginal}"
               + (f" → sufit ~{headroom} członków" if headroom is not None else ""))
         print(f"{bullet}najwięksi konsumenci (same reguły profilowe):")
