@@ -27,9 +27,16 @@ resource "google_access_context_manager_service_perimeter_dry_run_ingress_policy
         service_name = operations.value.service
 
         dynamic "method_selectors" {
-          for_each = operations.value.methods
+          for_each = lookup(operations.value, "methods", [])
           content {
             method = method_selectors.value
+          }
+        }
+
+        dynamic "method_selectors" {
+          for_each = lookup(operations.value, "permissions", [])
+          content {
+            permission = method_selectors.value
           }
         }
       }
@@ -69,9 +76,16 @@ resource "google_access_context_manager_service_perimeter_ingress_policy" "rule"
         service_name = operations.value.service
 
         dynamic "method_selectors" {
-          for_each = operations.value.methods
+          for_each = lookup(operations.value, "methods", [])
           content {
             method = method_selectors.value
+          }
+        }
+
+        dynamic "method_selectors" {
+          for_each = lookup(operations.value, "permissions", [])
+          content {
+            permission = method_selectors.value
           }
         }
       }
@@ -110,9 +124,16 @@ resource "google_access_context_manager_service_perimeter_dry_run_egress_policy"
         service_name = operations.value.service
 
         dynamic "method_selectors" {
-          for_each = operations.value.methods
+          for_each = lookup(operations.value, "methods", [])
           content {
             method = method_selectors.value
+          }
+        }
+
+        dynamic "method_selectors" {
+          for_each = lookup(operations.value, "permissions", [])
+          content {
+            permission = method_selectors.value
           }
         }
       }
@@ -142,9 +163,16 @@ resource "google_access_context_manager_service_perimeter_egress_policy" "rule" 
         service_name = operations.value.service
 
         dynamic "method_selectors" {
-          for_each = operations.value.methods
+          for_each = lookup(operations.value, "methods", [])
           content {
             method = method_selectors.value
+          }
+        }
+
+        dynamic "method_selectors" {
+          for_each = lookup(operations.value, "permissions", [])
+          content {
+            permission = method_selectors.value
           }
         }
       }

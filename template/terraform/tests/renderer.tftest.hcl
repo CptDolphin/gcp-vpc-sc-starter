@@ -393,6 +393,38 @@ run "egress_zewnetrzny_renderuje_sie_i_ma_poprawny_format" {
     error_message = "Zasób zewnętrzny w innym formacie niż s3:// / azure:// — API odrzuci to na apply."
   }
 
+  # KSZTAŁT SELEKTORÓW przy zasobie zewnętrznym. ZMIERZONE na żywym ACM 2026-08-11: z ustawionym
+  # `external_resources` API przyjmuje WYŁĄCZNIE selektory `permission` — `methods` kończy się
+  # `Error 400: With 'external_resources' set, MethodSelector is only allowed to have permission`.
+  # Profil `bq-omni-external-read` miał od dnia powstania `methods: [JobService.Query, JobService.InsertJob]`
+  # i NIE DAŁ SIĘ ZAPLIKOWAĆ ANI RAZU; nikt tego nie widział, bo żaden członek go nie używał.
+  #
+  # Premisa liczona z WEJŚCIA (jak w asercji wyżej), żeby test nie brzmiał „skoro nic nie powstało, to dobrze".
+  assert {
+    condition = length([
+      for k, r in local.egress_rules_all : k
+      if length(r.external_resources) > 0 && alltrue([
+        for op in r.operations : length(lookup(op, "permissions", [])) > 0 && length(lookup(op, "methods", [])) == 0
+      ])
+      ]) == length([
+      for k, r in local.egress_rules_all : k if length(r.external_resources) > 0
+    ])
+    error_message = "Reguła egress z zasobem zewnętrznym używa selektorów `methods` — API przyjmuje tam wyłącznie `permissions` (Error 400: MethodSelector is only allowed to have permission)."
+  }
+
+  # `egress_from` NIE NIESIE ŹRÓDEŁ — i to jest decyzja, nie przeoczenie. API to potrafi
+  # (`egressFrom.sources.accessLevel` + `sourceRestriction` są w schemacie providera 7.43.0), ale
+  # `rules.tf` składa `egress_from` wyłącznie z `identities`. Dopóki tak jest, access level w regule egress
+  # byłby CICHO GUBIONY: przed poprawką z 2026-08-11 `access_levels_from` w regule egress przechodziło
+  # schemat i OPA, budżet atrybutów je LICZYŁ (53 → 54), a `egress_from.sources` w planie zostawało puste.
+  # Ta asercja pilnuje, żeby nikt nie dołożył access levels do modelu egressu, nie tknąwszy renderera.
+  assert {
+    condition = alltrue([
+      for k, r in local.egress_rules_all : length(lookup(r, "access_levels", [])) == 0
+    ])
+    error_message = "Reguła egress niesie access_levels, a renderer składa egress_from wyłącznie z identities — dopisz `sources` (i `source_restriction`) do rules.tf albo usuń pole."
+  }
+
   # Cel wewnętrzny i zewnętrzny są ROZŁĄCZNE w naszym modelu (patrz nagłówek profilu): reguła bez ani jednego
   # celu nie może powstać, bo API interpretuje ją szerzej, niż wygląda.
   assert {
@@ -429,7 +461,7 @@ run "budzet_liczy_reguly_baseline" {
       for k, r in merge(local.ingress_rules_all, local.egress_rules_all) :
       length(r.identities) + length(lookup(r, "access_levels", [])) + length(r.resources)
       + length(lookup(r, "external_resources", []))
-      + sum(concat([0], [for op in r.operations : 1 + length(op.methods)]))
+      + sum(concat([0], [for op in r.operations : 1 + length(lookup(op, "methods", [])) + length(lookup(op, "permissions", []))]))
     ]))
     error_message = "Szacunek nie rośnie po doliczeniu reguł baseline — guard ich nie liczy, a API tak."
   }

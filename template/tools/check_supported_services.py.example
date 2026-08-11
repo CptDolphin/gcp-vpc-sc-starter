@@ -108,6 +108,19 @@ def main() -> int:
     for zrodlo, operacje in zbierz_operacje(args.policy, args.profiles):
         for op in operacje:
             usluga, metody = op.get("service"), op.get("methods") or []
+            uprawnienia = op.get("permissions") or []
+
+            # SELEKTORY `permission` NIE SĄ WERYFIKOWALNE TĄ LISTĄ i to nie jest luka do „domknięcia
+            # kiedyś", tylko zmierzona właściwość API. Reguła egress z `external_resources` przyjmuje
+            # DOKŁADNIE JEDNO uprawnienie — `externalResource.read` — którego `supported-services` dla
+            # bigquery NIE WYMIENIA (75 uprawnień, tego wśród nich nie ma). Odwrotnie: `bigquery.jobs.create`
+            # i `bigquery.tables.getData` NA TEJ LIŚCIE SĄ, a perimetr odrzuca je komunikatem
+            # `PERMISSION ... is not supported`. Lista kłamie w OBIE strony, więc porównywanie z nią
+            # zamieniłoby jedyną działającą regułę BigQuery Omni w czerwony pipeline.
+            # Wartości pilnuje zamiast tego reguła OPA `dozwolone_uprawnienia_zewnetrzne` (policy/onboarding.rego),
+            # zbudowana z POMIARU, a nie z katalogu. Zmierzone 2026-08-11.
+            if uprawnienia:
+                continue
             if usluga not in wspierane or "*" in metody:
                 continue
             if usluga not in metody_api:

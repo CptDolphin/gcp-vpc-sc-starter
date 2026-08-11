@@ -4,13 +4,30 @@
 #
 #   Pole `externalResources` w regule egress obsługuje WYŁĄCZNIE zasoby BigQuery Omni. Nie jest to ogólny
 #   „egress do AWS": nie przepuści nim ruchu Vertex AI, Cloud Run ani GKE. Jedyny obsługiwany przepływ to
-#   zapytanie BigQuery do tabeli zewnętrznej w S3/Azure. Formaty identyfikatorów są sztywne:
+#   zapytanie BigQuery do tabeli zewnętrznej w S3/Azure.
 #
-#       s3://BUCKET_NAME
-#       azure://myaccount.blob.core.windows.net/CONTAINER_NAME
+# TRZY REGUŁY API, KAŻDA ZMIERZONA OSOBNYM APPLY NA ŻYWYM ACM (2026-08-11) — bo do tego dnia ten profil
+# NIE BYŁ UŻYTY ANI RAZU i nikt nie wiedział, że w takim kształcie **nie da się go zaaplikować**:
 #
-#   ARN (`arn:aws:s3:::bucket`) NIE jest formatem, którego oczekuje API — to najczęstsza pomyłka i wychodzi
-#   dopiero na apply. Pilnuje jej reguła OPA `external_resource_format`.
+#   1. FORMAT IDENTYFIKATORA. `arn:aws:s3:::bucket` → `Error 400: Invalid external resource ... Valid format
+#      is s3://<bucket_name>, s3a://<bucket_name>, s3n://<bucket_name>, or
+#      azure://<blob_name>.blob.core.windows.net/<path_name>`. Cztery prefiksy, nie dwa. Bramka OPA
+#      (`valid_external_resource`) dopuszcza świadomie tylko `s3://` i `azure://`: `s3a://`/`s3n://` to
+#      warianty hadoopowe tego samego bucketa, a dwie pisownie jednego celu psują późniejszą odpowiedź na
+#      pytanie „co właściwie wypływa". Zawężenie jest NASZE, nie API — i dlatego jest tu napisane.
+#
+#   2. SELEKTORY. Z ustawionym `external_resources` API przyjmuje wyłącznie `permissions`:
+#      `Error 400: With 'external_resources' set, MethodSelector is only allowed to have permission`.
+#      Ten profil miał wcześniej `methods: [JobService.Query, JobService.InsertJob]` — kształt, który
+#      przechodził schemat, OPA, `terraform validate` i `plan`, a padał na apply.
+#
+#   3. WARTOŚĆ UPRAWNIENIA. Jedyna przyjmowana to `externalResource.read`. Odrzucone zostały
+#      `bigquery.jobs.create`, `bigquery.tables.getData`, `bigquery.tables.get` i `*`
+#      (`Error 400: PERMISSION '<x>' is not supported in bigquery.googleapis.com`) — MIMO że trzy pierwsze
+#      są na liście `gcloud access-context-manager supported-services describe bigquery.googleapis.com`,
+#      a `externalResource.read` na tej liście NIE JEST. Katalog usług kłamie tu w obie strony, dlatego
+#      `tools/check_supported_services.py` świadomie pomija operacje z `permissions`, a wartości pilnuje
+#      reguła OPA zbudowana z POMIARU (`dozwolone_uprawnienia_zewnetrzne`).
 #
 # DLACZEGO to jest w katalogu profili, a nie w wyjątkach: wzorzec „dywizja ma hurtownię w S3 i pyta o nią
 # z BigQuery" powtarza się na tyle często, że trzeci wyjątek byłby marnotrawstwem (DEC-3). Ryzyko jest
@@ -42,6 +59,9 @@ egress:
       # Tylko BigQuery — patrz nagłówek. Inna usługa w tej regule jest odrzucana przez OPA, bo API i tak
       # nie zastosuje `externalResources` do niczego poza Omni, a reguła wyglądałaby na działającą.
       - service: bigquery.googleapis.com
-        methods:
-          - JobService.Query
-          - JobService.InsertJob
+        # `permissions`, nie `methods` — punkt 2 nagłówka. Jedna pozycja, bo `externalResource.read` jest
+        # jedyną, którą API tu przyjmuje (punkt 3). Nie jest to zawężenie „na wszelki wypadek": nie ma
+        # czego zawężać ani rozszerzać, dopóki Google nie doda drugiego uprawnienia — a to trzeba będzie
+        # ZMIERZYĆ, nie wyczytać.
+        permissions:
+          - externalResource.read

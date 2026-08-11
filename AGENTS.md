@@ -88,6 +88,20 @@ guard `test_samodzielnosc` w selfteście pilnuje tego przy każdym przebiegu.
   **zdalny backend pod własnym prefiksem**, rozłącznym z tym, który `main.tf` oddaje kontom CI: warunek IAM
   na buckecie to `startsWith`, więc wspólny (albo tylko *prawie* rozłączny) prefiks daje pipeline'owi
   perimetru prawo zapisu do stanu, z którego biorą się jego własne uprawnienia.
+- **Reguła egress do zasobu zewnętrznego wygląda inaczej niż każda inna: `permissions`, nie `methods`.**
+  To nie jest niekonsekwencja katalogu profili, tylko wymóg API — zmierzony, nie wyczytany. Z ustawionym
+  `external_resources` perimetr odrzuca selektory metod (`With 'external_resources' set, MethodSelector is
+  only allowed to have permission`), a z uprawnień przyjmuje **dokładnie jedno**: `externalResource.read`.
+  Prawdziwe uprawnienia IAM BigQuery (`bigquery.jobs.create`, `bigquery.tables.getData`) są odrzucane, mimo że
+  figurują w `gcloud access-context-manager supported-services describe`; `externalResource.read` w tym
+  katalogu nie figuruje. Katalog usług kłamie tu w obie strony, dlatego `check_supported_services.py`
+  świadomie pomija operacje z `permissions`, a wartości pilnuje reguła OPA zbudowana z pomiaru.
+- **Reguła egress nie przyjmuje `access_levels_from` — mimo że API to potrafi.** `egressFrom.sources.accessLevel`
+  i `sourceRestriction` istnieją w schemacie providera; ten renderer ich **nie składa**. Dopóki nie składa,
+  przyjęcie pola oznaczałoby deklarację „wymagaj sieci korporacyjnej" cicho zamienioną na regułę autoryzującą
+  z dowolnego miejsca — zmierzone: schema, OPA i guard budżetu **przepuszczały i liczyły** to pole, a
+  `egress_from.sources` w planie zostawało puste. Zamknięte na trzech warstwach (schema rozdzielona per
+  kierunek, reguła OPA, asercja `terraform test`), każda mówi, co zrobić przy realnej potrzebie.
 - **Testy są w połowie negatywne.** Bramka, która nigdy nie odrzuca, przechodzi każdy test pozytywny
   i nie chroni niczego. Dodając bramkę, dodaj też przypadek, w którym ma PAŚĆ.
 - **Bramka ludzka na apply jest opisana jako warstwa OSOBNA i warunkowa, a nie jako fundament.** Kusi, żeby

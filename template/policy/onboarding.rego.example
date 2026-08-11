@@ -394,6 +394,70 @@ deny contains msg if {
 	)
 }
 
+# TRZY REGULY API, KTORYCH NIE MA W ZADNEJ DOKUMENTACJI GOOGLE'A CZYTANEJ PRZY PISANIU TEGO PROFILU.
+# Wszystkie trzy zmierzone 2026-08-11 na zywym ACM, kazda osobnym targetowanym apply:
+#
+#   1. `arn:aws:s3:::bucket` -> `Invalid external resource ... Valid format is s3://<bucket_name>,
+#      s3a://<bucket_name>, s3n://<bucket_name>, or azure://<blob_name>.blob.core.windows.net/<path_name>`
+#   2. `methods` przy `external_resources` -> `With 'external_resources' set, MethodSelector is only
+#      allowed to have permission`
+#   3. `permissions` inne niz `externalResource.read` -> `PERMISSION '<x>' is not supported in
+#      bigquery.googleapis.com`. Odrzucone zostaly m.in. `bigquery.jobs.create`, `bigquery.tables.getData`,
+#      `bigquery.tables.get` i `*` — mimo ze pierwsze trzy SA na liscie
+#      `gcloud access-context-manager supported-services describe bigquery.googleapis.com`,
+#      a `externalResource.read` na tej liscie NIE JEST.
+#
+# Konsekwencja, ktora kosztowala pelny cykl apply: profil `bq-omni-external-read` byl w katalogu od dnia
+# powstania z `methods: [JobService.Query, JobService.InsertJob]` i NIE DAL SIE ZAPLIKOWAC ANI RAZU.
+# Bramki tego nie widzialy, bo zaden czlonek go nie uzywal — pierwsze uzycie bylo pierwszym testem.
+
+deny contains msg if {
+	some pname, prof in input.profiles
+	some rule in object.get(prof, "egress", [])
+	object.get(rule, "to_external_from", "") != ""
+	some op in rule.operations
+	count(object.get(op, "methods", [])) > 0
+	msg := sprintf(
+		"profiles/%s: regula %q ma zasoby zewnetrzne i selektory `methods` — API przyjmuje tam WYLACZNIE `permissions` (zmierzone: `With 'external_resources' set, MethodSelector is only allowed to have permission`)",
+		[pname, rule.title],
+	)
+}
+
+# Wartosc uprawnienia. Lista `supported-services` NIE jest tu wyrocznia (patrz punkt 3 wyzej), wiec
+# porownujemy z tym, co API realnie przyjelo. Gdyby Google dolozyl kolejne, ta lista jest jednym miejscem
+# do poprawienia — i wymaga POMIARU, nie lektury dokumentacji.
+dozwolone_uprawnienia_zewnetrzne := {"externalResource.read"}
+
+deny contains msg if {
+	some pname, prof in input.profiles
+	some rule in object.get(prof, "egress", [])
+	object.get(rule, "to_external_from", "") != ""
+	some op in rule.operations
+	some perm in object.get(op, "permissions", [])
+	not perm in dozwolone_uprawnienia_zewnetrzne
+	msg := sprintf(
+		"profiles/%s: regula %q ma uprawnienie %q przy zasobach zewnetrznych — API przyjmuje tylko %v (zmierzone; `supported-services` klamie w obie strony)",
+		[pname, rule.title, perm, dozwolone_uprawnienia_zewnetrzne],
+	)
+}
+
+# `access_levels_from` W REGULE EGRESS — druga warstwa nad schematem, bo cichy no-op tej akurat deklaracji
+# jest drozszy niz jej brak. API to POTRAFI (`egressFrom.sources.accessLevel` + `sourceRestriction`
+# istnieja w schemacie providera 7.43.0), ale renderer tego NIE SKLADA: `egress_from` w rules.tf ma
+# wylacznie `identities`. Zmierzone przed poprawka: pole przechodzilo schemat i te bramki, budzet
+# atrybutow LICZYL je (53 -> 54 atrybuty, sufit 299 -> 284), a `egress_from.sources` w planie zostawalo
+# puste. Czyli deklaracja „wymagaj sieci korporacyjnej" renderowala sie na regule autoryzujaca
+# z DOWOLNEGO miejsca — i wszystko po drodze swiecilo na zielono.
+deny contains msg if {
+	some pname, prof in input.profiles
+	some rule in object.get(prof, "egress", [])
+	object.get(rule, "access_levels_from", "") != ""
+	msg := sprintf(
+		"profiles/%s: regula egress %q deklaruje access_levels_from, a renderer sklada `egress_from` wylacznie z `identities` — deklaracja bylaby cicho gubiona. Albo dopisz `sources` do rules.tf (wraz z `source_restriction`), albo usun to pole",
+		[pname, rule.title],
+	)
+}
+
 valid_external_resource(res) if startswith(res, "s3://")
 
 valid_external_resource(res) if startswith(res, "azure://")

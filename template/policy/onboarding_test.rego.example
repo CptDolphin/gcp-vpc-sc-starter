@@ -352,7 +352,9 @@ omni_profile := {"bq-omni-external-read": {
 		"title": "read-external-omni-tables",
 		"identities_from": "query_identities",
 		"to_external_from": "external_resources",
-		"operations": [{"service": "bigquery.googleapis.com", "methods": ["google.cloud.bigquery.v2.JobService.Query"]}],
+		# Jedyny ksztalt, ktory zywe API przyjmuje przy `external_resources` — zmierzone 2026-08-11.
+		# Poprzednio stalo tu `methods: [...]`, czyli regula, ktorej nie da sie zaplikowac.
+		"operations": [{"service": "bigquery.googleapis.com", "permissions": ["externalResource.read"]}],
 	}],
 }}
 
@@ -387,12 +389,56 @@ test_external_resources_non_bigquery_denied if {
 		"title": "read-external-omni-tables",
 		"identities_from": "query_identities",
 		"to_external_from": "external_resources",
-		"operations": [{"service": "aiplatform.googleapis.com", "methods": ["m"]}],
+		"operations": [{"service": "aiplatform.googleapis.com", "permissions": ["externalResource.read"]}],
 	}]})}
 	bad := object.union(omni_input(["s3://approved-bucket"]), {"profiles": object.union(base_profiles, bad_profile)})
 	count(deny) > 0 with input as bad
 }
 
+
+
+# ZMIERZONE 2026-08-11: `methods` przy `external_resources` konczy sie
+# `Error 400: With 'external_resources' set, MethodSelector is only allowed to have permission`.
+# Profil w katalogu mial dokladnie ten ksztalt od dnia powstania i nie dal sie zaplikowac ani razu.
+test_external_resource_z_methods_denied if {
+	zly := {"bq-omni-external-read": object.union(omni_profile["bq-omni-external-read"], {"egress": [{
+		"title": "read-external-omni-tables",
+		"identities_from": "query_identities",
+		"to_external_from": "external_resources",
+		"operations": [{"service": "bigquery.googleapis.com", "methods": ["JobService.Query"]}],
+	}]})}
+	bad := object.union(omni_input(["s3://approved-bucket"]), {"profiles": object.union(base_profiles, zly)})
+	count(deny) > 0 with input as bad
+}
+
+# ZMIERZONE: odrzucone zostaly `bigquery.jobs.create`, `bigquery.tables.getData`, `bigquery.tables.get`
+# i `*` — mimo ze trzy pierwsze SA na liscie `supported-services`. Przyjete zostalo wylacznie
+# `externalResource.read`, ktorego na tej liscie NIE MA.
+test_external_resource_zle_uprawnienie_denied if {
+	every zle in ["bigquery.jobs.create", "bigquery.tables.getData", "*"] {
+		zly := {"bq-omni-external-read": object.union(omni_profile["bq-omni-external-read"], {"egress": [{
+			"title": "read-external-omni-tables",
+			"identities_from": "query_identities",
+			"to_external_from": "external_resources",
+			"operations": [{"service": "bigquery.googleapis.com", "permissions": [zle]}],
+		}]})}
+		bad := object.union(omni_input(["s3://approved-bucket"]), {"profiles": object.union(base_profiles, zly)})
+		count(deny) > 0 with input as bad
+	}
+}
+
+# CICHY NO-OP, ZMIERZONY: pole przechodzilo schemat i bramki, budzet je liczyl, a renderer je gubil.
+test_egress_access_levels_from_denied if {
+	zly := {"bq-omni-external-read": object.union(omni_profile["bq-omni-external-read"], {"egress": [{
+		"title": "read-external-omni-tables",
+		"identities_from": "query_identities",
+		"access_levels_from": "access_levels",
+		"to_external_from": "external_resources",
+		"operations": [{"service": "bigquery.googleapis.com", "permissions": ["externalResource.read"]}],
+	}]})}
+	bad := object.union(omni_input(["s3://approved-bucket"]), {"profiles": object.union(base_profiles, zly)})
+	count(deny) > 0 with input as bad
+}
 
 # --- jeden projekt = jeden wpis ---------------------------------------------------------------------
 
