@@ -44,16 +44,25 @@ run "enforced_tylko_dla_czlonka_enforced" {
     error_message = "Reguła ingress trafiła do konfiguracji egzekwowanej dla członka, który nie jest w stage: enforced."
   }
 
-  # Reguła baseline w konfiguracji EGZEKWOWANEJ celuje DOKŁADNIE w członków `stage: enforced`. Za szeroko =
-  # perimetr autoryzuje w statusie projekt, którego w statusie nie ma; za wąsko = skaner traci dostęp do
-  # projektu w chwili jego promocji. Jedno i drugie jest ciche — reguła w konsoli wygląda tak samo.
+  # Reguła baseline w konfiguracji EGZEKWOWANEJ obejmuje DOKŁADNIE członków `stage: enforced` — tylko że
+  # od DEC-11 wyraża to `*` („dowolny zasób w TEJ konfiguracji"), a nie wyliczona lista. Zawężenie robi więc
+  # sam perimetr: do `status.resources` wchodzą wyłącznie promowani (members.tf). Asercja pilnuje, żeby
+  # renderer nie wrócił do listy — bo lista jest `ForceNew` i każda promocja replace'owałaby regułę wspólną.
   assert {
     condition = alltrue([
       for k, r in local.ingress_rules_enforced :
-      r.resources == sort([for mk, m in local.enforced_members : "projects/${m.project_number}"])
+      length(r.resources) == 1 && r.resources[0] == "*"
       if r.scope == "baseline"
     ])
-    error_message = "Reguła baseline w konfiguracji egzekwowanej nie celuje dokładnie w członków stage: enforced."
+    error_message = "Reguła baseline w konfiguracji egzekwowanej nie celuje w `*` — wróciła lista zależna od członkostwa (ForceNew przy każdej promocji)."
+  }
+
+  # Egzekwowana reguła baseline powstaje TYLKO wtedy, gdy jest kogo autoryzować. Reguła z `*` w perimetrze
+  # bez ani jednego promowanego członka nie autoryzowałaby niczego dziś, ale przy `manage_skeleton: false`
+  # objęłaby pierwszy zasób dołożony do `status` spoza tego repo.
+  assert {
+    condition     = length(local.enforced_members) > 0 || length(local.baseline_rules_enforced) == 0
+    error_message = "Reguła baseline jest w konfiguracji egzekwowanej mimo zera członków stage: enforced."
   }
 
   assert {
@@ -306,26 +315,52 @@ run "baseline_jest_jedna_regula_na_tytul" {
     error_message = "Klucz reguły baseline zawiera nazwę członka — reguła znów renderuje się per członek."
   }
 
-  # Reguła zbiorcza MUSI celować w KOMPLET członków. Za wąsko = członek wypada ze skanowania (i nikt tego nie
-  # zauważy, bo brak findingów wygląda jak brak problemów). Za szeroko = reguła wskazuje projekt spoza
-  # perimetru. `sort` po obu stronach, bo kolejność iteracji mapy nie jest częścią kontraktu.
-  assert {
-    condition = alltrue([
-      for k, r in local.baseline_rules_all :
-      r.resources == sort([for mkey, m in local.members : "projects/${m.project_number}"])
-    ])
-    error_message = "Reguła baseline nie obejmuje dokładnie wszystkich członków — skaner wypadnie z części projektów."
-  }
-
-  # Tytuł jest tym, po czym bramka OPA rozpoznaje wyjątek „ingress bez access levelu". Rozjazd tytułu
-  # z `policy.yaml` nie wywala planu — po prostu wyjątek przestaje obowiązywać i legalna reguła baseline
-  # zapala bramkę (albo, w drugą stronę, przestaje być rozpoznawalna jako baseline w audycie).
+  # Tytuł jest JEDNYM z warunków, po których bramka OPA rozpoznaje regułę baseline (drugim jest zgodność
+  # tożsamości i operacji z `policy.yaml` — patrz `regula_odpowiada_baseline` w policy/perimeter.rego).
+  # Rozjazd tytułu z `policy.yaml` nie wywala planu — po prostu wyjątek przestaje obowiązywać i legalna
+  # reguła baseline zapala bramkę na `resources = ["*"]` oraz na braku access levelu.
   assert {
     condition = alltrue([
       for r in local.baseline_ingress :
       contains(keys(local.baseline_rules_all), "baseline--${r.title}")
     ])
     error_message = "Tytuł reguły baseline nie ma postaci `baseline--<tytuł z policy.yaml>` — bramka OPA jej nie rozpozna."
+  }
+
+  # --- 10a. REGUŁA BASELINE NIE ZALEŻY OD CZŁONKOSTWA -------------------------------------------------
+  #
+  # TEGO TESTU NIE BYŁO I DLATEGO DEFEKT PRZESZEDŁ. Po kolapsie (DEC-10) reguła baseline była jedna, ale jej
+  # `ingress_to.resources` nadal rosło z każdym członkiem — a to pole jest `ForceNew`, więc KAŻDY wniosek
+  # onboardingowy REPLACE'ował obie reguły baseline (zmierzone: `Plan: 4 to add, 1 to change, 2 to destroy`).
+  # W konfiguracji egzekwowanej replace = okno bez reguły skanera i bez reguły raportu naruszeń dla
+  # WSZYSTKICH promowanych naraz. Testy pilnowały KOMPLETNOŚCI listy i przez to utrwalały jej istnienie.
+  #
+  # Niezmiennik zapisany tak, żeby nie dało się go spełnić listą: cel reguły baseline to DOKŁADNIE jeden
+  # element i jest nim `*`. Dodanie członka nie ma wtedy czego zmienić.
+  assert {
+    condition = alltrue([
+      for k, r in local.baseline_rules_all :
+      length(r.resources) == 1 && r.resources[0] == "*"
+    ])
+    error_message = "Reguła baseline celuje w listę projektów zamiast w `*` — każdy nowy członek będzie ją REPLACE'ował (ForceNew)."
+  }
+
+  # Asercja komplementarna: gdyby ktoś zostawił `*` i DOŁOŻYŁ do niego listę („na wszelki wypadek"), warunek
+  # wyżej padłby na długości, a ten mówi wprost, czego w tym polu nie ma prawa być.
+  assert {
+    condition = alltrue(flatten([
+      for k, r in local.baseline_rules_all : [
+        for res in r.resources : !startswith(res, "projects/")
+      ]
+    ]))
+    error_message = "Reguła baseline wymienia projekt po numerze — cel reguły znów zależy od członkostwa."
+  }
+
+  # ANTY-TAUTOLOGIA: obie asercje wyżej przechodzą trywialnie na pustej mapie. Materiał startera ma
+  # baseline i ma członka, więc jeśli którejkolwiek z tych liczb nie ma, testy wyżej niczego nie zbadały.
+  assert {
+    condition     = length(local.baseline_rules_all) > 0 && length(local.members) > 0
+    error_message = "Brak reguł baseline albo brak członków — asercje o kształcie celu byłyby puste."
   }
 
   # Zasoby renderują się z `ingress_rules_effective`, więc suma musi się zgadzać. Gdyby ktoś podmienił

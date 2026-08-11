@@ -219,11 +219,15 @@ def test_terraform() -> None:
     check("swieze repo nie ma zadnej reguly egzekwowanej",
           p.returncode == 0 and p.stdout.strip().splitlines()[-1].strip() == "0", p.stdout + p.stderr[-300:])
 
-    # --- KOLAPS BASELINE'U: liczba regul baseline NIE ZALEZY od liczby czlonkow ----------------------
+    # --- BASELINE NIE ZALEZY OD CZLONKOSTWA: ani liczba regul, ani ich TRESC -------------------------
     #
     # Zmierzone na zywym ACM: przy renderowaniu per czlonek baseline kosztowal 21 atrybutow NA CZLONKA, przy
-    # limicie 6000 NA KONFIGURACJE — czyli sufit ~230 czlonkow, przekraczany w trakcie wdrozenia. Po kolapsie
-    # czlonek dokłada do reguly zbiorczej JEDNA pozycje w `ingress_to.resources`.
+    # limicie 6000 NA KONFIGURACJE — czyli sufit ~230 czlonkow, przekraczany w trakcie wdrozenia. Kolaps
+    # (DEC-10) zdjal powielanie regul, ale zostawil w regule LISTE zasobow rosnaca z kazdym czlonkiem — a to
+    # pole jest `ForceNew`, wiec kazdy wniosek REPLACE'owal obie reguly baseline (`Plan: 4 to add, 1 to
+    # change, 2 to destroy`), czyli w konfiguracji egzekwowanej tworzyl okno bez reguly skanera dla
+    # WSZYSTKICH promowanych naraz. DEC-11 zastapil liste gwiazdka i ten test pilnuje wlasnie TEGO: drugi
+    # czlonek nie moze zmienic reguly baseline ANI O JEDEN ZNAK.
     #
     # DLACZEGO TEN TEST DOKŁADA DRUGIEGO CZLONKA, a nie pyta o material startera takim, jaki jest: przy
     # JEDNYM czlonku „jedna regula na tytul" i „jedna regula na czlonek x tytul" daja TE SAMA liczbe, wiec
@@ -239,8 +243,17 @@ def test_terraform() -> None:
     # ta mapa jest PUSTA i kazda asercja o niej przechodzi trywialnie — czyli kod konfiguracji EGZEKWOWANEJ
     # wykonalby sie pierwszy raz przy pierwszej promocji, na zywej granicy. To jest dokladnie ta klasa awarii,
     # ktora perimetr zna z autopsji (regula baseline obecna i nieautoryzujaca niczego).
+    # `jsonencode` calej reguly, nie jej wybranego pola: pytanie brzmi „czy dodanie czlonka zmienia regule",
+    # a nie „czy zmienia dlugosc listy". Porownanie pelnej tresci lapie tez zmiane, ktorej nikt nie
+    # przewidzial (np. gdyby ktos wrocil z lista pod innym polem). `md5` skraca to do jednej linii, ktora
+    # helper `konsola` umie odczytac — a rozjazd i tak jest widoczny jako rozne skroty.
+    klucz_all = "sort(keys(local.baseline_rules_all))[0]"
+    klucz_enf = "sort(keys(local.baseline_rules_enforced))[0]"
+    odcisk_all = f"md5(jsonencode(local.baseline_rules_all[{klucz_all}]))"
+
     czlonkowie_przed = konsola("length(local.members)")
     baseline_przed = konsola("length(local.baseline_rules_all)")
+    odcisk_przed = konsola(odcisk_all)
 
     wzor = sorted((ROOT / "perimeter/members").glob("*.yaml"))[0]
     kopia = wzor.with_name("zz-selftest-drugi-czlonek.yaml")
@@ -249,12 +262,11 @@ def test_terraform() -> None:
     dane["project_number"] = "999999999999"
     dane["stage"] = "enforced"
     kopia.write_text(yaml.safe_dump(dane, allow_unicode=True, sort_keys=False))
-    klucz_all = "sort(keys(local.baseline_rules_all))[0]"
-    klucz_enf = "sort(keys(local.baseline_rules_enforced))[0]"
     try:
         czlonkowie_po = konsola("length(local.members)")
         baseline_po = konsola("length(local.baseline_rules_all)")
-        zasoby_po = konsola(f"length(local.baseline_rules_all[{klucz_all}].resources)")
+        odcisk_po = konsola(odcisk_all)
+        zasoby_po = konsola(f"join(\",\", local.baseline_rules_all[{klucz_all}].resources)")
         enforced_po = konsola("length(local.enforced_members)")
         baseline_enf = konsola("length(local.baseline_rules_enforced)")
         # `join`, a nie sama lista: `terraform console` drukuje liste WIELOLINIOWO, a helper czyta ostatnia
@@ -267,25 +279,32 @@ def test_terraform() -> None:
     # rownosci byly by prawdziwe „bo nic nie ma", a test meldowalby zielono nie badajac niczego.
     check("kolaps baseline: premisa (jeden czlonek dry-run i niepusty baseline w materiale startera)",
           czlonkowie_przed == "1" and czlonkowie_po == "2" and enforced_po == "1"
-          and baseline_przed not in ("0", ""),
+          and baseline_przed not in ("0", "") and odcisk_przed not in ("", "null"),
           f"czlonkowie {czlonkowie_przed!r}->{czlonkowie_po!r}, enforced {enforced_po!r}, "
-          f"reguly baseline {baseline_przed!r}")
+          f"reguly baseline {baseline_przed!r}, odcisk {odcisk_przed!r}")
     check("kolaps baseline: drugi czlonek NIE mnozy regul baseline",
           baseline_przed == baseline_po,
           f"regul baseline przy jednym czlonku={baseline_przed!r}, przy dwoch={baseline_po!r}")
-    check("kolaps baseline: drugi czlonek dokłada JEDEN zasob do reguly zbiorczej",
-          zasoby_po == "2", f"len(resources) reguly baseline przy dwoch czlonkach={zasoby_po!r}")
+
+    # TO JEST TEST DEC-11 i test defektu, ktory kosztowal replace obu regul baseline przy kazdym wniosku:
+    # dodanie czlonka nie moze zmienic reguly baseline W OGOLE. Przed poprawka ten odcisk sie ZMIENIAL
+    # (do listy `resources` dochodzil `projects/999999999999`), a `ingress_to.resources` jest ForceNew.
+    check("baseline nie zalezy od czlonkostwa: drugi czlonek NIE ZMIENIA reguly zbiorczej",
+          odcisk_przed == odcisk_po and odcisk_przed not in ("", "null"),
+          f"odcisk reguly baseline przed={odcisk_przed!r} po={odcisk_po!r}")
+    check("baseline nie zalezy od czlonkostwa: cel reguly to `*`, nie lista projektow",
+          zasoby_po.strip('"') == "*", f"resources reguly baseline przy dwoch czlonkach={zasoby_po!r}")
 
     # KONFIGURACJA EGZEKWOWANA. Regula zbiorcza MUSI w niej powstac (inaczej promocja zabiera skanerowi
-    # i raportowi naruszen dostep dokladnie w chwili, w ktorej zaczyna byc potrzebny) i MUSI celowac
-    # WYLACZNIE w czlonka `stage: enforced` — szersza lista autoryzowalaby w statusie projekt, ktorego
-    # w statusie nie ma. Sprawdzamy TRESC listy, nie jej dlugosc: przy jednym promowanym „1 zasob" byloby
-    # prawda takze wtedy, gdyby renderer wpisal tam nie tego czlonka.
+    # i raportowi naruszen dostep dokladnie w chwili, w ktorej zaczyna byc potrzebny). Zawezenie do czlonkow
+    # `stage: enforced` robi od DEC-11 sam perimetr — `status.resources` zawiera wylacznie promowanych
+    # (members.tf), a `*` znaczy „dowolny zasob W TEJ konfiguracji". Regula ma wiec byc IDENTYCZNA jak
+    # w dry-run; rozjazd tresci miedzy konfiguracjami znaczylby, ze wrocila lista.
     check("kolaps baseline: regula zbiorcza POWSTAJE w konfiguracji egzekwowanej",
           baseline_enf == baseline_przed,
           f"regul baseline enforced={baseline_enf!r}, oczekiwane={baseline_przed!r}")
-    check("kolaps baseline: enforced celuje WYLACZNIE w czlonka stage: enforced",
-          zasoby_enf.strip('"') == "projects/999999999999",
+    check("baseline nie zalezy od czlonkostwa: enforced tez celuje w `*`",
+          zasoby_enf.strip('"') == "*",
           f"resources reguly baseline w konfiguracji egzekwowanej={zasoby_enf!r}")
 
     # KOLEJNOSC DESTROY: regula ingress referuje access level po NAZWIE (string z YAML), wiec Terraform sam
@@ -1704,8 +1723,8 @@ def test_tools() -> None:
     def bez_baseline(d):
         d["policy"]["baseline_ingress"] = []
 
-    # Baseline jest JEDNA regula na tytul z lista zasobow, wiec drugi czlonek dokłada do niego DOKLADNIE
-    # jeden atrybut na regule — a nie caly jej koszt. Duplikujemy czlonka i mierzymy sam przyrost.
+    # Baseline jest JEDNA regula na tytul celujaca w `*` (DEC-11), wiec drugi czlonek NIE DOKLADA do niego
+    # ANI JEDNEGO atrybutu. Duplikujemy czlonka i mierzymy sam przyrost.
     def dwaj_czlonkowie(d):
         nazwa, czlonek = list(d["members"].items())[0]
         d["members"][nazwa + "-kopia"] = json.loads(json.dumps(czlonek))
@@ -1736,19 +1755,28 @@ def test_tools() -> None:
     check("budzet: material startera deklaruje reguly baseline (premisa asercji o kolapsie)",
           regul_baseline > 0, f"baseline_ingress ma {regul_baseline} regul")
 
-    # KSZTALT PO KOLAPSIE: drugi czlonek dokłada koszt swoich regul PROFILOWYCH (to samo, co bez baselinu)
-    # plus DOKLADNIE JEDEN atrybut na kazda regule baseline — bo jego projekt dopisuje sie do listy
-    # `ingress_to.resources` reguly zbiorczej, zamiast powolywac wlasna kopie calej reguly.
-    check("budzet: drugi czlonek dokłada do baselinu jeden atrybut na regule (kolaps)",
-          podwojony - pelny == (goly_podwojony - goly) + regul_baseline,
+    # KSZTALT PO DEC-11: drugi czlonek dokłada DOKLADNIE koszt swoich regul PROFILOWYCH — czyli tyle samo,
+    # ile dokłada w konfiguracji bez baselinu. Baseline celuje w `*`, wiec jego koszt jest STALY. Ta rownosc
+    # jest jednoczesnie testem defektu, ktory ta zmiana usuwa: dopoki baseline trzymal liste projektow,
+    # przyrost byl wiekszy o jeden atrybut na regule, a kazdy taki przyrost byl REPLACE'em reguly (ForceNew).
+    check("budzet: drugi czlonek NIE dokłada do baselinu ani jednego atrybutu (cel `*`, DEC-11)",
+          podwojony - pelny == goly_podwojony - goly,
           f"przyrost z baselinem={podwojony - pelny} bez baselinu={goly_podwojony - goly} regul={regul_baseline}")
 
-    # ANTY-TAUTOLOGIA / REGRESJA. Stary ksztalt (regula baseline per czlonek) dawal DOKLADNIE `2 * pelny`:
-    # kazdy skladnik podwajal sie razem z czlonkiem. Po kolapsie stala czesc baselinu (tozsamosci, zrodla,
+    # ANTY-TAUTOLOGIA / REGRESJA. Pierwotny ksztalt (regula baseline per czlonek) dawal DOKLADNIE `2 * pelny`:
+    # kazdy skladnik podwajal sie razem z czlonkiem. Od kolapsu stala czesc baselinu (tozsamosci, zrodla,
     # usługi, metody) nie podwaja sie, wiec wynik MUSI byc ostro mniejszy. Cofniecie kolapsu w rendererze
     # albo w tym narzedziu zapala te asercje, a nie tylko zmienia liczbe w raporcie.
     check("budzet: baseline NIE mnozy sie przez liczbe czlonkow", podwojony < 2 * pelny,
           f"jeden={pelny} dwaj={podwojony} (stary ksztalt dalby {2 * pelny})")
+
+    # ...i asercja rozlaczajaca oba ksztalty, ktorych ta zmiana dotyczy. `podwojony < 2 * pelny` bylo prawda
+    # RUWNIEZ dla listy zasobow (rosla o 1 na regule, a nie o caly koszt reguly), wiec sama w sobie nie
+    # odroznia „lista" od „gwiazdka". Ta odroznia: koszt baselinu ma byc IDENTYCZNY przy jednym i dwoch
+    # czlonkach, a mierzymy go jako roznice miedzy konfiguracja z baselinem i bez niego.
+    check("budzet: koszt baselinu jest STALY (ten sam przy jednym i przy dwoch czlonkach)",
+          pelny - goly == podwojony - goly_podwojony,
+          f"baseline przy jednym={pelny - goly} przy dwoch={podwojony - goly_podwojony}")
 
     check("budzet: zasoby zewnetrzne (s3://) sa liczone", bez_s3 < pelny,
           f"pelny={pelny} bez_zewnetrznych={bez_s3}")
