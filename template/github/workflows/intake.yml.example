@@ -184,8 +184,9 @@ jobs:
       # Before this, the ticketing channel opened its pull request without validating anything it had just
       # written: schema and OPA hung off `pull_request` only. A malformed or policy-breaking member file
       # therefore reached a PR, and whether it was ever CHECKED depended on which token opened that PR —
-      # a pull request opened with GITHUB_TOKEN starts no `pull_request` workflow. A channel whose gates
-      # live entirely on the other side of a step that may not happen is not gated.
+      # a pull request opened with GITHUB_TOKEN collects no check at all (the runs are created and then
+      # park unexecuted; measured, see the pull-request step below). A channel whose gates live entirely
+      # on the other side of a step that may not happen is not gated.
       - name: schema
         run: check-jsonschema --schemafile schemas/member.schema.json perimeter/members/*.yaml
 
@@ -220,11 +221,28 @@ jobs:
       #     the default): `GitHub Actions is not permitted to create or approve pull requests`. The branch
       #     is already pushed at that point, so the channel fails HALF-DONE. Turning that setting on is not
       #     the fix and this file does not ask for it: it also grants Actions the right to APPROVE pull
-      #     requests, and a pull request created with GITHUB_TOKEN triggers no `pull_request` workflow at
-      #     all — so the channel would start producing member-file PRs that no gate ever looks at.
-      #   * A GitHub App installation token (`secrets.INTAKE_PR_TOKEN`) — creation works AND the resulting
-      #     pull request runs `validate` and `plan` like any human one. That is the supported configuration;
-      #     `tools/bootstrap_github.sh` names it as a prerequisite.
+      #     requests, and a pull request created with GITHUB_TOKEN collects NO check at all — so the channel
+      #     would start producing member-file PRs that no gate ever looks at.
+      #
+      #     HOW that happens, measured with the setting on for a few minutes (2026-08-11, #1977), because
+      #     the earlier wording here quoted GitHub's recursion block instead of a run: the `pull_request`
+      #     runs ARE created — one per workflow matching the paths, `validate` and `plan` — but each one is
+      #     `completed` / `action_required` / `jobs: []`, so nothing executes out of them. On the pull
+      #     request they belong to: `check-runs.total_count` 0, combined status `pending` with 0 entries,
+      #     `gh pr checks` "no checks reported", and the pull request MERGEABLE regardless. What ties this
+      #     to the TOKEN rather than to the trigger paths: `action_required` appeared on exactly those two
+      #     runs out of the last 100 in this repository, while human pull requests the same day had
+      #     `validate` and `plan` green (`triggering_actor: github-actions[bot]`).
+      #
+      #     The correction does not rescue the switch, which is why the conclusion above is unchanged: the
+      #     parked runs are visible in the Actions tab, so somebody COULD approve them by hand, but nothing
+      #     requires it and the pull request merges without it. A reviewer looking at such a PR sees a full
+      #     set of zeros, not a red gate.
+      #   * A GitHub App installation token (`secrets.INTAKE_PR_TOKEN`) — creation works, and the resulting
+      #     pull request is expected to run `validate` and `plan` like any human one. That is the supported
+      #     configuration; `tools/bootstrap_github.sh` names it as a prerequisite. Expected, not measured:
+      #     there is no App yet, so there was nothing to measure. One run closes that gap — open a PR with
+      #     the App token and read `check-runs.total_count > 0`.
       #
       # The fallback to `github.token` is kept so the channel degrades to a LOUD, harmless failure instead
       # of a silent one, and the step below cleans up the branch it left behind.
