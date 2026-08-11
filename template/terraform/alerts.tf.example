@@ -234,6 +234,39 @@ resource "google_monitoring_metric_descriptor" "wygasli" {
   unit         = "1"
 }
 
+# --- PROPAGACJA DESKRYPTORÓW ---------------------------------------------------------------------
+#
+# ZMIERZONE NA PIERWSZYM APPLY, nie przewidziane: dwie polityki odbiły się od API komunikatem
+#
+#   Error 404: Cannot find metric(s) that match type = "custom.googleapis.com/vpcsc/…".
+#   If a metric was created recently, it could take up to 10 minutes to become available.
+#
+# mimo że Terraform utworzył te deskryptory chwilę wcześniej, W TYM SAMYM przebiegu. Cloud Monitoring
+# potwierdza utworzenie deskryptora, zanim stanie się on widoczny dla walidacji polityk alertów — więc
+# `depends_on` NIE WYSTARCZA: zależność jest spełniona, a zasób jeszcze nie istnieje dla konsumenta.
+#
+# Skutek bez tego bloku dotyczy WYŁĄCZNIE wdrożenia od zera i jest cichy w najgorszy sposób: część polityk
+# powstaje, część nie, apply kończy się czerwono — a operator, który po prostu ponowi przebieg, dostanie
+# zielono i nigdy się nie dowie, że pierwszy raz nie zadziałał. To jest dokładnie ta klasa błędu, którą
+# ten plik ma tropić, tylko o piętro niżej.
+#
+# 120 s pokrywa przypadek zaobserwowany (deskryptory były widoczne po kilkudziesięciu sekundach). Google
+# deklaruje do 10 minut — jeśli kiedyś trafi się gorszy przebieg, PONOWIENIE APPLY JEST BEZPIECZNE, bo
+# deskryptory są już utworzone i `time_sleep` odczeka ponownie tylko przy pierwszym tworzeniu.
+resource "time_sleep" "deskryptory_widoczne" {
+  count = local.alert_count
+
+  create_duration = "120s"
+
+  depends_on = [
+    google_monitoring_metric_descriptor.apply_pending,
+    google_monitoring_metric_descriptor.budzet_procent,
+    google_monitoring_metric_descriptor.budzet_dni,
+    google_monitoring_metric_descriptor.dryf,
+    google_monitoring_metric_descriptor.wygasli,
+  ]
+}
+
 # --- ALERT 1: `apply` nie doszedł ------------------------------------------------------------------
 #
 # KTO TO ODCZUWA: dywizja, która zmergowała wniosek i usłyszała „zrobione", a jej projekt nie jest
@@ -259,6 +292,8 @@ resource "google_monitoring_metric_descriptor" "wygasli" {
 resource "google_monitoring_alert_policy" "vpcsc_apply_stale" {
   count = local.alert_count
 
+  depends_on = [time_sleep.deskryptory_widoczne]
+
   project      = local.monitoring.project_id
   display_name = "VPC-SC: zmiana granicy zmergowana i niezastosowana"
   combiner     = "OR"
@@ -274,9 +309,17 @@ resource "google_monitoring_alert_policy" "vpcsc_apply_stale" {
       ])
       comparison      = "COMPARISON_GT"
       threshold_value = local.progi.apply_pending_seconds
-      # `duration = 0s`, bo próg SAM JEST oknem czasowym: metryka mierzy wiek zmiany, więc przekroczenie
-      # trwa już tyle, ile wynosi próg. Dokładanie tu drugiego okna podwajałoby opóźnienie bez powodu.
-      duration = "0s"
+      # `60s`, a nie `0s` — i to jest OGRANICZENIE API, nie wybór. Pierwszy apply na żywej organizacji
+      # odrzucił tę politykę:
+      #   Error 400: Field alert_policy.conditions[0].condition_threshold.evaluation_missing_data had an
+      #   invalid value of "EVALUATION_MISSING_DATA_INACTIVE": Conditions setting evaluation_missing_data
+      #   must have a non-zero duration.
+      # Czyli: JAWNE powiedzenie „brak danych nie jest przekroczeniem progu" wymaga niezerowego okna.
+      # Wybór był między zerowym oknem a jawną obsługą braku danych — i drugie jest ważniejsze, bo bez
+      # niego jeden spóźniony cron GitHuba dawałby alert o nieistniejącej zaległości. Koszt: minuta
+      # opóźnienia na progu, który i tak wynosi godzinę. Próg nadal SAM JEST oknem czasowym (metryka
+      # mierzy wiek), więc to okno nie dokłada drugiego progu — tylko spełnia warunek API.
+      duration = "60s"
 
       # Brak danych NIE jest tu przekroczeniem progu — od tego jest warunek niżej, który mówi o czym innym
       # („nie wiem") i ma własne, dłuższe okno. Bez tego ustawienia jeden spóźniony cron GitHuba dawałby
@@ -362,6 +405,8 @@ resource "google_monitoring_alert_policy" "vpcsc_apply_stale" {
 # polityki: dzięki temu incydent NIESIE W SOBIE, o którą konfigurację chodzi.
 resource "google_monitoring_alert_policy" "vpcsc_attribute_budget" {
   count = local.alert_count
+
+  depends_on = [time_sleep.deskryptory_widoczne]
 
   project      = local.monitoring.project_id
   display_name = "VPC-SC: budżet atrybutów perimetru"
@@ -450,6 +495,8 @@ resource "google_monitoring_alert_policy" "vpcsc_attribute_budget" {
 resource "google_monitoring_alert_policy" "vpcsc_attribute_budget_exhaustion" {
   count = local.alert_count
 
+  depends_on = [time_sleep.deskryptory_widoczne]
+
   project      = local.monitoring.project_id
   display_name = "VPC-SC: budżet atrybutów wyczerpie się w mniej niż próg krytyczny"
   combiner     = "OR"
@@ -525,6 +572,8 @@ resource "google_monitoring_alert_policy" "vpcsc_attribute_budget_exhaustion" {
 resource "google_monitoring_alert_policy" "vpcsc_drift" {
   count = local.alert_count
 
+  depends_on = [time_sleep.deskryptory_widoczne]
+
   project      = local.monitoring.project_id
   display_name = "VPC-SC: granica rozjechana z Gitem (dryf)"
   combiner     = "OR"
@@ -598,6 +647,8 @@ resource "google_monitoring_alert_policy" "vpcsc_drift" {
 # nie da się odpalić sztucznie i zostaje deklaracją. Godzina wystarcza, żeby wykluczyć migotanie.
 resource "google_monitoring_alert_policy" "vpcsc_members_expired" {
   count = local.alert_count
+
+  depends_on = [time_sleep.deskryptory_widoczne]
 
   project      = local.monitoring.project_id
   display_name = "VPC-SC: członek granicy po dacie review_by"

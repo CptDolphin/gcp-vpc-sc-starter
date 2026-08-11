@@ -1589,6 +1589,29 @@ def test_alerty() -> None:
     bez_kanalu = [n for n, tresc in polityki if "notification_channels" not in tresc]
     check("ZADNA polityka alertu nie jest bez kanalu", not bez_kanalu, str(bez_kanalu))
 
+    # 2b. DWA DEFEKTY ZMIERZONE NA PIERWSZYM APPLY, oba niewidoczne dla `validate` i `plan`:
+    #   * `evaluation_missing_data` wymaga NIEZEROWEGO `duration` (Error 400 z API);
+    #   * deskryptor metryki nie jest widoczny dla walidacji polityki od razu po utworzeniu (Error 404
+    #     „Cannot find metric(s)" na deskryptorze utworzonym w TYM SAMYM przebiegu) — `depends_on` tego
+    #     nie rozwiązuje, bo zależność jest spełniona, a zasób jeszcze nie istnieje dla konsumenta.
+    # Bez tych dwóch bramek wdrożenie OD ZERA kończy się częściowo, a ponowiony apply świeci zielono
+    # i nikt się nie dowiaduje, że pierwszy raz nie zadziałał.
+    for nazwa, tresc in polityki:
+        for war in re.findall(r"condition_threshold \{(.*?)\n    \}", tresc, re.S):
+            if "evaluation_missing_data" not in war:
+                continue
+            okno = re.search(r'duration\s+= "(\S+?)"', war)
+            check(f"{nazwa}: evaluation_missing_data ma NIEZEROWE okno (wymog API)",
+                  okno is not None and okno.group(1) not in ("0s", "0"), war[:200])
+    czekanie = re.search(r'resource "time_sleep" "(\w+)"', alerts)
+    check("jest oczekiwanie na propagacje deskryptorow metryk", czekanie is not None)
+    if czekanie:
+        wlasne = [n for n, t in polityki if "custom.googleapis.com" in t or "local.metryka" in t]
+        bez_czekania = [n for n, t in polityki
+                        if n in wlasne and f"time_sleep.{czekanie.group(1)}" not in t]
+        check("KAZDA polityka na metryce wlasnej czeka na propagacje deskryptora",
+              not bez_czekania, str(bez_czekania))
+
     # 3. ALERT O APPLY ŁAPIE TRZY TRYBY AWARII — warunek o WIEKU, nie nasłuch zdarzenia — plus czwarty
     # (martwy obserwator) przez BRAK danych. Bez drugiego warunku martwy `watch.yml` daje wykres zamrożony
     # na ostatniej dobrej wartości, czyli ciszę wyglądającą na zdrowie.
