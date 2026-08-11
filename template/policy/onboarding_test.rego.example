@@ -105,6 +105,92 @@ test_promotion_with_violations_denied if {
 	count(deny) > 0 with input as bad
 }
 
+# --- wyjątek od bramki promocji (onboarding.promotion_waivers) --------------------------------------
+#
+# Wyjątek jest bramką samą w sobie — więc każdy test pozytywny ma tu parę negatywną. Wyjątek, który
+# przepuszcza wszystko, jest wyłącznikiem bramki pod inną nazwą.
+
+waiver(nadpisania) := object.union(
+	{
+		"member": "example-prj-example-vertex-dev",
+		"justification": "projekt utworzony pod pomiar; okno obserwacji liczone od zera, ruch w oknie pochodzi wylacznie z wlasnych sond",
+		"approved_by": "sec@example.com",
+		"expires": "2026-08-01",
+	},
+	nadpisania,
+)
+
+polityka_z_wyjatkiem(w) := object.union(base_policy, {"onboarding": object.union(base_policy.onboarding, {"promotion_waivers": [w]})})
+
+promowany := object.union(healthy_member, {"stage": "enforced", "dry_run_since": "2026-07-15"})
+
+wejscie_promocji(w, naruszen) := object.union(healthy_input, {
+	"policy": polityka_z_wyjatkiem(w),
+	"members": {"example-prj-example-vertex-dev": promowany},
+	"violations_last_window": {"example-prj-example-vertex-dev": naruszen},
+})
+
+test_waiver_przepuszcza_promocje_przed_oknem if {
+	count(deny) == 0 with input as wejscie_promocji(waiver({"accept_dry_run_days_below_minimum": true}), 0)
+}
+
+# Wyjątek wygasły ma NIE działać — inaczej `expires` jest komentarzem, nie warunkiem.
+test_waiver_wygasly_nie_przepuszcza if {
+	count(deny) > 0 with input as wejscie_promocji(waiver({"accept_dry_run_days_below_minimum": true, "expires": "2026-07-19"}), 0)
+}
+
+# Uzasadnienie poniżej progu = wyjątek nieważny. Bez tego pole degeneruje się do „ok".
+test_waiver_bez_uzasadnienia_nie_przepuszcza if {
+	count(deny) > 0 with input as wejscie_promocji(waiver({"accept_dry_run_days_below_minimum": true, "justification": "bo tak"}), 0)
+}
+
+# Wyjątek dla członka A nie zwalnia członka B — inaczej jedna decyzja rozlewa się na całą organizację.
+test_waiver_innego_czlonka_nie_przepuszcza if {
+	count(deny) > 0 with input as wejscie_promocji(waiver({"accept_dry_run_days_below_minimum": true, "member": "example-inny-projekt"}), 0)
+}
+
+# `accept_violations_up_to` jest LICZBĄ: pokrywa 2, nie pokrywa 3.
+test_waiver_pokrywa_naruszenia_do_limitu if {
+	count(deny) == 0 with input as wejscie_promocji(waiver({"accept_dry_run_days_below_minimum": true, "accept_violations_up_to": 2}), 2)
+}
+
+test_waiver_nie_pokrywa_powyzej_limitu if {
+	count(deny) > 0 with input as wejscie_promocji(waiver({"accept_dry_run_days_below_minimum": true, "accept_violations_up_to": 2}), 3)
+}
+
+# Wyjątek na naruszenia NIE zwalnia z okna obserwacji — dwa warunki, dwie zgody.
+test_waiver_na_naruszenia_nie_zwalnia_z_okna if {
+	count(deny) > 0 with input as wejscie_promocji(waiver({"accept_violations_up_to": 5}), 1)
+}
+
+# Wyjątek NIE zwalnia z obowiązku posiadania raportu: „nie zmierzyliśmy" nie jest stanem, o którym da się
+# podjąć decyzję. Bez tego testu wyjątek stałby się wyłącznikiem całej bramki.
+test_waiver_nie_zastepuje_raportu if {
+	bad := json.patch(wejscie_promocji(waiver({"accept_dry_run_days_below_minimum": true, "accept_violations_up_to": 9}), 0), [
+		{"op": "remove", "path": "/violations_last_window/example-prj-example-vertex-dev"},
+	])
+	count(deny) > 0 with input as bad
+}
+
+# Literówka w nazwie członka ma być głośna. Cichy no-op wygląda jak działający wyjątek.
+test_waiver_na_nieistniejacego_czlonka_denied if {
+	bad := object.union(healthy_input, {"policy": polityka_z_wyjatkiem(waiver({"accept_dry_run_days_below_minimum": true, "member": "nie-ma-takiego"}))})
+	count(deny) > 0 with input as bad
+}
+
+# Wyjątek, który nie zwalnia z niczego, wygląda w diffie jak decyzja i nie robi nic.
+test_waiver_pusty_denied if {
+	bad := object.union(healthy_input, {"policy": polityka_z_wyjatkiem(waiver({}))})
+	count(deny) > 0 with input as bad
+}
+
+# BRAK wyjątku musi zostawić bramkę uzbrojoną. To jest kontrola na fail-open: gdyby predykaty wyjątku
+# były niezdefiniowane zamiast domyślnych, całe reguły `deny` przestałyby się wykonywać i promocja
+# przechodziłaby zawsze — bramka wyglądająca na obecną, przepuszczająca wszystko.
+test_bez_wyjatku_bramka_dalej_odrzuca if {
+	count(deny) > 0 with input as object.union(healthy_input, {"members": {"example-prj-example-vertex-dev": promowany}})
+}
+
 test_expired_review_denied if {
 	m := object.union(healthy_member, {"review_by": "2026-07-01"})
 	bad := object.union(healthy_input, {"members": {"example-prj-example-vertex-dev": m}})
