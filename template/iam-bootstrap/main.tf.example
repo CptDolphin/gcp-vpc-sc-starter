@@ -328,6 +328,61 @@ resource "google_project_iam_member" "apply_monitoring" {
   member  = "serviceAccount:${google_service_account.apply.email}"
 }
 
+# --- 3e. kanal maszynowy alertow (Pub/Sub) --------------------------------------------------------
+# DLACZEGO TO STOI W STACKU CZLOWIEKA, A NIE W REPO PERIMETRU. Temat Pub/Sub to sciezka WYPROWADZENIA
+# DANYCH: kto moze go utworzyc i nadac na nim prawo publikacji, ten moze zbudowac kanal wynoszacy
+# telemetrie gdzie indziej. Rola `vpcScMonitoringWriter` swiadomie nie ma ani sinkow, ani kubelkow, ani
+# IAM — i Pub/Sub do niej nie wchodzi z tego samego powodu. Pipeline perimetru tworzy WYLACZNIE `kanal`
+# wskazujacy na ten temat (`notificationChannels.create`, ktore juz ma), a temat i grant dostaje gotowe.
+#
+# PO CO TEN KANAL W OGOLE, skoro nikogo nie budzi: Cloud Monitoring NIE MA publicznego API do listowania
+# incydentow (`GET /v3/projects/<p>/incidents` odpowiada `404 Method not found` — sprawdzone). Bez kanalu
+# maszynowego jedynym dowodem, ze alert odpalil, jest wiadomosc w cudzej skrzynce albo zrzut z konsoli —
+# czyli nic, co da sie zapisac w runbooku i sprawdzic automatem. Wiadomosc Pub/Sub niesie pelny obiekt
+# incydentu (`incident.state`, polityka, warunek, zaobserwowana wartosc). Drugie, trwale zastosowanie:
+# to jest wejscie dla SIEM-u — alerty granicy ida tam ta sama droga co reszta telemetrii bezpieczenstwa.
+resource "google_pubsub_topic" "alerty" {
+  count = var.monitoring_project_id == "" ? 0 : 1
+
+  project = var.monitoring_project_id
+  name    = var.alert_topic_name
+}
+
+# Subskrypcja istnieje po to, zeby wiadomosci PRZETRWALY do momentu, w ktorym ktos po nie siegnie.
+# Temat bez subskrypcji wyrzuca kazda wiadomosc natychmiast — dowod odpalenia alertu przepadalby dokladnie
+# wtedy, gdy nikt nie patrzyl, czyli w jedynym przypadku, ktory ma znaczenie.
+resource "google_pubsub_subscription" "alerty" {
+  count = var.monitoring_project_id == "" ? 0 : 1
+
+  project = var.monitoring_project_id
+  name    = "${var.alert_topic_name}-ewidencja"
+  topic   = google_pubsub_topic.alerty[0].id
+
+  message_retention_duration = "604800s" # 7 dni
+  retain_acked_messages      = true
+  expiration_policy {
+    ttl = "" # nigdy nie wygasa — subskrypcja bez ruchu przez 31 dni jest kasowana domyslnie
+  }
+}
+
+# Agent powiadomien Monitoringu musi miec prawo PUBLIKACJI na tym temacie. Bez tego kanal powstaje,
+# konsola pokazuje go jako aktywny, a nie przychodzi ANI JEDNA wiadomosc — czyli kanal, ktory wyglada
+# na uzbrojony i milczy. To ten sam ksztalt awarii co pusta lista `notificationChannels`.
+resource "google_pubsub_topic_iam_member" "monitoring_publisher" {
+  count = var.monitoring_project_id == "" ? 0 : 1
+
+  project = var.monitoring_project_id
+  topic   = google_pubsub_topic.alerty[0].name
+  role    = "roles/pubsub.publisher"
+  member  = "serviceAccount:service-${data.google_project.monitoring[0].number}@gcp-sa-monitoring-notification.iam.gserviceaccount.com"
+}
+
+data "google_project" "monitoring" {
+  count = var.monitoring_project_id == "" ? 0 : 1
+
+  project_id = var.monitoring_project_id
+}
+
 # --- 4. Workload Identity Federation ---------------------------------------------------------------
 # WIF to BRAMA, nie tożsamość: sam z siebie nie nadaje żadnych uprawnień. Decyduje, KTO może impersonować
 # konta serwisowe powyżej — a to one mają role.

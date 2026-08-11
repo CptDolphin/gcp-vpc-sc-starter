@@ -54,6 +54,8 @@ locals {
       capacity = { email = "" }
       security = { email = "" }
     }
+    # `machine` NIE wchodzi do atrapy: jest OPCJONALNY, a `lookup` niżej i tak go nie wymaga. Atrapa
+    # opisuje klucze OBOWIĄZKOWE — dołożenie tu opcjonalnego zmusiłoby każde wdrożenie do jego posiadania.
     thresholds = {
       attribute_budget_percent = 70
       days_to_limit_warning    = 90
@@ -89,11 +91,22 @@ locals {
   kanal_pojemnosc = local.alerting_enabled ? concat(
     local.monitoring.notification_channels,
     [google_monitoring_notification_channel.capacity[0].id],
+    local.ma_kanal_maszynowy ? [google_monitoring_notification_channel.machine[0].id] : [],
   ) : local.monitoring.notification_channels
+
+  # KANAŁ MASZYNOWY (Pub/Sub) — opcjonalny, dokładany do OBU list. Nie budzi nikogo: odpowiada na pytanie
+  # „czym udowodnić, że alert odpalił". Cloud Monitoring nie ma publicznego API do listowania incydentów
+  # (`/v3/projects/X/incidents` → 404 `Method not found`, sprawdzone), więc bez niego jedynym dowodem
+  # zadziałania alertu jest wiadomość w cudzej skrzynce — czyli nic, co da się sprawdzić automatem.
+  # Temat tworzy `iam-bootstrap` (stack człowieka) razem z prawem publikacji dla agenta powiadomień;
+  # ten stack tworzy WYŁĄCZNIE kanał, więc rola CI nie rośnie o ani jedno uprawnienie do Pub/Suba.
+  kanal_maszynowy    = try([local.alerting.channels.machine.pubsub_topic], [])
+  ma_kanal_maszynowy = local.alerting_enabled && length(local.kanal_maszynowy) > 0
 
   kanal_bezpieczenstwo = local.alerting_enabled ? concat(
     local.monitoring.notification_channels,
     [google_monitoring_notification_channel.security[0].id],
+    local.ma_kanal_maszynowy ? [google_monitoring_notification_channel.machine[0].id] : [],
   ) : local.monitoring.notification_channels
 
   # OBA KANAŁY — wyłącznie dla odmowy w trybie egzekwowanym (`monitoring.tf`). To jedyny alert w tym
@@ -133,6 +146,23 @@ resource "google_monitoring_notification_channel" "capacity" {
 
   # `force_delete` świadomie NIE jest ustawione: kanał wpięty w politykę alertu ma się NIE dać skasować
   # jednym `terraform destroy`, bo to zostawia polityki bez odbiorcy i nic tego nie zgłasza.
+}
+
+resource "google_monitoring_notification_channel" "machine" {
+  count = local.ma_kanal_maszynowy ? 1 : 0
+
+  project      = local.monitoring.project_id
+  display_name = "VPC-SC — kanal maszynowy (Pub/Sub)"
+  description  = "Pelny obiekt incydentu na temat Pub/Sub. Dowod odpalenia alertu mozliwy do sprawdzenia automatem oraz wejscie dla SIEM-u. Nie budzi nikogo."
+  type         = "pubsub"
+
+  labels = {
+    # `try(...)`, a nie `[0]` — DOKŁADNIE ten sam powód, co przy atrapie konfiguracji wyżej: `terraform
+    # validate` sprawdza wyrażenia w atrybutach zasobu również wtedy, gdy `count = 0` i nie powstanie ani
+    # jedna instancja. Indeks na pustej liście daje wtedy twardy błąd („the collection has no elements")
+    # i wywraca walidację wdrożenia, które tego kanału świadomie nie ma. Zmierzone.
+    topic = try(local.kanal_maszynowy[0], "")
+  }
 }
 
 resource "google_monitoring_notification_channel" "security" {

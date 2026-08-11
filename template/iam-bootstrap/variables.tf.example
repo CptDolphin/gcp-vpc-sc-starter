@@ -44,6 +44,19 @@ variable "apply_environment" {
   }
 }
 
+variable "alert_topic_name" {
+  description = "Nazwa tematu Pub/Sub dla kanalu maszynowego alertow (musi zgadzac sie z `channels.machine.pubsub_topic` w perimeter/alerting.yaml). Kanal jest OPCJONALNY po stronie perimetru, ale temat powstaje razem z projektem monitoringu — nieuzywany temat nic nie kosztuje, a brakujacy blokuje utworzenie kanalu."
+  type        = string
+  default     = "vpcsc-alerts"
+
+  validation {
+    # Sama nazwa, nie pelna sciezka. Pelna sciezka wklejona tutaj dalaby temat o nazwie zawierajacej
+    # ukosniki — API go odrzuci, ale dopiero na apply.
+    condition     = can(regex("^[a-zA-Z][a-zA-Z0-9._~%+-]{2,254}$", var.alert_topic_name))
+    error_message = "alert_topic_name to SAMA nazwa tematu, bez prefiksu projects/<projekt>/topics/."
+  }
+}
+
 variable "watch_ref" {
   description = "Ref GitHuba, z którego wolno impersonować konto `watch` (obserwator granicy, `watch.yml`). Domyślnie gałąź domyślna. WĘŻEJ niż konto `plan`, mimo że `watch` robi mniej: `plan` jest read-only, a `watch` MA prawo zapisu metryki — czyli prawo do skłamania o stanie granicy. Token z pull requesta niesie `refs/pull/N/merge`, więc do tej wartości nie pasuje."
   type        = string
