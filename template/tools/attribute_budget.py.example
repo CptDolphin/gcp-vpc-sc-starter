@@ -41,8 +41,15 @@ import sys
 
 
 def operations_cost(rule: dict) -> int:
-    """Usługa + każdy selektor metody. `methods: ["*"]` to jeden selektor, nie zero."""
-    return sum(1 + len(op.get("methods", [])) for op in rule.get("operations", []))
+    """Usługa + każdy selektor. `methods: ["*"]` to jeden selektor, nie zero.
+
+    `permissions` liczy się IDENTYCZNIE jak `methods`: w API to ta sama lista `methodSelectors`, tylko
+    wypełniona drugim polem. Reguła egress do zasobu zewnętrznego (BigQuery Omni) używa WYŁĄCZNIE
+    `permissions` — pominięcie ich tutaj zaniżałoby budżet dokładnie o te reguły, które jako jedyne
+    wypuszczają dane poza Google Cloud.
+    """
+    return sum(1 + len(op.get("methods", [])) + len(op.get("permissions", []))
+               for op in rule.get("operations", []))
 
 
 def baseline_sources_cost(rule: dict) -> int:

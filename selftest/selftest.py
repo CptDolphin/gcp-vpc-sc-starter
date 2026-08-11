@@ -2576,6 +2576,46 @@ def test_schemas() -> None:
     p = sh(["check-jsonschema", "--schemafile", "schemas/member.schema.json", "czlonek-wyjatek-krotki.yaml"], cwd=ROOT)
     check("schema czlonka ODRZUCA wyjatek bez uzasadnienia (min. 20 znakow)", p.returncode != 0, p.stdout[-400:])
 
+    # KSZTALTY REGUL SA ROZDZIELONE PER KIERUNEK — i to jest bramka, nie porzadek w pliku.
+    #
+    # Do 2026-08 `ingress` i `egress` dzielily jedna definicje (`ruleList`), wiec `access_levels_from`
+    # przechodzilo schemat TAKZE w regule egress. Renderer sklada `egress_from` wylacznie z `identities`,
+    # wiec taka deklaracja byla CICHO GUBIONA: schemat zielony, OPA zielone, budzet atrybutow LICZYL to
+    # pole, a wyrenderowana regula autoryzowala z dowolnego miejsca. Zmierzone na planie: `egress_from.sources`
+    # puste. To najgorszy wariant bledu w tym materiale — deklaracja mowi „wymagaj sieci korporacyjnej",
+    # a granica jej nie stawia.
+    #
+    # Kazdy przypadek nizej to POJEDYNCZA mutacja poprawnego profilu; komplet dzisiejszych profili
+    # przechodzi (asercja „schema profile.schema akceptuje przyklady" wyzej), wiec test nie moze przejsc
+    # dlatego, ze schemat odrzuca wszystko.
+    profil = yaml.safe_load((ROOT / "perimeter/profiles/vertex-batch-training.yaml").read_text())
+
+    def _schema_odrzuca(nazwa: str, mutacja) -> None:
+        import copy
+        zly = copy.deepcopy(profil)
+        mutacja(zly)
+        sciezka = ROOT / f"profil-{nazwa}.yaml"
+        sciezka.write_text(yaml.safe_dump(zly, sort_keys=False, allow_unicode=True))
+        wynik = sh(["check-jsonschema", "--schemafile", "schemas/profile.schema.json", sciezka.name], cwd=ROOT)
+        check(f"schema profilu ODRZUCA {nazwa}", wynik.returncode != 0, wynik.stdout[-400:])
+
+    def _egress_access_level(d):
+        d["egress"][0]["access_levels_from"] = "access_levels"
+
+    def _ingress_cel_egressowy(d):
+        d["ingress"][0]["to_projects_from"] = "data_source_projects"
+
+    def _oba_selektory(d):
+        d["egress"][0]["operations"][0]["permissions"] = ["externalResource.read"]
+
+    def _bez_selektorow(d):
+        del d["egress"][0]["operations"][0]["methods"]
+
+    _schema_odrzuca("access-levels-from-w-egresie", _egress_access_level)
+    _schema_odrzuca("cel-egressowy-w-ingresie", _ingress_cel_egressowy)
+    _schema_odrzuca("operacje-z-methods-I-permissions", _oba_selektory)
+    _schema_odrzuca("operacje-bez-zadnego-selektora", _bez_selektorow)
+
 
 # ----------------------------------------------------------------- samodzielnosc materialu
 def test_samodzielnosc() -> None:

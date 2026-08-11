@@ -163,3 +163,85 @@ test_perimeter_delete_denied if {
 	}
 	count(deny) > 0 with input as inp
 }
+
+# --- egress: te same bramki, ten sam ksztalt wejscia --------------------------------------------------
+#
+# Do 2026-08-11 ten plik nie mial ANI JEDNEGO przypadku egressowego. Bramki na tozsamosci i metody
+# faktycznie obejmowaly oba kierunki (`array.concat(ingress_from, egress_from)`), ale wiedzialo sie o tym
+# z lektury regul, nie z testu — a dwie bramki (`resources: ["*"]` i `roles`) obu kierunkow NIE obejmowaly
+# i nikt tego nie zauwazyl, bo nie bylo czym zauwazyc.
+good_egress := {
+	"address": "google_access_context_manager_service_perimeter_dry_run_egress_policy.rule[\"x\"]",
+	"type": "google_access_context_manager_service_perimeter_dry_run_egress_policy",
+	"values": {
+		"egress_from": [{"identities": ["serviceAccount:a@b.iam.gserviceaccount.com"], "sources": []}],
+		"egress_to": [{
+			"resources": ["projects/222222222222"],
+			"external_resources": [],
+			"operations": [{"service_name": "storage.googleapis.com", "method_selectors": [{"method": "google.storage.objects.get"}]}],
+		}],
+	},
+}
+
+test_good_egress_passes if {
+	count(deny) == 0 with input as plan_with([good_egress])
+}
+
+# Regula egress NIE ma `sources` i to jest poprawne — bramka „ingress bez access levelu" nie moze na nia
+# spasc. Bez tego testu kazde rozszerzenie tamtej bramki na oba kierunki wywracaloby KAZDY egress.
+test_egress_bez_sources_przechodzi if {
+	count(deny) == 0 with input as plan_with([good_egress])
+}
+
+test_egress_any_identity_denied if {
+	bad := json.patch(good_egress, [{"op": "add", "path": "/values/egress_from/0/identity_type", "value": "ANY_IDENTITY"}])
+	count(deny) > 0 with input as plan_with([bad])
+}
+
+test_egress_empty_identities_denied if {
+	bad := json.patch(good_egress, [{"op": "replace", "path": "/values/egress_from/0/identities", "value": []}])
+	count(deny) > 0 with input as plan_with([bad])
+}
+
+test_egress_malformed_identity_denied if {
+	bad := json.patch(good_egress, [{"op": "replace", "path": "/values/egress_from/0/identities", "value": ["serviceAccount:a@b.iam.gserviceaccounts.com"]}])
+	count(deny) > 0 with input as plan_with([bad])
+}
+
+test_egress_wildcard_method_denied if {
+	bad := json.patch(good_egress, [{"op": "replace", "path": "/values/egress_to/0/operations/0/method_selectors/0/method", "value": "*"}])
+	count(deny) > 0 with input as plan_with([bad])
+}
+
+# LUKA ZMIERZONA 2026-08-11: przechodzilo, podczas gdy ingressowy blizniak byl odrzucany. Egress `"*"`
+# znaczy „dowolny zasob POZA perimetrem", czyli wiecej niz ingressowe „dowolny projekt W perimetrze".
+test_egress_wildcard_resources_denied if {
+	bad := json.patch(good_egress, [{"op": "replace", "path": "/values/egress_to/0/resources", "value": ["*"]}])
+	count(deny) > 0 with input as plan_with([bad])
+}
+
+# LUKA ZMIERZONA 2026-08-11: `roles` to trzecia droga wyrazenia zakresu i zadna bramka na metody jej nie widzi.
+test_egress_roles_denied if {
+	bad := json.patch(good_egress, [{"op": "add", "path": "/values/egress_to/0/roles", "value": ["roles/owner"]}])
+	count(deny) > 0 with input as plan_with([bad])
+}
+
+# Selektor `permission` omijal bramke wildcardu w calosci — pilnowala wylacznie pola `method`.
+test_egress_wildcard_permission_denied if {
+	bad := json.patch(good_egress, [{"op": "replace", "path": "/values/egress_to/0/operations/0/method_selectors", "value": [{"permission": "*"}]}])
+	count(deny) > 0 with input as plan_with([bad])
+}
+
+# Ksztalt, ktory JAKO JEDYNY dziala dla zasobow zewnetrznych (zmierzone na zywym ACM) — musi przechodzic,
+# inaczej bramka blokuje jedyna poprawna regule BigQuery Omni.
+test_egress_omni_permission_przechodzi if {
+	omni := json.patch(good_egress, [
+		{"op": "replace", "path": "/values/egress_to/0/resources", "value": []},
+		{"op": "replace", "path": "/values/egress_to/0/external_resources", "value": ["s3://przyklad"]},
+		{"op": "replace", "path": "/values/egress_to/0/operations", "value": [{
+			"service_name": "bigquery.googleapis.com",
+			"method_selectors": [{"permission": "externalResource.read"}],
+		}]},
+	])
+	count(deny) == 0 with input as plan_with([omni])
+}

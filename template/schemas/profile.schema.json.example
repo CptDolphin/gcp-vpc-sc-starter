@@ -54,15 +54,61 @@
       }
     },
     "ingress": {
-      "$ref": "#/$defs/ruleList"
+      "$ref": "#/$defs/ingressRules"
     },
     "egress": {
-      "$ref": "#/$defs/ruleList"
+      "$ref": "#/$defs/egressRules"
     }
   },
   "$defs": {
-    "ruleList": {
+    "operationList": {
       "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "service"
+        ],
+        "properties": {
+          "service": {
+            "type": "string",
+            "pattern": "^[a-z0-9.-]+\\.googleapis\\.com$"
+          },
+          "methods": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "description": "Metody wypisane jawnie. `*` jest dopuszczalne WYLACZNIE dla uslug, ktorym Access Context Manager nie publikuje listy metod (supportedMethods puste — patrz policy.yaml §services_without_method_selectors); tam jest jedyna wartoscia, jaka API przyjmuje. Schema nie umie tego rozstrzygnac, bo zalezy od stanu API, wiec zawezenie egzekwuja dwie warstwy wyzej: regula OPA (na planie) i tools/check_supported_services.py (na zywej liscie uslug)."
+            }
+          },
+          "permissions": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "description": "Selektory `permission` zamiast `method`. WYMAGANE i JEDYNE dopuszczalne w regule egress z `to_external_from`: API odrzuca tam metody komunikatem `With 'external_resources' set, MethodSelector is only allowed to have permission`. Zmierzone na zywym ACM 2026-08-11."
+            }
+          }
+        },
+        "oneOf": [
+          {
+            "required": [
+              "methods"
+            ]
+          },
+          {
+            "required": [
+              "permissions"
+            ]
+          }
+        ]
+      }
+    },
+    "ingressRules": {
+      "type": "array",
+      "description": "Reguly ingress. `access_levels_from` jest TU i tylko tu — renderer sklada `ingress_from.sources` wylacznie dla ingressu.",
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -86,38 +132,40 @@
             "const": "member_project",
             "description": "Ingress kieruje wyłącznie na projekt członka. Wartość `*` jest niedozwolona z definicji — schema nie dopuszcza innej stałej."
           },
-          "to_projects_from": {
+          "operations": {
+            "$ref": "#/$defs/operationList"
+          }
+        }
+      }
+    },
+    "egressRules": {
+      "type": "array",
+      "description": "Reguly egress. BRAK `access_levels_from` jest DECYZJA, nie przeoczeniem: API to potrafi (`egressFrom.sources.accessLevel` + `sourceRestriction` sa w schemacie providera 7.43.0), ale ten renderer tego NIE sklada. Dopoki go nie sklada, przyjecie tego pola oznaczaloby deklaracje 'wymagaj sieci korporacyjnej' cicho zamieniona na regule autoryzujaca z dowolnego miejsca. Zmierzone: przed ta poprawka pole przechodzilo schemat i OPA, budzet atrybutow je LICZYL (53 -> 54), a `egress_from.sources` w planie zostawalo puste.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "title",
+          "identities_from",
+          "operations"
+        ],
+        "properties": {
+          "title": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{2,60}$"
+          },
+          "identities_from": {
             "type": "string"
           },
-          "operations": {
-            "type": "array",
-            "minItems": 1,
-            "items": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": [
-                "service",
-                "methods"
-              ],
-              "properties": {
-                "service": {
-                  "type": "string",
-                  "pattern": "^[a-z0-9.-]+\\.googleapis\\.com$"
-                },
-                "methods": {
-                  "type": "array",
-                  "minItems": 1,
-                  "items": {
-                    "type": "string",
-                    "description": "Metody wypisane jawnie. `*` jest dopuszczalne WYLACZNIE dla uslug, ktorym Access Context Manager nie publikuje listy metod (supportedMethods puste — patrz policy.yaml §services_without_method_selectors); tam jest jedyna wartoscia, jaka API przyjmuje. Schema nie umie tego rozstrzygnac, bo zalezy od stanu API, wiec zawezenie egzekwuja dwie warstwy wyzej: regula OPA (na planie) i tools/check_supported_services.py (na zywej liscie uslug)."
-                  }
-                }
-              }
-            }
+          "to_projects_from": {
+            "type": "string"
           },
           "to_external_from": {
             "type": "string",
             "description": "Nazwa parametru członka z listą zasobów POZA Google Cloud. Obsługuje wyłącznie BigQuery Omni: s3://BUCKET albo azure://ACCOUNT.blob.core.windows.net/CONTAINER. ARN nie jest formatem, którego oczekuje API — pilnuje tego reguła OPA external_resource_format."
+          },
+          "operations": {
+            "$ref": "#/$defs/operationList"
           }
         }
       }

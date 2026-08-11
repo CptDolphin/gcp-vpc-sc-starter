@@ -244,13 +244,13 @@ locals {
     for k, r in merge(local.ingress_rules_effective, local.egress_rules_all) :
     length(r.identities) + length(lookup(r, "access_levels", [])) + length(r.resources)
     + length(lookup(r, "external_resources", []))
-    + sum(concat([0], [for op in r.operations : 1 + length(op.methods)]))
+    + sum(concat([0], [for op in r.operations : 1 + length(lookup(op, "methods", [])) + length(lookup(op, "permissions", []))]))
   ]))
 
   attribute_usage_enforced = sum(concat([0], [
     for k, r in merge(local.ingress_rules_enforced, local.egress_rules_enforced) :
     length(r.identities) + length(lookup(r, "access_levels", [])) + length(r.resources)
     + length(lookup(r, "external_resources", []))
-    + sum(concat([0], [for op in r.operations : 1 + length(op.methods)]))
+    + sum(concat([0], [for op in r.operations : 1 + length(lookup(op, "methods", [])) + length(lookup(op, "permissions", []))]))
   ]))
 }

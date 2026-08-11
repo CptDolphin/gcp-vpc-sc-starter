@@ -122,6 +122,27 @@ deny contains msg if {
 	msg := sprintf("%s: method=\"*\" na %s — wypisz metody jawnie", [r.address, op.service_name])
 }
 
+# `method_selectors` ma DWA pola i tylko jedno z nich bylo pilnowane. Selektor `permission` jest druga,
+# rownolegla droga wyrazenia zakresu operacji — regula zapisana permisjami omijala wiec bramke wyzej
+# w calosci. WYJATEK dla uslug bez selektorow NIE dotyczy tej sciezki: tam `*` jest jedyna wartoscia,
+# jaka API przyjmuje w polu `method`, a nie w polu `permission`.
+#
+# ZMIERZONE na zywym ACM (2026-08-11): `permission: "*"` na bigquery konczy sie
+# `Error 400: PERMISSION '*' is not supported in bigquery.googleapis.com`, czyli API i tak tego nie
+# przyjmuje. Bramka istnieje mimo to, bo „API i tak odrzuci" znaczy „odrzuci PO review, na obiekcie
+# org-plane" — dokladnie ta zamiana, ktora ten katalog bramek ma cofac.
+deny contains msg if {
+	some r in planned
+	some to_block in array.concat(
+		object.get(r.values, "ingress_to", []),
+		object.get(r.values, "egress_to", []),
+	)
+	some op in object.get(to_block, "operations", [])
+	some sel in object.get(op, "method_selectors", [])
+	sel.permission == "*"
+	msg := sprintf("%s: permission=\"*\" na %s — wypisz uprawnienia jawnie (API i tak odrzuca ten zapis)", [r.address, op.service_name])
+}
+
 # --- zasięg -----------------------------------------------------------------------------------------
 
 # `resources = ["*"]` po stronie ingress oznacza „dowolny projekt w perimetrze", czyli regułę napisaną dla
@@ -131,6 +152,38 @@ deny contains msg if {
 	some to_block in object.get(r.values, "ingress_to", [])
 	"*" in object.get(to_block, "resources", [])
 	msg := sprintf("%s: ingress_to.resources=[\"*\"] — celuj w konkretny projekt członka", [r.address])
+}
+
+# BLIZNIAK REGULY WYZEJ PO STRONIE EGRESS — i przez pol roku go NIE BYLO.
+#
+# ZMIERZONE (2026-08-11, mutacja planu + conftest): ta sama gwiazdka w `egress_to.resources` PRZECHODZILA,
+# podczas gdy `ingress_to.resources` byla odrzucana. Asymetria jest tym gorsza, ze egressowa gwiazdka
+# znaczy WIECEJ: ingress `"*"` to „dowolny projekt W perimetrze" (zbior zamkniety, ktory sami
+# kontrolujemy), a egress `"*"` to „dowolny zasob POZA perimetrem" — czyli dokladne zniesienie granicy
+# w kierunku, dla ktorego ta granica istnieje.
+#
+# Renderer takiego ksztaltu dzis nie produkuje (`resources` powstaje jako `projects/<numer>`), wiec bramka
+# jest obrona przed zmiana renderera i przed regula pisana wprost w HCL — tak samo jak jej ingressowy
+# blizniak, ktory z tego samego powodu byl uznany za wart utrzymania.
+deny contains msg if {
+	some r in planned
+	some to_block in object.get(r.values, "egress_to", [])
+	"*" in object.get(to_block, "resources", [])
+	msg := sprintf("%s: egress_to.resources=[\"*\"] — to znosi granice w kierunku wyjscia; wypisz projekty docelowe", [r.address])
+}
+
+# `egress_to.roles` to TRZECIA droga wyrazenia zakresu (obok `method` i `permission`) i zadna z bramek
+# na metody jej nie widzi: rola IAM opisuje zbior operacji, ktorego nie da sie porownac z lista metod.
+# Renderer tego pola NIE USTAWIA nigdy — jego obecnosc w planie znaczy, ze regula nie powstala
+# z deklaracji w `perimeter/`. Fail-closed: odrzucamy zamiast zgadywac, co ta rola obejmuje.
+deny contains msg if {
+	some r in planned
+	some to_block in object.get(r.values, "egress_to", [])
+	count(object.get(to_block, "roles", [])) > 0
+	msg := sprintf(
+		"%s: egress_to.roles jest ustawione — renderer tego pola nie produkuje, a bramki na metody go nie widza. Wyraz zakres metodami albo uprawnieniami",
+		[r.address],
+	)
 }
 
 # Ingress spoza perimetru bez access levelu opiera się wyłącznie na tożsamości: skradziony token działa
