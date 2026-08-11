@@ -17,7 +17,16 @@ on:
       # nadający wszystkie uprawnienia tego systemu, więc akurat on nie może być jedynym katalogiem bez
       # bramki. Zmierzone na wdrożeniu: „no checks reported on the branch".
       - "iam-bootstrap/**"
-      - ".github/workflows/validate.yml"
+      # `contrib/**`, `tools/**` i CAŁE `.github/workflows/**` — z tego samego powodu, co
+      # `iam-bootstrap/**` wyżej, i wykryte tak samo: „no checks reported on the branch" na pull requeście,
+      # który przestawiał KANAŁ WEJŚCIOWY (`contrib/action.yml` + `external-intake.yml`) i skrypt zakładający
+      # bramki GitHuba (`tools/bootstrap_github.sh`). Guard „actions pinned to a SHA" w tym właśnie workflow
+      # czyta `.github/workflows/*.yml` ORAZ `contrib/action.yml` — czyli bramka na te pliki istniała, ale
+      # odpalała się wyłącznie wtedy, gdy w tym samym PR-ze zmieniało się coś zupełnie innego. Bramka, która
+      # nie widzi zmiany w pliku, który sama sprawdza, jest bramką tylko z nazwy.
+      - "contrib/**"
+      - "tools/**"
+      - ".github/workflows/**"
   workflow_dispatch:
 
 permissions:
