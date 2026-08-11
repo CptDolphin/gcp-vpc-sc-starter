@@ -1,6 +1,6 @@
-# Decyzje, na których stoi ten starter (DEC-1…DEC-10)
+# Decyzje, na których stoi ten starter (DEC-1…DEC-11)
 
-Dziesięć rozstrzygnięć, które określają kształt repozytorium. Kod odsyła tutaj skrótem `DEC-1`…`DEC-10` — jeśli komentarz
+Jedenaście rozstrzygnięć, które określają kształt repozytorium. Kod odsyła tutaj skrótem `DEC-1`…`DEC-11` — jeśli komentarz
 w pliku mówi „(DEC-4)", to znaczy: „powód tej linijki jest opisany w DEC-4, nie zmieniaj jej bez przeczytania".
 
 Każda pozycja ma tę samą strukturę: **decyzja** · **dlaczego** · **co odrzucono i dlaczego**. Odrzucone warianty są
@@ -454,3 +454,96 @@ z `-parallelism=1`: każda reguła to osobny PATCH na tym samym obiekcie org-lev
 - *Grupowanie baseline'u po access levelu / etapie zamiast po tytule.* Dawałoby regułę, której skład zmienia
   się przy promocji dowolnego członka — czyli replace reguły wspólnej w najgorszym możliwym momencie.
   Rozdział dry-run/enforced na dwa warianty tej samej reguły trzyma tę zmienność w liście zasobów.
+
+> **CIĄG DALSZY W DEC-11.** Ostatni akapit powyżej opisuje problem, którego ta decyzja **nie rozwiązała do
+> końca**: lista zasobów została w regule, a `ingress_to.resources` jest `ForceNew`, więc replace reguły
+> wspólnej wracał przy **każdym** wniosku. Liczby „19 + 2 × N" i „2 atrybuty na członka" są więc historyczne —
+> aktualny kształt (`resources = ["*"]`, koszt baseline stały) opisuje DEC-11.
+
+---
+
+## DEC-11 — Reguła baseline celuje w `*`, a nie w listę członków
+
+**Problem — defekt, który powstał razem z DEC-10.** Kolaps zdjął powielanie CAŁEJ reguły baseline na każdego
+członka, ale zostawił w niej listę, która nadal rośnie z każdym wnioskiem: `ingress_to.resources`. To pole jest
+w providerze `hashicorp/google` (zmierzone na 7.43.0) **`ForceNew`**, więc dopisanie jednej pozycji nie jest
+aktualizacją reguły, tylko jej **zastąpieniem**. Zmierzone — stan żywy trzech członków plus jeden nowy członek
+w konfiguracji, `terraform plan -refresh=false`:
+
+```
+# …dry_run_ingress_policy.rule["baseline--platform-violations-read"] must be replaced
+      ~ resources = [ # forces replacement
+# …dry_run_ingress_policy.rule["baseline--security-scanner-read"]    must be replaced
+      ~ resources = [ # forces replacement
+Plan: 4 to add, 1 to change, 2 to destroy.
+```
+
+W konfiguracji **dry-run** replace jest nieszkodliwy: ta konfiguracja niczego nie autoryzuje. Znaczenie ma
+**konfiguracja egzekwowana**. Terraform kasuje przed utworzeniem, więc każda promocja (i każdy wniosek po
+pierwszej promocji, bo zmienia listę obu wariantów reguły) otwierała okno, w którym **żaden** promowany członek
+nie ma reguły skanera ani reguły raportu naruszeń. To jest dokładnie ta awaria, po którą baseline istnieje —
+z tą różnicą, że **powtarzalna przy każdym wniosku**, a nie jednorazowa jak sama migracja z DEC-10. Przy
+50 wnioskach miesięcznie to ~50 okien miesięcznie na całej granicy.
+
+**Decyzja.** `ingress_to.resources = ["*"]` w obu wariantach reguły baseline (`baseline_rules_all`,
+`baseline_rules_enforced`). Dokumentacja VPC-SC (ingress-egress-rules) opisuje to pole wprost: `*` dopasowuje
+**wszystkie zasoby wewnątrz perimetru**, a `spec` i `status` to dwie osobne konfiguracje perimetru, każda
+z własną listą `resources`. Reguła zbiorcza w `spec` obejmuje więc członków dry-run, ta sama reguła
+w `status` — wyłącznie promowanych. To jest ta sama granica, którą do tej pory wypisywaliśmy ręcznie —
+z tą różnicą, że **reguła przestaje zależeć od członkostwa, więc nie ma czego replace'ować**.
+
+**Co się przy tym poszerza — dokładnie jedna rzecz.** Lista wypisana ręcznie obejmowała projekty
+**zadeklarowane w tym repo**; `*` obejmuje zasoby, które **w perimetrze są**. Przy `manage_skeleton: false`
+(brownfield, domyślnie) właścicielem szkieletu jest ktoś inny i może dołożyć zasób poza tym repo — `*` obejmie
+go automatycznie. Świadomie: baseline to skaner i raport naruszeń, więc „zasób w perimetrze, którego nie
+skanujemy" jest gorszym stanem niż „skanujemy też cudzy wpis". Poszerzenie idzie **wyłącznie po stronie celu**;
+tożsamości i operacje zostają bez zmian, więc reguła wpuszcza dokładnie te same konta na dokładnie te same
+metody. Przy wdrożeniu, w którym to repo jest jedynym pisarzem, zbiór autoryzacji jest **identyczny** —
+sprawdzalne przez rozłożenie obu stron na krotki `(tożsamość, źródło, usługa, metoda, projekt)`.
+
+**Zysk poboczny, policzony.** Koszt baseline spada ze „stały + 1 na regułę na członka" do **stałego**:
+`(15 + 1) + (4 + 1) = 21` atrybutów, czyli **0 na członka**. Sufit rośnie z ~521 do **~629** członków przy
+realistycznej mieszance profili i z 854 do **~1195** przy monoprofilu; próg ostrzegawczy 70 % przesuwa się
+z ~365 na **~439** członków.
+
+**Bramka OPA rozróżnia baseline od reguły profilowej PO TREŚCI, nie po nazwie.** `resources = ["*"]` w regule
+dywizji zostaje zakazane bezwarunkowo — znaczyłoby „reguła napisana dla jednego zespołu działa na projektach
+wszystkich". Wyjątek dostaje wyłącznie reguła, dla której istnieje w `perimeter/policy.yaml` (plik pod
+CODEOWNERS security) deklaracja o tym samym tytule, tych samych tożsamościach, tych samych usługach i tych
+samych selektorach — **i która ma źródło**. Historia tej bramki jest historią coraz słabszych nazw: najpierw
+podciąg `--baseline--` (obchodzony profilem o tytule `-baseline--…`), potem dokładny tytuł z `policy.yaml`
+(obchodzalny plikiem członka nazwanym `baseline.yaml`, bo klucz członka bierze się z nazwy pliku). Zgodność
+co do treści tej furtki nie ma: reguła, która ją spełnia, **jest** baselinem i nie daje autorowi niczego ponad
+to, co daje baseline. Brak `--data perimeter/policy.yaml` = brak deklaracji = **każda** gwiazdka odrzucona.
+
+**Egress zostaje bez zmian i to nie jest przeoczenie.** `egress_to.resources` jest `ForceNew` tak samo
+(zmierzone), ale reguły egress **nie są skolapsowane** — klucz to `(członek × profil × tytuł)`, więc nowy
+członek dokłada własną regułę i nie dotyka cudzych; replace zdarza się wyłącznie w regule, którą dany wniosek
+zmienia. Gdyby ktoś kiedyś skolapsował egress „dla budżetu", defekt wróci — a poprawka z ingressu **nie będzie
+dostępna**: `egress_to.resources = ["*"]` nie znaczy „dowolny zasób w perimetrze", tylko „dowolny zasób **poza**
+nim", czyli zniesienie granicy w kierunku, dla którego ta granica istnieje. Bramka OPA odrzuca ten kształt
+bezwarunkowo i ma tak zostać.
+
+**Migracja.** Sama poprawka też jest zmianą pola `ForceNew`, więc robi replace — **raz**. Przy pustej
+konfiguracji egzekwowanej (typowy stan przed pierwszą promocją) dotyka wyłącznie dry-run, czyli niczego nie
+blokuje. Przy niepustej obowiązuje kolejność z DEC-10: najpierw krok addytywny na regułach zbiorczych
+(`-target`, `-parallelism=1`), potem pełny apply.
+
+**Odrzucone.**
+- *`create_before_destroy` na regułach baseline.* Nie jest to opcja techniczna, tylko pozorna: **wszystkie
+  granularne reguły mają w stanie ten sam `id`** — sam perimetr (`accessPolicies/<n>/servicePerimeters/<nazwa>`),
+  bo provider realizuje je jako read-modify-write na jednej liście `ingressPolicies`. „Nowy obok starego" znaczy
+  więc dwie reguły o tym samym tytule w jednej liście, a następujące po nich usunięcie dopasowuje się do jednej
+  z nich. Zamiana pewnego, krótkiego okna na niepewny stan obiektu org-plane — i to bez zdjęcia kosztu
+  atrybutów, bo lista nadal rosłaby z każdym członkiem.
+- *Powrót do reguł baseline per członek.* Cofa cały zysk DEC-10 (21 atrybutów na członka, sufit ~230)
+  i **nie usuwa problemu**: promocja nadal zmieniałaby zbiór reguł egzekwowanych, tylko po jednej na członka.
+- *Dwie reguły baseline zamieniane naprzemiennie (`baseline-a` / `baseline-b`).* Utrzymuje ciągłość pokrycia
+  kosztem podwojenia liczby reguł baseline w konfiguracji, wprowadza stan („która jest teraz aktywna"), którego
+  Git nie widzi, a przy równoległych wnioskach wymaga zamka poza Terraformem. Rozwiązuje objaw (okno) i zostawia
+  przyczynę (cel reguły zależny od członkostwa).
+- *`lifecycle { ignore_changes = [ingress_to] }`.* Zatrzymałoby replace i zarazem zatrzymało aktualizacje —
+  nowy członek nigdy nie trafiłby do reguły baseline, a plan meldowałby zielono. Cichy brak pokrycia jest gorszy
+  niż głośne okno.
+- *Podniesienie limitu 6000.* Nie dotyczy problemu (replace nie ma nic wspólnego z budżetem) i nie jest kwotą
+  do podniesienia w konsoli.

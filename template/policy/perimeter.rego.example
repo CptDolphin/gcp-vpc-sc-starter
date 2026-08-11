@@ -145,13 +145,50 @@ deny contains msg if {
 
 # --- zasięg -----------------------------------------------------------------------------------------
 
-# `resources = ["*"]` po stronie ingress oznacza „dowolny projekt w perimetrze", czyli regułę napisaną dla
-# jednej dywizji, która działa na wszystkich. Dozwolone wyłącznie razem z access levelem, i tak niechętnie.
+# `resources = ["*"]` po stronie ingress oznacza „dowolny zasób w tej konfiguracji perimetru".
+#
+# DLA REGUŁY DYWIZJI TO JEST ZAKAZANE i było zakazane bezwarunkowo: reguła napisana dla jednego zespołu
+# działałaby wtedy na projektach wszystkich pozostałych — cicha eskalacja, bo w konsoli wygląda identycznie
+# jak reguła wąska. DLA REGUŁY BASELINE to jest jej DOSŁOWNA intencja (skaner i raport naruszeń mają
+# obejmować każdego członka z definicji), a wypisywanie tej samej listy ręcznie kosztowało replace obu reguł
+# baseline przy każdym wniosku — patrz DEC-11 i komentarz w terraform/locals.tf.
+#
+# PO CZYM ROZRÓŻNIAMY — I DLACZEGO NIE PO NAZWIE. Poprzednia generacja tej bramki rozpoznawała baseline po
+# PODCIĄGU `--baseline--` w tytule i była sprawdzalnie obchodzalna (tytuł reguły profilowej powstaje jako
+# `<członek>--<tytuł z profilu>`, więc profil nazwany `-baseline--cokolwiek` wyłączał dywizji wymóg access
+# levelu jej własnym plikiem). Sam DOKŁADNY tytuł też nie wystarcza: klucz członka bierze się z NAZWY PLIKU
+# w `perimeter/members/`, więc plik `baseline.yaml` plus profil o tytule zadeklarowanym w baseline dałby
+# regułę o tytule `baseline--<tytuł>` — czyli tę samą furtkę, tylko dalej.
+#
+# Rozstrzyga więc ZGODNOŚĆ CO DO TREŚCI z deklaracją w `perimeter/policy.yaml` (plik pod CODEOWNERS
+# security, wstrzykiwany przez `conftest --data perimeter/policy.yaml`): tytuł, zbiór tożsamości, zbiór
+# usług i zbiór selektorów muszą się zgadzać w komplecie. Reguła, która to spełnia, NIE DAJE swojemu autorowi
+# niczego ponad to, co daje prawdziwy baseline — bo jest prawdziwym baselinem. Reguła, która tego nie
+# spełnia, gwiazdki nie dostaje, choćby nazywała się jak baseline.
+#
+# BRAK `--data` = pusty `data.baseline_ingress` = zero dozwolonych wyjątków = każda gwiazdka odrzucona.
+# Fail-closed jest tu celowy, tak samo jak przy `uslugi_bez_selektorow_metod`.
 deny contains msg if {
 	some r in planned
 	some to_block in object.get(r.values, "ingress_to", [])
 	"*" in object.get(to_block, "resources", [])
-	msg := sprintf("%s: ingress_to.resources=[\"*\"] — celuj w konkretny projekt członka", [r.address])
+	not gwiazdka_dozwolona(r)
+	msg := sprintf(
+		"%s: ingress_to.resources=[\"*\"] — celuj w konkretny projekt członka (gwiazdka wyłącznie dla reguł baseline zadeklarowanych w policy.yaml)",
+		[r.address],
+	)
+}
+
+# Gwiazdka jest dozwolona, gdy reguła JEST baselinem z `policy.yaml` ORAZ ma źródło.
+#
+# Warunek „ma źródło" nie jest ozdobą: reguła z `ingress_from` bez ani jednego `sources` nie autoryzuje
+# NICZEGO (zmierzone na żywym ACM — `NO_MATCHING_ACCESS_LEVEL` mimo obecnej reguły, #1941), więc gwiazdka
+# w takiej regule daje kształt „maksymalny zasięg, zerowa autoryzacja" — najgorszy możliwy do zostawienia
+# w konfiguracji, bo wygląda na pokrycie, którego nie ma. Reguły baseline renderują `accessLevel: "*"`
+# na podstawie jawnego `allow_without_access_level` (approval Security), więc warunek spełniają.
+gwiazdka_dozwolona(r) if {
+	regula_odpowiada_baseline(r)
+	liczba_zrodel(r) > 0
 }
 
 # BLIZNIAK REGULY WYZEJ PO STRONIE EGRESS — i przez pol roku go NIE BYLO.
@@ -193,17 +230,10 @@ deny contains msg if {
 # korporacyjnego access levelu. Muszą być oznaczone `allow_without_access_level: true` w policy.yaml —
 # czyli świadomie, w pliku pod CODEOWNERS security, a nie przez pominięcie pola w cichym PR-ze.
 #
-# ROZPOZNAJEMY JE PO DOKŁADNYM TYTULE Z `policy.yaml`, NIE PO PODCIĄGU. Renderer nadaje regule zbiorczej
-# postać `baseline--<tytuł>` (jedna reguła na tytuł, lista zasobów wszystkich członków). Poprzedni warunek
-# szukał podciągu `--baseline--` w tytule i był SPRAWDZALNIE OBCHODZALNY: tytuł reguły profilowej powstaje
-# jako `<członek>--<tytuł z profilu>`, więc profil z tytułem zaczynającym się od `-baseline--` dawał tytuł
-# zawierający ten podciąg — i dywizja wyłączała sobie wymóg access levelu własnym plikiem. Porównanie ze
-# zbiorem tytułów zadeklarowanych w `policy.yaml` (plik pod CODEOWNERS security) tej furtki nie ma.
-baseline_titles contains t if {
-	some r in data.baseline_ingress
-	t := sprintf("baseline--%s", [r.title])
-}
-
+# ROZPOZNAJEMY JE PO ZGODNOŚCI Z DEKLARACJĄ, NIE PO NAZWIE — patrz `regula_odpowiada_baseline` niżej.
+# Historia tej bramki jest historią coraz słabszych nazw: najpierw podciąg `--baseline--` (obchodzony
+# profilem o tytule `-baseline--…`), potem dokładny tytuł z `policy.yaml` (obchodzalny plikiem członka
+# nazwanym `baseline.yaml`). Nazwa nie jest własnością bezpieczeństwa — treść jest.
 deny contains msg if {
 	some r in planned
 	r.type in {
@@ -212,8 +242,70 @@ deny contains msg if {
 	}
 	some block in object.get(r.values, "ingress_from", [])
 	count(object.get(block, "sources", [])) == 0
-	not object.get(r.values, "title", "") in baseline_titles
+	not regula_odpowiada_baseline(r)
 	msg := sprintf("%s: ingress bez access levelu — dodaj warunek kontekstu (sieć / urządzenie)", [r.address])
+}
+
+# --- czym JEST reguła baseline w planie ---------------------------------------------------------------
+#
+# Jedyne miejsce w tym pliku, które odpowiada na pytanie „czy ta reguła to baseline". Obie bramki
+# przyznające baseline'owi wyjątek (gwiazdka w `resources`, brak access levelu) pytają WYŁĄCZNIE tutaj —
+# inaczej rozjechałyby się przy pierwszej zmianie, a rozjazd bramek bezpieczeństwa jest niemy.
+#
+# Reguła odpowiada baseline'owi, gdy istnieje w `policy.yaml` deklaracja o TYM SAMYM tytule, TYCH SAMYCH
+# tożsamościach, TYCH SAMYCH usługach i TYCH SAMYCH selektorach (metody i uprawnienia osobno — to dwa
+# różne pola `methodSelectors`, a pilnowanie tylko jednego było już raz luką w tym pliku).
+#
+# `resources` ŚWIADOMIE NIE JEST porównywane: to jedyne pole, w którym reguła zbiorcza ma prawo różnić się
+# od deklaracji (deklaracja nie zna członków, renderer wstawia `*`). Gdyby je tu porównywać, predykat
+# odpowiadałby na pytanie „czy renderer zrobił to, co zrobił", a nie „czy ta treść jest zatwierdzona".
+regula_odpowiada_baseline(r) if {
+	some b in data.baseline_ingress
+	object.get(r.values, "title", "") == sprintf("baseline--%s", [b.title])
+	tozsamosci_z_planu(r) == {i | some i in b.identities}
+	uslugi_z_planu(r) == {op.service | some op in b.operations}
+	metody_z_planu(r) == metody_zadeklarowane(b)
+	uprawnienia_z_planu(r) == uprawnienia_zadeklarowane(b)
+}
+
+tozsamosci_z_planu(r) := {i |
+	some block in object.get(r.values, "ingress_from", [])
+	some i in object.get(block, "identities", [])
+}
+
+liczba_zrodel(r) := count([s |
+	some block in object.get(r.values, "ingress_from", [])
+	some s in object.get(block, "sources", [])
+])
+
+uslugi_z_planu(r) := {op.service_name |
+	some to_block in object.get(r.values, "ingress_to", [])
+	some op in object.get(to_block, "operations", [])
+}
+
+# `method_selectors` w plan-JSON ma OBA pola, a nieużywane jest `null` — stąd jawne odfiltrowanie.
+metody_z_planu(r) := {[op.service_name, sel.method] |
+	some to_block in object.get(r.values, "ingress_to", [])
+	some op in object.get(to_block, "operations", [])
+	some sel in object.get(op, "method_selectors", [])
+	sel.method != null
+}
+
+uprawnienia_z_planu(r) := {[op.service_name, sel.permission] |
+	some to_block in object.get(r.values, "ingress_to", [])
+	some op in object.get(to_block, "operations", [])
+	some sel in object.get(op, "method_selectors", [])
+	sel.permission != null
+}
+
+metody_zadeklarowane(b) := {[op.service, m] |
+	some op in b.operations
+	some m in object.get(op, "methods", [])
+}
+
+uprawnienia_zadeklarowane(b) := {[op.service, p] |
+	some op in b.operations
+	some p in object.get(op, "permissions", [])
 }
 
 # --- baseline w planie ------------------------------------------------------------------------------
