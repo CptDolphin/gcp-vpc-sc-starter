@@ -157,7 +157,7 @@ deny contains msg if {
 # PODCIĄGU `--baseline--` w tytule i była sprawdzalnie obchodzalna (tytuł reguły profilowej powstaje jako
 # `<członek>--<tytuł z profilu>`, więc profil nazwany `-baseline--cokolwiek` wyłączał dywizji wymóg access
 # levelu jej własnym plikiem). Sam DOKŁADNY tytuł też nie wystarcza: klucz członka bierze się z NAZWY PLIKU
-# w `perimeter/members/`, więc plik `baseline.yaml` plus profil o tytule zadeklarowanym w baseline dałby
+# z TREŚCI wpisu w `perimeter/projects.yaml`, więc wpis o dywizji `baseline` plus profil o tytule z baseline dałby
 # regułę o tytule `baseline--<tytuł>` — czyli tę samą furtkę, tylko dalej.
 #
 # Rozstrzyga więc ZGODNOŚĆ CO DO TREŚCI z deklaracją w `perimeter/policy.yaml` (plik pod CODEOWNERS

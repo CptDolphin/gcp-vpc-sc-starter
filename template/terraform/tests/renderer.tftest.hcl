@@ -116,7 +116,29 @@ run "promocja_jest_addytywna" {
 
   assert {
     condition     = length(local.members) > 0
-    error_message = "Brak członków do przetestowania — przykładowy plik zniknął z perimeter/members/."
+    error_message = "Brak członków do przetestowania — przykładowy wpis zniknął z perimeter/projects.yaml."
+  }
+}
+
+# --- 2b. KLUCZ CZŁONKA = `<dywizja>-<project_id>` ---------------------------------------------------
+#
+# Ta asercja jest ZAMKIEM NA ADRESY W STANIE, a nie sprawdzeniem logiki — i dlatego jest trywialnie
+# prawdziwa dla dzisiejszego renderera. O to chodzi: klucz `for_each` JEST adresem zasobu w stanie
+# Terraform, a granularne reguły ACM nie mają aktualizacji w miejscu w wariancie dry-run (DEC-11), więc
+# przeadresowanie to `destroy` + `create` na żywej granicy. Przy pliku na projekt ten ciąg brała nazwa
+# pliku; po przejściu na `perimeter/projects.yaml` (DEC-12) bierze go treść wpisu — i dokładnie dlatego
+# migracja nie miała w planie ani jednego `destroy`.
+#
+# Test padnie w chwili, w której ktoś „uprości" klucz do samego `project_id` albo dołoży do niego
+# środowisko. To jest zmiana, którą wolno zrobić — ale z `moved{}` i świadomie, a nie w przelocie.
+run "klucz_czlonka_pochodzi_z_dywizji_i_projektu" {
+  command = plan
+
+  assert {
+    condition = alltrue([
+      for k, m in local.members : k == "${m.division}-${m.project_id}"
+    ])
+    error_message = "Klucz członka przestał być `<dywizja>-<project_id>` — to jest adres zasobu w stanie; zmiana wymaga `moved{}`, inaczej plan skasuje i odtworzy reguły ACM."
   }
 }
 

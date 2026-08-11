@@ -83,7 +83,7 @@ def to_policy_fragment(live: dict) -> dict:
     if status.get("resources"):
         notes.append(
             f"INFO: perimetr ma już {len(status['resources'])} projektów w konfiguracji egzekwowanej. "
-            "Nie trafiają one do policy.yaml — członkostwo opisują pliki w perimeter/members/. "
+            "Nie trafiają one do policy.yaml — członkostwo opisują wpisy w perimeter/projects.yaml. "
             "Zaimportuj je osobno albo zostaw pod zarządzaniem obecnego właściciela (ignore_changes).")
     if status.get("ingressPolicies") or status.get("egressPolicies"):
         notes.append(

@@ -31,7 +31,7 @@
 # organization, so every such repository would get the right to change the boundary for the entire company.
 #
 # WHY the contract + gates bundle instead of a submodule: a submodule hands over the WHOLE perimeter
-# repository — including every division's service accounts (perimeter/members/) and your corporate IP ranges
+# repository — including every division's service accounts (perimeter/projects.yaml) and your corporate IP ranges
 # (perimeter/access-levels/). Validating one file of your own needs neither.
 #
 # Usage in the division's repository:

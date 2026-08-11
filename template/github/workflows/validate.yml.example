@@ -66,8 +66,45 @@ jobs:
         run: |
           check-jsonschema --schemafile schemas/policy.schema.json perimeter/policy.yaml
           check-jsonschema --schemafile schemas/profile.schema.json perimeter/profiles/*.yaml
-          check-jsonschema --schemafile schemas/member.schema.json perimeter/members/*.yaml
+          check-jsonschema --schemafile schemas/projects.schema.json perimeter/projects.yaml
           check-jsonschema --schemafile schemas/access-level.schema.json perimeter/access-levels/*.yaml
+
+      # PLIK CZŁONKÓW MA BYĆ W POSTACI KANONICZNEJ — czyli dokładnie takiej, jaką zapisuje
+      # `tools/projects_file.py`. To nie jest `fmt` dla estetyki, tylko warunek dwóch rzeczy naraz:
+      #
+      #   * SWEEPER I BREAK-GLASS PRZEPISUJĄ CAŁY PLIK. Na pliku kanonicznym ich diff to te linie, które
+      #     realnie się zmieniły; na pliku sformatowanym inaczej — wszystkie 200 wpisów, a prawdziwa zmiana
+      #     znika w szumie. Commit awaryjny jest ostatnim miejscem, w którym można sobie na to pozwolić.
+      #   * KOMENTARZE W TYM PLIKU I TAK NIE PRZEŻYJĄ. `yaml.safe_dump` ich nie zna, więc pierwszy zapis
+      #     bota skasowałby je bez śladu. Lepiej powiedzieć to na pull requeście, zanim ktoś włoży tam
+      #     uzasadnienie — na uzasadnienie jest pole `change_ref`, które przeżywa każdy zapis.
+      #
+      # Guard jest ANTY-TAUTOLOGICZNY z konstrukcji: porównuje treść z repo z wynikiem tej samej funkcji,
+      # której używają narzędzia zapisujące, więc nie da się go zdać, formatując plik „podobnie".
+      - name: guard - plik członków w postaci kanonicznej
+        run: |
+          python3 - <<'PY'
+          import difflib, pathlib, sys
+          sys.path.insert(0, "tools")
+          import projects_file
+
+          p = pathlib.Path(projects_file.SCIEZKA)
+          tekst = p.read_text()
+          kanon = projects_file.zrzut(projects_file.dokument(tekst))
+          if tekst == kanon:
+              print(f"{p}: postać kanoniczna OK")
+              sys.exit(0)
+          # Różnicę wypisujemy TUTAJ, a nie `git diff` po kroku: przy `set -e` krok kończy się na tym
+          # `exit 1` i nic po nim już się nie wykona, więc autor PR-a zobaczyłby samą informację, że coś
+          # jest nie tak, bez ani jednej linii mówiącej co.
+          print("".join(difflib.unified_diff(
+              tekst.splitlines(keepends=True), kanon.splitlines(keepends=True),
+              fromfile=f"{p} (w repo)", tofile=f"{p} (kanoniczny)")))
+          print(f"::error::{p} nie jest w postaci kanonicznej. Napraw u siebie i wypchnij:")
+          print("::error::  python3 -c \"import sys;sys.path.insert(0,'tools');import projects_file as f;"
+                "f.zapisz('.', f.wczytaj('.'))\"")
+          sys.exit(1)
+          PY
 
       # `gcloud access-context-manager perimeters dry-run enforce` commits the WHOLE dry-run configuration to
       # enforced in one call. With a single org-wide perimeter that means promoting every division at once,
@@ -83,7 +120,7 @@ jobs:
                  | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' || true)
           if [ -n "$hits" ]; then
             echo "$hits"
-            echo '::error::The gcloud dry-run commit command promotes EVERY member at once. Promotion is per member: change stage in perimeter/members/<file>.yaml. See docs/3-runbook-promocja-i-break-glass.md.'
+            echo '::error::The gcloud dry-run commit command promotes EVERY member at once. Promotion is per member: change the stage field of one entry in perimeter/projects.yaml. See docs/3-runbook-promocja-i-break-glass.md.'
             exit 1
           fi
 

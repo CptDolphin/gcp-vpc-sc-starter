@@ -1,7 +1,12 @@
 # Bramki na DEKLARACJACH (pliki YAML w perimeter/), zanim cokolwiek trafi do planu.
 #
 # Wejście buduje tools/collect_declarations.py:
-#   { "policy": {...}, "profiles": {...}, "members": {...}, "today": "YYYY-MM-DD" }
+#   { "policy": {...}, "profiles": {...}, "members": {...}, "members_list": [...], "today": "YYYY-MM-DD" }
+#
+# `members` to mapa klucz→wpis (klucz = `<dywizja>-<project_id>`, ten sam ciąg, który jest adresem zasobu
+# w stanie Terraform), `members_list` to surowa lista z `perimeter/projects.yaml`. Obie opisują ten sam
+# plik i obie są potrzebne: reguły o TREŚCI wpisu czytają mapę, reguły o DUPLIKATACH — wyłącznie listę,
+# bo mapa duplikatu nie umie reprezentować. Powód rozpisany przy tamtych regułach.
 #
 # DLACZEGO część reguł działa tu, a nie na plan-JSON: promocja do enforced i wygasanie wpisów to warunki
 # o CZASIE i o INTENCJI (ticket, właściciel, data przeglądu) — w planie ich nie widać, bo plan pokazuje
@@ -29,7 +34,7 @@ deny contains msg if {
 	some name, m in input.members
 	some p in m.profiles
 	not input.profiles[p.name]
-	msg := sprintf("members/%s: profil %q nie istnieje w perimeter/profiles/", [name, p.name])
+	msg := sprintf("projects.yaml[%s]: profil %q nie istnieje w perimeter/profiles/", [name, p.name])
 }
 
 # Każdy parametr zadeklarowany w profilu musi mieć wartość w pliku członka — i odwrotnie, żadnych
@@ -40,7 +45,7 @@ deny contains msg if {
 	some p in m.profiles
 	some param in input.profiles[p.name].parameters
 	not p.params[param.name]
-	msg := sprintf("members/%s: profil %q wymaga parametru %q", [name, p.name, param.name])
+	msg := sprintf("projects.yaml[%s]: profil %q wymaga parametru %q", [name, p.name, param.name])
 }
 
 deny contains msg if {
@@ -48,7 +53,7 @@ deny contains msg if {
 	some p in m.profiles
 	some key, _ in p.params
 	not param_declared(input.profiles[p.name], key)
-	msg := sprintf("members/%s: parametr %q nie jest zadeklarowany w profilu %q (literówka?)", [name, key, p.name])
+	msg := sprintf("projects.yaml[%s]: parametr %q nie jest zadeklarowany w profilu %q (literówka?)", [name, key, p.name])
 }
 
 param_declared(profile, key) if {
@@ -56,34 +61,86 @@ param_declared(profile, key) if {
 	param.name == key
 }
 
-# Jeden projekt = jeden plik członka. Dwa pliki na ten sam projekt to nie „duplikat w dokumentacji": renderer
-# wyprodukowałby dwa zasoby ACM o różnych kluczach `for_each` i tej samej treści, więc Terraform próbowałby
-# dodać ten projekt do perimetru dwa razy (błąd API albo — przy zasobach granularnych — dwóch właścicieli tego
-# samego wpisu, z których każdy apply usuwa cudzy). Gorzej: dwie dywizje uważałyby się za właściciela.
+# --- duplikaty wpisów w perimeter/projects.yaml -----------------------------------------------------
+#
+# CZTERY REGUŁY NIŻEJ LICZĄ NA `members_list`, A NIE NA `input.members` — I TO JEST CAŁA ICH TREŚĆ.
+#
+# `input.members` jest MAPĄ klucz→wpis (`<division>-<project_id>`), zbudowaną przez collect_declarations.py
+# dokładnie tak, jak wcześniej budowała ją nazwa pliku. Mapa nie umie reprezentować duplikatu: dwa wpisy
+# o tym samym kluczu dają jeden element i żadna reguła nie zobaczy, że drugi kiedykolwiek istniał.
+# Przy jednym wspólnym pliku (DEC-12) to nie jest przypadek brzegowy, tylko normalny wynik scalenia —
+# a wtedy „cicho wygrywa ostatni" znaczy: promocja do `enforced` cofnięta do `dry-run` bez śladu w diffie.
+#
+# `members_list` to surowa lista z pliku, w kolejności zapisu, z duplikatami. `object.get` z domyślną
+# pustą listą, a nie `input.members_list`: brak klucza (stare narzędzie, ręcznie sklecony declarations.json)
+# ma dawać PUSTĄ listę, czyli 0 wpisów kontra N w mapie — i wtedy odpala reguła o rozjeździe liczności
+# niżej. Odwrotnie — gdyby odwołać się wprost — wyrażenie byłoby niezdefiniowane, reguły by nie odpaliły
+# i brak listy przepuszczałby wszystko. Fail-closed, nie fail-quiet.
+members_list := object.get(input, "members_list", [])
+
+# Ten sam projekt opisany dwa razy. Renderer wyprodukowałby dwa zasoby ACM o różnych kluczach i tej samej
+# treści (albo — przy identycznym kluczu — jeden, gubiąc drugi), więc Terraform dodawałby ten projekt do
+# perimetru dwa razy: błąd API albo dwóch właścicieli jednego wpisu, z których każdy apply kasuje cudzy.
+# Gorzej niż technicznie: dwie dywizje uważałyby się za właściciela tego samego projektu.
 deny contains msg if {
-	some name1, m1 in input.members
-	some name2, m2 in input.members
-	name1 < name2
+	some i, m1 in members_list
+	some j, m2 in members_list
+	i < j
 	m1.project_number == m2.project_number
 	msg := sprintf(
-		"members/%s i members/%s deklarują ten sam projekt (%s) — jeden projekt może mieć tylko jeden wpis",
-		[name1, name2, m1.project_number],
+		"projects.yaml: wpisy %q (#%d) i %q (#%d) deklarują ten sam projekt (project_number %s) — jeden projekt może mieć tylko jeden wpis",
+		[klucz_wpisu(m1), i + 1, klucz_wpisu(m2), j + 1, m1.project_number],
 	)
 }
 
-# To samo dla project_id: numer i ID muszą się zgadzać 1:1, a rozjazd (ten sam ID, inny numer) oznacza
-# literówkę w numerze — czyli dopisanie do perimetru CUDZEGO projektu pod właściwie wyglądającą nazwą.
+# To samo dla `project_id`. Osobna reguła, a nie „i różne numery" jak wcześniej: przy pliku na projekt
+# para (ten sam ID, ten sam numer) była łapana przez regułę wyżej i nie mogła powstać inaczej niż jako dwa
+# pliki. Tutaj może powstać jako dwa wpisy o tym samym kluczu, więc pytamy o oba pola niezależnie —
+# a komunikat pokazuje numery, bo rozjazd (ten sam ID, inny numer) oznacza literówkę w numerze, czyli
+# dopisanie do perimetru CUDZEGO projektu pod właściwie wyglądającą nazwą.
 deny contains msg if {
-	some name1, m1 in input.members
-	some name2, m2 in input.members
-	name1 < name2
+	some i, m1 in members_list
+	some j, m2 in members_list
+	i < j
 	m1.project_id == m2.project_id
-	m1.project_number != m2.project_number
 	msg := sprintf(
-		"members/%s i members/%s mają ten sam project_id (%s), ale różne numery (%s vs %s) — jeden z nich wskazuje inny projekt",
-		[name1, name2, m1.project_id, m1.project_number, m2.project_number],
+		"projects.yaml: wpisy #%d i #%d mają ten sam project_id (%s), numery %s i %s — jeden projekt może mieć tylko jeden wpis",
+		[i + 1, j + 1, m1.project_id, m1.project_number, m2.project_number],
 	)
 }
+
+# Ten sam KLUCZ przy różnych projektach. To nie wynika z dwóch reguł wyżej: klucz powstaje przez sklejenie
+# dywizji z projektem, więc `division: a-b` + `project_id: cccccc` i `division: a` + `project_id: b-cccccc`
+# to dwa RÓŻNE projekty pod jednym adresem w stanie Terraform. Terraform to odrzuci („Duplicate object key"),
+# ale dopiero na planie i komunikatem o wyrażeniu `for` — czyli tam, gdzie wnioskodawca go nie zobaczy.
+deny contains msg if {
+	some i, m1 in members_list
+	some j, m2 in members_list
+	i < j
+	klucz_wpisu(m1) == klucz_wpisu(m2)
+	m1.project_id != m2.project_id
+	msg := sprintf(
+		"projects.yaml: wpisy #%d (%s) i #%d (%s) dają ten sam klucz %q — to jeden adres zasobu w stanie Terraform dla dwóch różnych projektów; zmień dywizję albo popraw project_id",
+		[i + 1, m1.project_id, j + 1, m2.project_id, klucz_wpisu(m1)],
+	)
+}
+
+# BACKSTOP NA WSZYSTKO, CZEGO NIE PRZEWIDZIELIŚMY. Mapa i lista opisują ten sam plik, więc muszą mieć tyle
+# samo elementów. Każdy powód, dla którego mapa gubi wpis — duplikat klucza, przyszła zmiana w kluczowaniu,
+# błąd w collect_declarations.py — daje tu różnicę i zatrzymuje PR, nawet jeśli żadna reguła wyżej nie
+# rozpoznaje przyczyny. Reguła kosztuje trzy linie i jest jedyną, która nie zakłada, że wiemy, co się psuje.
+deny contains msg if {
+	count(members_list) != count(input.members)
+	msg := sprintf(
+		"projects.yaml: %d wpisów w pliku, %d po zbudowaniu mapy członków — któryś wpis został po cichu zgubiony (duplikat klucza?). Napraw plik; sama mapa nie umie tego pokazać",
+		[count(members_list), count(input.members)],
+	)
+}
+
+# Klucz członka = `<dywizja>-<project_id>`. JEDNA definicja, tak jak w `tools/projects_file.py` i w
+# `terraform/locals.tf`: ten ciąg jest adresem zasobu w stanie, więc trzy różne sposoby jego składania
+# byłyby trzema różnymi zbiorami członków.
+klucz_wpisu(m) := sprintf("%s-%s", [m.division, m.project_id])
 
 # --- projekty płaszczyzny sterowania (anty-samo-zablokowanie) ---------------------------------------
 #
@@ -108,7 +165,7 @@ deny contains msg if {
 	on_control_plane_list(m)
 	not control_plane_exception_declared(m)
 	msg := sprintf(
-		"members/%s: projekt %s jest na liście control_plane_projects (policy.yaml) — po promocji do enforced konto apply straci dostęp do bucketa stanu, bo woła spoza perimetru. Rewert tego NIE cofa (apply rewertu też potrzebuje stanu), naprawa wymaga człowieka z uprawnieniami org-level. Jeśli to świadome, dodaj control_plane_exception z uzasadnieniem",
+		"projects.yaml[%s]: projekt %s jest na liście control_plane_projects (policy.yaml) — po promocji do enforced konto apply straci dostęp do bucketa stanu, bo woła spoza perimetru. Rewert tego NIE cofa (apply rewertu też potrzebuje stanu), naprawa wymaga człowieka z uprawnieniami org-level. Jeśli to świadome, dodaj control_plane_exception z uzasadnieniem",
 		[name, m.project_id],
 	)
 }
@@ -120,7 +177,7 @@ deny contains msg if {
 	control_plane_exception_declared(m)
 	not control_plane_exception_justified(m)
 	msg := sprintf(
-		"members/%s: control_plane_exception wymaga uzasadnienia (min. 20 znaków) — napisz, gdzie leży teraz stan Terraform i skąd woła konto apply",
+		"projects.yaml[%s]: control_plane_exception wymaga uzasadnienia (min. 20 znaków) — napisz, gdzie leży teraz stan Terraform i skąd woła konto apply",
 		[name],
 	)
 }
@@ -134,7 +191,7 @@ deny contains msg if {
 	control_plane_exception_declared(m)
 	not on_control_plane_list(m)
 	msg := sprintf(
-		"members/%s: control_plane_exception na projekcie spoza listy control_plane_projects — wyjątek trzymany „na zapas\" cicho rozbroi bramkę, gdy lista się rozszerzy. Usuń go",
+		"projects.yaml[%s]: control_plane_exception na projekcie spoza listy control_plane_projects — wyjątek trzymany „na zapas\" cicho rozbroi bramkę, gdy lista się rozszerzy. Usuń go",
 		[name],
 	)
 }
@@ -240,7 +297,7 @@ deny contains msg if {
 	days < input.policy.onboarding.dry_run_min_days
 	not wyjatek_zwalnia_z_okna(name)
 	msg := sprintf(
-		"members/%s: promocja do enforced po %d dniach dry-run, wymagane minimum %d (perimeter/policy.yaml)",
+		"projects.yaml[%s]: promocja do enforced po %d dniach dry-run, wymagane minimum %d (perimeter/policy.yaml)",
 		[name, days, input.policy.onboarding.dry_run_min_days],
 	)
 }
@@ -255,7 +312,7 @@ deny contains msg if {
 	some name, m in input.members
 	m.stage == "enforced"
 	not input.violations_last_window[name]
-	msg := sprintf("members/%s: brak raportu naruszeń dla okna obserwacji — promocja bez dowodu, że jest czysto", [name])
+	msg := sprintf("projects.yaml[%s]: brak raportu naruszeń dla okna obserwacji — promocja bez dowodu, że jest czysto", [name])
 }
 
 deny contains msg if {
@@ -265,7 +322,7 @@ deny contains msg if {
 	count > 0
 	count > wyjatek_pokrywa_naruszen(name)
 	msg := sprintf(
-		"members/%s: %d naruszeń w oknie obserwacji — napraw przepływy albo dodaj profil przed promocją (wyjątek pokrywa do %d)",
+		"projects.yaml[%s]: %d naruszeń w oknie obserwacji — napraw przepływy albo dodaj profil przed promocją (wyjątek pokrywa do %d)",
 		[name, count, wyjatek_pokrywa_naruszen(name)],
 	)
 }
@@ -275,7 +332,7 @@ deny contains msg if {
 deny contains msg if {
 	some w in promotion_waivers
 	not input.members[w.member]
-	msg := sprintf("policy.yaml onboarding.promotion_waivers: wyjątek wskazuje członka %q, którego nie ma w perimeter/members/", [w.member])
+	msg := sprintf("policy.yaml onboarding.promotion_waivers: wyjątek wskazuje członka %q, którego nie ma w perimeter/projects.yaml", [w.member])
 }
 
 # Wyjątek, który nie zwalnia z niczego, jest wpisem-widmem: wygląda w diffie jak decyzja, a nie robi nic.
@@ -301,7 +358,7 @@ deny contains msg if {
 	repo := contributor_repo(m.change_ref)
 	not contributor_allows(repo, m.project_id)
 	msg := sprintf(
-		"members/%s: repozytorium %q nie ma projektu %q na liście dozwolonych (perimeter/contributors.yaml)",
+		"projects.yaml[%s]: repozytorium %q nie ma projektu %q na liście dozwolonych (perimeter/contributors.yaml)",
 		[name, repo, m.project_id],
 	)
 }
@@ -315,7 +372,7 @@ deny contains msg if {
 	some c in object.get(input, "contributors", [])
 	c.repository == repo
 	c.division != m.division
-	msg := sprintf("members/%s: repozytorium %q jest przypisane do dywizji %q, a wpis deklaruje %q",
+	msg := sprintf("projects.yaml[%s]: repozytorium %q jest przypisane do dywizji %q, a wpis deklaruje %q",
 		[name, repo, c.division, m.division])
 }
 
@@ -389,7 +446,7 @@ deny contains msg if {
 	some res in object.get(prof.params, key, [])
 	not valid_external_resource(res)
 	msg := sprintf(
-		"members/%s: %q nie jest obsługiwanym zasobem zewnętrznym — wymagane s3://BUCKET albo azure://ACCOUNT.blob.core.windows.net/CONTAINER",
+		"projects.yaml[%s]: %q nie jest obsługiwanym zasobem zewnętrznym — wymagane s3://BUCKET albo azure://ACCOUNT.blob.core.windows.net/CONTAINER",
 		[name, res],
 	)
 }
@@ -469,7 +526,7 @@ valid_external_resource(res) if startswith(res, "azure://")
 deny contains msg if {
 	some name, m in input.members
 	m.review_by < input.today
-	msg := sprintf("members/%s: review_by (%s) minął — potwierdź wpis albo go usuń", [name, m.review_by])
+	msg := sprintf("projects.yaml[%s]: review_by (%s) minął — potwierdź wpis albo go usuń", [name, m.review_by])
 }
 
 # Wyjątek bez uzasadnienia to reguła, której nikt nie umie później ocenić.
@@ -477,7 +534,7 @@ deny contains msg if {
 	some name, m in input.members
 	some e in object.get(m, "exceptions", [])
 	count(e.justification) < 20
-	msg := sprintf("members/%s: wyjątek %q wymaga uzasadnienia (min. 20 znaków)", [name, e.title])
+	msg := sprintf("projects.yaml[%s]: wyjątek %q wymaga uzasadnienia (min. 20 znaków)", [name, e.title])
 }
 
 # Prosta różnica dat ISO (YYYY-MM-DD) w dniach — bez stref czasowych, bo okno liczymy w dobach.

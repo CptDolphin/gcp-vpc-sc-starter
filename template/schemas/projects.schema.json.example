@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Perimeter members file",
+  "description": "CAŁY plik perimeter/projects.yaml — jedna lista wpisów członkowskich (DEC-12). Pojedynczy wpis opisuje osobny schemat, member.schema.json, i to NIE jest podział dla porządku: repozytorium dywizji waliduje u siebie JEDEN swój wpis (contrib/validate-local.sh) i nie ma prawa znać reszty pliku. Jedna definicja wpisu, dwa miejsca użycia — a nie dwie kopie, które rozjadą się przy pierwszej zmianie pola.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "members"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "description": "Wersja UKŁADU PLIKU. Osobna od `schema_version` wpisu i to jest świadome: ta migracja zmieniła układ pliku (katalog plików → jedna lista) bez zmiany ani jednego pola wpisu. Gdyby wersja była wspólna, każda zmiana jednego wymuszałaby dotknięcie drugiego."
+    },
+    "members": {
+      "type": "array",
+      "description": "Wpisy członkowskie. Kolejność nie ma znaczenia — renderer kluczuje po treści (`<division>-<project_id>`), nie po pozycji, więc scalenie zmieniające kolejność nie przeadresowuje niczego w stanie Terraform. Nowe wpisy bot dopisuje NA KOŃCU (patrz tools/projects_file.py).",
+      "items": {
+        "$ref": "member.schema.json"
+      }
+    }
+  }
+}

@@ -279,7 +279,7 @@ def main() -> int:
 
     if obce:
         lines.append("## Naruszenia spoza listy członków")
-        lines.append("Dotyczą projektów, których nie ma w perimeter/members/ — zwykle znaczy to, że ktoś")
+        lines.append("Dotyczą projektów, których nie ma w perimeter/projects.yaml — zwykle znaczy to, że ktoś")
         lines.append("woła chroniony zasób z projektu, o którego dołączenie nikt nie wystąpił.")
         for what, n in obce.most_common(10):
             lines.append(f"- `{what}` × {n}")

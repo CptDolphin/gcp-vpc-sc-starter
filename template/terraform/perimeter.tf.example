@@ -128,7 +128,7 @@ resource "google_access_context_manager_service_perimeter" "this" {
     # WYMAGANE przy zasobach granularnych. Bez tego szkielet i zasoby per-członek/per-reguła biją się o te
     # same listy: każdy apply usuwałby to, co dodał poprzedni (flapping granicy bezpieczeństwa).
     # KONSEKWENCJA, o której trzeba pamiętać: dopisanie projektu albo reguły WPROST do tego bloku jest od
-    # teraz CICHO IGNOROWANE. Członkowie wchodzą przez pliki w perimeter/members/, nigdy tutaj.
+    # teraz CICHO IGNOROWANE. Członkowie wchodzą przez wpisy w perimeter/projects.yaml, nigdy tutaj.
     ignore_changes = [
       status[0].resources,
       status[0].ingress_policies,

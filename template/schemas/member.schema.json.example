@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://example.com/vpc-sc/member.schema.json",
   "title": "Perimeter member",
-  "description": "Jeden projekt w perimetrze. Plik tworzy bot z zatwierdzonego ticketu; schema jest pierwszą bramką i odrzuca wpisy bez właściciela, ticketu i daty przeglądu — bo to one gniją najszybciej.",
+  "description": "JEDEN WPIS — jeden projekt w perimetrze. Wpis żyje na liście `members` w perimeter/projects.yaml (całość opisuje projects.schema.json), a dopisuje go bot z zatwierdzonego ticketu. Ten schemat jest pierwszą bramką i odrzuca wpisy bez właściciela, ticketu i daty przeglądu — bo to one gniją najszybciej. Jest osobnym plikiem, bo repozytorium dywizji waliduje u siebie DOKŁADNIE jeden wpis (contrib/validate-local.sh) i nie ma prawa widzieć reszty pliku ani nawet wiedzieć, ilu jest członków.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -20,11 +20,13 @@
   ],
   "properties": {
     "schema_version": {
-      "const": 1
+      "const": 1,
+      "description": "Wersja formatu WPISU. Osobna od `schema_version` całego pliku (projects.schema.json): układ pliku zmienił się już raz bez zmiany ani jednego pola wpisu."
     },
     "division": {
       "type": "string",
-      "pattern": "^[a-z0-9][a-z0-9-]{1,40}$"
+      "pattern": "^[a-z0-9][a-z0-9-]{1,40}$",
+      "description": "Dywizja właściciela. Razem z `project_id` tworzy KLUCZ wpisu (`<division>-<project_id>`), a ten klucz jest adresem zasobu w stanie Terraform — zmiana dywizji istniejącego wpisu to przeadresowanie, nie kosmetyka."
     },
     "project_id": {
       "type": "string",
@@ -37,11 +39,13 @@
     },
     "owner_group": {
       "type": "string",
-      "format": "email"
+      "format": "email",
+      "description": "Grupa właścicielska. Tu idzie raport naruszeń z okna obserwacji, więc adres bez odbiorcy kasuje dowód, na którym stoi bramka promocji."
     },
     "approved_by": {
       "type": "string",
-      "format": "email"
+      "format": "email",
+      "description": "Kto zatwierdził zmianę po stronie wnioskującej. Dowodem autoryzacji jest kanał (ticket / contributors.yaml / CODEOWNERS), a to pole mówi, KOGO pytać, gdy dowód trzeba odtworzyć."
     },
     "stage": {
       "enum": [
@@ -83,7 +87,8 @@
             }
           }
         }
-      }
+      },
+      "description": "Profile z katalogu perimeter/profiles/ wraz z wartościami ich parametrów. Zgodność nazw i parametrów sprawdza OPA — schema nie zna katalogu profili."
     },
     "control_plane_exception": {
       "type": "object",

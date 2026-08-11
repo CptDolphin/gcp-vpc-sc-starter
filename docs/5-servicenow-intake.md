@@ -5,7 +5,9 @@ zatwierdza, automat otwiera PR. Zawiera specyfikację pozycji katalogu (pola, ty
 plik członka, ścieżkę zatwierdzeń, obsługę błędów i sposób przetestowania całości **bez ServiceNow**.
 
 Pozostałe dwa kanały: `docs/README.md` (ręczny PR architekta) i `contrib/README.md` (repozytorium zespołu).
-Wszystkie trzy kończą się tym samym: plikiem YAML w `perimeter/members/` i jednym mutatorem (DEC-7).
+Wszystkie trzy kończą się tym samym: **wpisem dopisanym do listy w `perimeter/projects.yaml`** i jednym
+mutatorem (DEC-7). Kanał nie nadpisuje wpisu, który już opisuje ten projekt — pyta o `project_id` ORAZ
+`project_number`, bo literówka w dywizji daje inny klucz przy tym samym projekcie (DEC-12).
 
 ---
 

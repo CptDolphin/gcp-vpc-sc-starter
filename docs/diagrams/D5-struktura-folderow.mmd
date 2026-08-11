@@ -12,10 +12,12 @@ flowchart TB
 
     subgraph PER["Repozytorium perimetru — właściciel: Security + Networking"]
         direction TB
-        P1["perimeter/members/&lt;dywizja&gt;/&lt;projekt&gt;.yaml<br/>JEDEN PLIK = JEDEN PROJEKT<br/>tworzy bot albo architekt PR-em"]
+        P1["perimeter/projects.yaml<br/>JEDEN PLIK, LISTA wpisów pod kluczem members:<br/>bot DOPISUJE wpis na końcu — nie tworzy pliku"]
+        P5["bramka duplikatu — fail-closed, 4 warstwy<br/>tools/projects_file.py · policy/onboarding.rego<br/>liczność listy vs mapy · terraform plan"]
+        P6[".github/workflows/intake-rebase.yml<br/>gałąź nieaktualna → bot siada na nowym main<br/>i DOPISUJE wpis PONOWNIE (intencja, nie git rebase)"]
         P2["perimeter/profiles/*.yaml<br/>kształt reguł ingress/egress<br/>4 pliki na całą organizację"]
         P3["perimeter/policy.yaml + access-levels/<br/>baseline: usługi, okno dry-run, korpo-IP"]
-        P4["terraform/<br/>renderer YAML → granularne zasoby ACM"]
+        P4["terraform/<br/>renderer YAML → granularne zasoby ACM<br/>klucz &lt;dywizja&gt;-&lt;project_id&gt; z TREŚCI wpisu"]
     end
 
     GCP["Access Context Manager<br/>jeden perimetr org-wide<br/>członkowie + reguły jako osobne zasoby"]
@@ -23,7 +25,9 @@ flowchart TB
     D2 -->|"1a. zgłoszenie z repo zespołu"| D3
     D3 -->|"repository_dispatch"| P1
     S1 -->|"1b. po approvalu, przez bota"| P1
-    P1 --> P4
+    P6 -->|"ponawia otwarty wniosek"| P1
+    P1 --> P5
+    P5 -->|"czysto"| P4
     P2 --> P4
     P3 --> P4
     P4 -->|"apply: WIF keyless, single-flight"| GCP

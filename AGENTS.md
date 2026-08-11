@@ -76,9 +76,21 @@ guard `test_samodzielnosc` w selfteście pilnuje tego przy każdym przebiegu.
 
 - **Szablony w `template/` mają sufiks `.example` i katalog `github/` bez kropki.** To celowe: dopóki tam leżą,
   są martwym tekstem, którego żaden linter, pre-commit ani git nie uruchomi. Ożywia je `install.sh`.
-- **`fileset(…, "*.yaml")` czyta tylko jeden poziom `members/`.** Sharding po zespole (`members/<zespół>/`)
-  wymaga zmiany wzorca na `**/*.yaml` i klucza `for_each` na `replace(f, "/", "-")` — czyli zmiany adresów
-  w stanie, więc idzie osobnym PR-em z `moved{}`. Patrz `docs/6`.
+- **Członkowie siedzą w JEDNYM `perimeter/projects.yaml`, jako LISTA, a klucz członka bierze się z treści**
+  (`<division>-<project_id>`). Ten ciąg jest ADRESEM ZASOBU W STANIE Terraforma — wcześniej brała go nazwa
+  pliku i dlatego przejście na jeden plik nie miało w planie ani jednego `destroy`. Nie „upraszczaj" klucza
+  do samego `project_id`: to `destroy` + `create` na każdej granularnej regule ACM (DEC-11, DEC-12).
+- **Lista, a nie mapa — bo duplikat klucza mapy jest CICHY.** Zmierzone: `yamldecode` (TF 1.15.5)
+  i `yaml.safe_load` biorą przy duplikacie klucza OSTATNI wpis i nie mówią nic. Na liście ten sam przypadek
+  wywraca plan (`Duplicate object key`). Przy pliku wspólnym duplikat jest normalnym wynikiem scalenia.
+- **W `perimeter/projects.yaml` NIE MA KOMENTARZY i nie da się ich tam włożyć.** Plik jest w postaci
+  kanonicznej (`yaml.safe_dump`, bramka w `validate.yml`), a `safe_dump` komentarzy nie zna — pierwszy zapis
+  bota skasowałby je bez śladu. Uzasadnienie zmiany idzie w pole `change_ref` i w opis pull requesta.
+- **Plik czytaj i zapisuj WYŁĄCZNIE przez `tools/projects_file.py`**, nigdy `yaml.safe_load` wprost. Tam
+  siedzi strict loader, wyliczanie klucza, wykrywanie duplikatów i dopisywanie wpisu bez przepisywania pliku.
+- **Sharding po dywizji** (`perimeter/projects/<dywizja>.yaml` + renderer na `**/*.yaml`) zostaje jako
+  zapisane wyjście, gdyby self-service per dywizja stał się wymaganiem — ale to zmiana adresów w stanie,
+  więc idzie osobnym PR-em z `moved{}`. Patrz `docs/6` i DEC-12.
 - **Członek w konfiguracji dry-run zostaje tam po promocji.** Dry-run to „proponowana przyszła konfiguracja",
   nie „poczekalnia". Dzięki temu promocja jest czysto addytywna i nie ma momentu, w którym projekt nie należy
   do żadnej konfiguracji.

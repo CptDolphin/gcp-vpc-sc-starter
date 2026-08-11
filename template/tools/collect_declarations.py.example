@@ -10,6 +10,10 @@ Użycie:
     python3 tools/collect_declarations.py                       > declarations.json
     python3 tools/collect_declarations.py --violations v.json   > declarations.json
     python3 tools/collect_declarations.py --today 2026-08-15    # do testów okna dry-run
+
+Członkowie przychodzą z JEDNEGO pliku `perimeter/projects.yaml` (DEC-12), a czyta go `tools/projects_file.py`
+— nigdy `yaml.safe_load` wprost. Powód jest w nagłówku tamtego modułu: `safe_load` na duplikacie klucza
+CICHO bierze ostatni, a przy pliku wspólnym duplikat jest normalnym wynikiem scalenia, nie egzotyką.
 """
 import argparse
 import datetime
@@ -21,6 +25,8 @@ try:
     import yaml
 except ImportError:  # pragma: no cover
     sys.exit("brakuje pyyaml: pip install pyyaml")
+
+import projects_file
 
 
 def load_dir(path: pathlib.Path) -> dict:
@@ -59,16 +65,30 @@ def main() -> int:
     if args.violations:
         violations = json.loads(pathlib.Path(args.violations).read_text())
 
+    # CZŁONKOWIE IDĄ DO OPA W DWÓCH POSTACIACH I TO NIE JEST REDUNDANCJA — to jedyny sposób, żeby bramka
+    # duplikatu miała czego pilnować.
+    #
+    # `members` (mapa klucz→wpis) jest tym, co czyta reszta reguł, kontrakt, budżet i raport naruszeń —
+    # dokładnie tak samo, jak przy pliku na projekt, gdzie kluczem była nazwa pliku. Mapa jednak GUBI
+    # duplikaty z definicji: dwa wpisy o tym samym kluczu dadzą jeden element i żadna reguła nie zobaczy,
+    # że drugi kiedykolwiek istniał (ZMIERZONE: to samo robi `yamldecode` Terraforma i `yaml.safe_load`).
+    #
+    # `members_list` to surowa lista z pliku, w kolejności zapisu, z duplikatami. Reguły `vpcsc.onboarding`
+    # liczą duplikaty WYŁĄCZNIE na niej, a osobna reguła porównuje liczności obu — gdyby mapa zjadła wpis
+    # z jakiegokolwiek powodu, którego dziś nie przewidujemy, ta różnica jest widoczna i blokuje PR.
+    wpisy = projects_file.wczytaj_plik(root / projects_file.PLIK)["members"]
+
     json.dump(
         {
             "policy": policy,
             "profiles": load_dir(root / "profiles"),
-            "members": load_dir(root / "members"),
+            "members": projects_file.mapa(wpisy),
+            "members_list": wpisy,
             "access_levels": access_levels,
             "contributors": contributors,
             "today": args.today,
             # Brak klucza dla członka ≠ zero naruszeń. Reguła promotion_gate traktuje brak wpisu jako
-            # „brak dowodu" i blokuje promocję — inaczej wystarczyłoby nie uruchomić raportu.
+            # „brak dowodu” i blokuje promocję — inaczej wystarczyłoby nie uruchomić raportu.
             "violations_last_window": violations,
         },
         sys.stdout,
@@ -80,4 +100,11 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # Zepsuty plik członków NIE MOŻE dać częściowego `declarations.json`. Wyjście z kodem != 0 przed
+    # wypisaniem czegokolwiek jest jedynym bezpiecznym zachowaniem: `conftest` na okrojonym dokumencie
+    # świeciłby na zielono, bo reguły nie mają czego oceniać. Fail-closed przed fail-quiet.
+    try:
+        raise SystemExit(main())
+    except projects_file.BladPliku as e:
+        print(f"BŁĄD PLIKU CZŁONKÓW: {e}", file=sys.stderr)
+        raise SystemExit(1) from e

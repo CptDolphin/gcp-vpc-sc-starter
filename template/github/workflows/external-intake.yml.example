@@ -130,7 +130,7 @@ jobs:
           CHANGE_REF: ${{ inputs.change_ref }}
         run: |
           python3 - <<'PY'
-          import json, os, pathlib, re, subprocess, sys
+          import json, os, re, subprocess, sys
 
           member = json.loads(os.environ["MEMBER_JSON"])
           source = os.environ["SOURCE_REPO"]
@@ -162,8 +162,6 @@ jobs:
               if not re.match(wzorzec, str(member.get(pole, ""))):
                   sys.exit(f"{pole}={member.get(pole)!r} nie pasuje do wzorca {wzorzec}")
 
-          out = pathlib.Path(f"perimeter/members/{member['division']}-{member['project_id']}.yaml")
-
           # JEDEN RENDERER NA TRZY KANALY, a nie „taki sam" renderer w kazdym. Ten krok mial wlasna kopie
           # logiki: recznie ustawiane pola czasowe i skopiowana stala REVIEW_AFTER_DAYS = 180. Dwie kopie
           # jednego renderera to nie duplikacja stylu — to dwa ROZNE pliki czlonka z tego samego wniosku,
@@ -180,8 +178,11 @@ jobs:
           # tak jak nigdy nie byly w kanale ticketowym.
           #
           # Wywolanie przez `subprocess` z LISTA argumentow: zaden fragment payloadu nie trafia do powloki.
-          # Bramka „plik juz istnieje" i pola czasowe (`stage`, `dry_run_since`, `review_by`) siedza teraz
-          # WYLACZNIE w tamtym skrypcie — patrz jego komentarze.
+          # Bramka „wpis o tym projekcie juz istnieje" i pola czasowe (`stage`, `dry_run_since`,
+          # `review_by`) siedza teraz WYLACZNIE w tamtym skrypcie — patrz jego komentarze. Przy jednym
+          # wspolnym `perimeter/projects.yaml` (DEC-12) ta bramka pyta o WPIS, nie o plik: „plik istnieje"
+          # jest tam prawda zawsze, a niezmiennik, ktory chronil czlonka `enforced` przed cichym cofnieciem
+          # do `dry-run`, musial przetrwac zmiane ukladu.
           wynik = subprocess.run([
               sys.executable, "tools/render_member.py",
               "--division", member["division"],
@@ -191,7 +192,6 @@ jobs:
               "--change-ref", ref,
               "--approved-by", str(member.get("approved_by", "")),
               "--profiles-json", json.dumps(member.get("profiles", [])),
-              "--out", str(out),
           ])
           if wynik.returncode != 0:
               sys.exit(wynik.returncode)
@@ -204,7 +204,7 @@ jobs:
           PY
 
       - name: schema
-        run: check-jsonschema --schemafile schemas/member.schema.json perimeter/members/*.yaml
+        run: check-jsonschema --schemafile schemas/projects.schema.json perimeter/projects.yaml
 
       # This is where contributors.yaml does its work: is this repository allowed to ask for THIS project,
       # and does its division match the entry?

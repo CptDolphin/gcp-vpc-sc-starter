@@ -27,25 +27,36 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: find expired members
+      # WYSZUKANIE I USUNIĘCIE W JEDNYM KROKU — przy jednym wspólnym pliku (DEC-12) nie da się już
+      # „znaleźć nazwy pliku, a potem zrobić `git rm`". Wpisy usuwa ten sam kod, który je znalazł, więc
+      # nie ma stanu pośredniego, w którym lista wygasłych i treść pliku mogłyby się rozjechać.
+      #
+      # Plik jest przepisywany W CAŁOŚCI (`projects_file.zapisz`), a diff mimo to obejmuje wyłącznie
+      # usunięte wpisy — bo postać kanoniczna jest bramką w `validate.yml`. Bez tamtej bramki ten krok
+      # produkowałby pull request przepisujący wszystkich członków i nikt nie zobaczyłby, kogo dotyczy.
+      - name: find and drop expired members
         id: find
         run: |
           pip install --quiet pyyaml
           python3 - <<'PY' > expired.txt
-          import datetime, pathlib, yaml
+          import datetime, sys
+          sys.path.insert(0, "tools")
+          import projects_file
+
+          doc = projects_file.wczytaj(".")
           today = datetime.date.today()
-          for f in sorted(pathlib.Path("perimeter/members").glob("*.yaml")):
-              m = yaml.safe_load(f.read_text())
-              if datetime.date.fromisoformat(str(m["review_by"])) < today:
-                  print(f"{f}\t{m['project_id']}\t{m['owner_group']}")
+          zostaja, wygasle = [], []
+          for m in doc["members"]:
+              (wygasle if datetime.date.fromisoformat(str(m["review_by"])) < today else zostaja).append(m)
+          for m in wygasle:
+              print(f"{projects_file.klucz(m)}\t{m['project_id']}\t{m['owner_group']}")
+          if wygasle:
+              doc["members"] = zostaja
+              projects_file.zapisz(".", doc)
           PY
           count=$(wc -l < expired.txt | tr -d ' ')
           echo "count=$count" >> "$GITHUB_OUTPUT"
           cat expired.txt >> "$GITHUB_STEP_SUMMARY"
-
-      - name: remove expired member files
-        if: steps.find.outputs.count != '0'
-        run: cut -f1 expired.txt | xargs -r git rm
 
       # The PR is a PROPOSAL, not an execution: the owner has the review window to say "still needed" and
       # push a new review_by instead. Removing a member is itself a change to the boundary, so it goes

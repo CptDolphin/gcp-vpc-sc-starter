@@ -163,7 +163,7 @@ test_baseline_lookalike_title_denied if {
 }
 
 # ANTY-OBEJŚCIE nr 2 (to, które zamyka ta zmiana). Klucz członka bierze się z NAZWY PLIKU w
-# `perimeter/members/`, więc plik `baseline.yaml` + profil o tytule zadeklarowanym w baseline dawał tytuł
+# treści wpisu w `perimeter/projects.yaml`, więc dywizja `baseline` + profil o tytule z baseline dawał tytuł
 # DOKŁADNIE równy `baseline--security-scanner-read`. Sam tytuł przestał więc wystarczać: reguła musi zgadzać
 # się z deklaracją także TOŻSAMOŚCIAMI. Tu zgadza się wszystko poza nimi — i to ma wystarczyć do odmowy,
 # bo inaczej dywizja wpuszczałaby WŁASNE konto na projekty wszystkich pozostałych.

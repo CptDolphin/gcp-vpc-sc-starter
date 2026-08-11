@@ -1,0 +1,166 @@
+# .github/workflows/intake-rebase.yml
+# Rebase-retry for open onboarding pull requests. Runs after every push to the default branch that touches
+# the shared members file.
+#
+# WHY THIS EXISTS AT ALL. Membership moved from one file per project to one shared `perimeter/projects.yaml`
+# (DEC-12). The measurement that used to argue against a shared file is real and was not argued away: with
+# ten concurrent requests FROM THE SAME DIVISION, one merges and the other nine stop being mergeable. This
+# workflow is the half of the decision that makes the shared file affordable — the other half is the
+# duplicate gate.
+#
+# WHY IT DOES NOT REBASE. `git rebase` replays a PATCH, and a patch adding lines at the end of a file that
+# somebody else also appended to is exactly the conflict we are trying to avoid. The bot does not need to
+# merge text: it needs to RE-APPLY AN INTENT. The intent is one member entry — data, not a diff — so the
+# retry is "reset to the new default branch, append the entry again". That cannot conflict, because
+# appending to a changed file is not a merge.
+#
+# WHAT BOUNDS IT — this workflow force-pushes branches, so every one of these is load-bearing:
+#   * only branches this repository's own channels create (`onboard/*`, `external/*`),
+#   * only pull requests carrying the `onboarding` label,
+#   * only when the pull request changes NOTHING except `perimeter/projects.yaml` — a human who pushed
+#     anything else to that branch keeps their work,
+#   * only when the difference against the default branch is EXACTLY ONE added entry,
+#   * `--force-with-lease` against the head SHA read at the start of this run.
+# Anything outside that is skipped and said out loud, never "fixed".
+
+name: intake-rebase
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "perimeter/projects.yaml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  # One rebaser at a time. Two runs would race on the same branches and both would win the lease check
+  # against a SHA the other had already replaced.
+  group: intake-rebase
+  cancel-in-progress: false
+
+jobs:
+  rebase:
+    name: re-apply open onboarding requests onto the new default branch
+    runs-on: ubuntu-latest
+    steps:
+      # WHICH TOKEN PUSHES DECIDES WHETHER THE PULL REQUEST IS RE-CHECKED. A push made with `GITHUB_TOKEN`
+      # starts no `pull_request` workflow, so the pull request would carry a new commit and the check results
+      # of the old one — a boundary change reviewed against a base it no longer has. The App installation
+      # token (`secrets.INTAKE_PR_TOKEN`, the same secret intake.yml uses) re-runs `validate` and `plan` like
+      # a human push. The fallback is kept so the channel degrades loudly instead of silently.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.INTAKE_PR_TOKEN || github.token }}
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - run: pip install --quiet pyyaml
+
+      - name: re-apply
+        env:
+          GH_TOKEN: ${{ secrets.INTAKE_PR_TOKEN || github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          git config user.name "vpc-sc-intake"
+          git config user.email "noreply@example.com"
+
+          gh pr list --state open --label onboarding \
+            --json number,headRefName,headRefOid --limit 100 > pr.json
+
+          python3 - <<'PY'
+          import json, os, pathlib, subprocess, sys
+          sys.path.insert(0, "tools")
+          import projects_file
+
+          BAZA = os.environ["DEFAULT_BRANCH"]
+          ZNACZNIK = "<!-- intake-rebase -->"  # po nim poznajemy WLASNY komentarz i nie dokladamy drugiego
+
+          def git(*a, **kw):
+              return subprocess.run(["git", *a], text=True, capture_output=True, **kw)
+
+          def podsumowanie(linia):
+              print(linia)
+              with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as fh:
+                  fh.write(linia + "\n")
+
+          def wpisy(ref):
+              tresc = git("show", f"{ref}:{projects_file.SCIEZKA}", check=True).stdout
+              return projects_file.dokument(tresc)["members"]
+
+          git("fetch", "origin", BAZA, check=True)
+          na_main = wpisy(f"origin/{BAZA}")
+          klucze_main = {projects_file.klucz(m) for m in na_main}
+
+          for pr in json.loads(pathlib.Path("pr.json").read_text()):
+              numer, galaz, head = pr["number"], pr["headRefName"], pr["headRefOid"]
+              if not (galaz.startswith("onboard/") or galaz.startswith("external/")):
+                  podsumowanie(f"#{numer}: galaz {galaz} nie pochodzi z kanalu wejsciowego — pomijam")
+                  continue
+              if git("fetch", "origin", galaz).returncode != 0:
+                  podsumowanie(f"#{numer}: nie moge pobrac galezi {galaz} — pomijam")
+                  continue
+
+              # NIC POZA PLIKIEM CZLONKOW. Gdyby ktos dopisal do tej galezi cokolwiek innego (poprawke
+              # w profilu, komentarz w workflow), reset skasowalby to bez sladu. Reczna praca na galezi
+              # bota jest rzadka, ale jej utrata jest nieodwracalna, wiec kosztuje pominiecie, nie ryzyko.
+              baza = git("merge-base", f"origin/{BAZA}", "FETCH_HEAD", check=True).stdout.strip()
+              zmienione = [x for x in git("diff", "--name-only", baza, "FETCH_HEAD",
+                                          check=True).stdout.split() if x]
+              if zmienione != [projects_file.SCIEZKA]:
+                  podsumowanie(f"#{numer}: zmienia {zmienione} — nie tylko plik czlonkow, pomijam")
+                  continue
+
+              # Roznica liczona wobec BAZY GALEZI, nie wobec biezacego `main`: interesuje nas, co dolozyl
+              # TEN pull request, a nie czym rozni sie od main (tam doszly cudze wnioski).
+              klucze_bazy = {projects_file.klucz(m) for m in wpisy(baza)}
+              nowe = [m for m in wpisy("FETCH_HEAD") if projects_file.klucz(m) not in klucze_bazy]
+              if len(nowe) != 1:
+                  podsumowanie(f"#{numer}: {len(nowe)} nowych wpisow wobec bazy — spodziewam sie dokladnie 1, pomijam")
+                  continue
+              wpis = nowe[0]
+
+              # PROJEKT DOSZEDL DO PERIMETRU INNA DROGA. Ponowne dopisanie zrobiloby duplikat, ktory i tak
+              # zatrzymaja bramki — ale dopiero po force-pushu, czyli po skasowaniu historii tej galezi.
+              # Zatrzymujemy sie PRZED, i mowimy dlaczego; PR zostaje otwarty do decyzji czlowieka.
+              kolizja = projects_file.znajdz(na_main, project_id=wpis.get("project_id"),
+                                             project_number=wpis.get("project_number"))
+              if kolizja is not None:
+                  komentarze = json.loads(subprocess.run(
+                      ["gh", "pr", "view", str(numer), "--json", "comments"],
+                      text=True, capture_output=True, check=True).stdout)["comments"]
+                  if not any(ZNACZNIK in c["body"] for c in komentarze):
+                      subprocess.run(["gh", "pr", "comment", str(numer), "--body",
+                                      f"{ZNACZNIK}\nProjekt `{wpis.get('project_id')}` jest juz w "
+                                      f"`{projects_file.SCIEZKA}` jako `{projects_file.klucz(kolizja)}` "
+                                      f"(stage: {kolizja.get('stage')}). Ten wniosek nie jest juz "
+                                      "onboardingiem — zamknij go albo przepisz na zmiane istniejacego "
+                                      "wpisu. Bot przestal go przenosic na biezacy `main`."], check=True)
+                  podsumowanie(f"#{numer}: projekt {wpis.get('project_id')} juz jest w perimetrze — zostawiam")
+                  continue
+
+              if projects_file.klucz(wpis) in klucze_main:
+                  podsumowanie(f"#{numer}: klucz {projects_file.klucz(wpis)} juz jest na {BAZA} — zostawiam")
+                  continue
+
+              # PONOWIENIE INTENCJI, NIE REPLAY PATCHA: kasujemy commit galezi, siadamy na nowym `main`
+              # i dopisujemy TEN SAM wpis jeszcze raz. Dopisanie na koncu pliku, ktorego reszta sie
+              # zmienila, nie ma z czym kolidowac.
+              git("checkout", "-B", galaz, f"origin/{BAZA}", check=True)
+              projects_file.dopisz(".", wpis)
+              git("add", projects_file.SCIEZKA, check=True)
+              git("commit", "-m",
+                  f"onboard: re-apply {projects_file.klucz(wpis)} onto the current {BAZA}", check=True)
+              wypchniecie = git("push", "--force-with-lease=" + f"{galaz}:{head}", "origin", galaz)
+              if wypchniecie.returncode != 0:
+                  # Lease nie przeszedl = ktos ruszyl galaz w trakcie tego przebiegu. Nie nadpisujemy.
+                  podsumowanie(f"#{numer}: galaz zmieniona w trakcie przebiegu (lease) — pomijam")
+                  continue
+              podsumowanie(f"#{numer}: przeniesiony na biezacy {BAZA} ({projects_file.klucz(wpis)})")
+          PY
