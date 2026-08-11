@@ -117,6 +117,7 @@ def bootstrap() -> None:
         "tools/deny_check.sh",
         "tools/bootstrap_github.sh", "docs/access-request.md",
         "tools/check_supported_services.py",
+        "tools/control_plane_check.py",
         "tools/perimeter_to_policy.py", "tools/brownfield_import.sh",
         ".tflint.hcl", ".github/dependabot.yml", "tests/README.md",
         "tests/snow-approved.json", "tests/snow-not-approved.json", "tests/snow-self-approved.json",
@@ -1861,6 +1862,138 @@ def test_rego() -> None:
     check("plan z ANY_IDENTITY / method=* / resources=* jest ODRZUCANY", p.returncode != 0, p.stdout[-800:])
 
 
+# ------------------------------------------- lista plaszczyzny sterowania kontra reszta repozytorium
+#
+# Bramka OPA wyzej odrzuca czlonka Z LISTY `control_plane_projects`. Sama lista byla do tej pory
+# deklaracja bez zadnej konfrontacji: projekt plaszczyzny sterowania, ktorego na niej NIE MA, przechodzil
+# przez tamta bramke jak zwykly wniosek. Ten zestaw testuje `tools/control_plane_check.py`, czyli guard
+# spojnosci tej listy — i kazdy negatyw ma tu pare anty-tautologiczna, bo guard odrzucajacy wszystko jest
+# nieodrozninalny od guardu dzialajacego, dopoki nikt nie zobaczyl, jak przepuszcza.
+
+# Atrapa `gcloud` dla JEDNEGO wywolania: `storage buckets describe`. `projectNumber` podaje WYLACZNIE przy
+# `--raw` — i to nie jest kaprys atrapy, tylko odwzorowanie zmierzonej wlasnosci gcloud: bez `--raw` zwraca
+# on wlasny, znormalizowany ksztalt zasobu, w ktorym tego pola NIE MA W OGOLE. Dzieki temu zdjecie `--raw`
+# z narzedzia wywraca test pozytywny, zamiast po cichu zamienic bramke w „nie ustalilem, jade dalej".
+ATRAPA_GCLOUD_STORAGE = '''#!/usr/bin/env python3
+import json, os, sys
+argv = sys.argv[1:]
+if argv[:3] != ["storage", "buckets", "describe"]:
+    sys.stderr.write("atrapa: nieobslugiwane wywolanie %s\\n" % argv)
+    sys.exit(2)
+odp = {"name": argv[3]}
+if "--raw" in argv:
+    odp["projectNumber"] = os.environ.get("ATRAPA_NUMER", "111111111111")
+print(json.dumps(odp))
+'''
+
+
+def test_control_plane_lista() -> None:
+    print("\n== guard spojnosci listy control_plane_projects ==")
+    polityka = ROOT / "perimeter/policy.yaml"
+    versions = ROOT / "terraform/versions.tf"
+    tfvars = ROOT / "iam-bootstrap/terraform.tfvars"
+    oryginal = polityka.read_text()
+
+    bin_dir = ROOT / "stub-bin-storage"
+    bin_dir.mkdir(exist_ok=True)
+    (bin_dir / "gcloud").write_text(ATRAPA_GCLOUD_STORAGE)
+    (bin_dir / "gcloud").chmod(0o755)
+    env_zywy = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}")
+
+    def uruchom(*extra, env=None):
+        return sh([sys.executable, "tools/control_plane_check.py", *extra], cwd=ROOT, env=env)
+
+    def podmien(stare, nowe):
+        polityka.write_text(polityka.read_text().replace(stare, nowe))
+
+    # --- 1. stan wyjsciowy: rozpakowany starter przechodzi tryb offline ---------------------------
+    p = uruchom()
+    check("control_plane_check offline przechodzi na rozpakowanym starterze", p.returncode == 0,
+          p.stdout + p.stderr)
+    # ZIELONE MA MOWIC, CZEGO NIE SPRAWDZILO. Szablon niesie placeholder w `monitoring.project_id`
+    # i pusty stack tozsamosci — gdyby guard milczal o pominieciach, jego „OK" znaczyloby wiecej,
+    # niz znaczy, i pierwszy odbiorca uznalby liste za skonfrontowana z czymkolwiek.
+    check("zielony wynik wymienia POMINIETE (placeholder, brak tfvars, tryb offline)",
+          p.stdout.count("POMINIETE") >= 3, p.stdout)
+
+    # --- 2. bucket stanu: HCL kontra policy.yaml --------------------------------------------------
+    tresc_versions = versions.read_text()
+    versions.write_text(tresc_versions.replace('bucket = "<STATE_BUCKET>"', 'bucket = "bkt-inny-stan"', 1))
+    p = uruchom()
+    check("rozjazd backendu z contract.state_bucket jest ODRZUCANY",
+          p.returncode != 0 and "rozjechany" in p.stdout, p.stdout + p.stderr)
+    versions.write_text(tresc_versions)
+    check("ANTY-TAUTOLOGIA: po zrownaniu nazw ta sama komenda PRZECHODZI", uruchom().returncode == 0)
+
+    # --- 3. monitoring.project_id musi byc na liscie ----------------------------------------------
+    podmien('project_id: "<MONITORING_PROJECT>"', 'project_id: "prj-example-monitoring"')
+    p = uruchom()
+    check("monitoring.project_id spoza listy jest ODRZUCANY",
+          p.returncode != 0 and "monitoring.project_id" in p.stdout, p.stdout + p.stderr)
+    podmien("control_plane_projects: []", 'control_plane_projects: ["prj-example-monitoring"]')
+    check("ANTY-TAUTOLOGIA: po dopisaniu projektu do listy ta sama polityka PRZECHODZI",
+          uruchom().returncode == 0, uruchom().stdout)
+    polityka.write_text(oryginal)
+
+    # --- 4. stack tozsamosci: projekt, w ktorym stoja konta i pula WIF -----------------------------
+    tfvars.write_text('identity_project_id = "prj-example-vpcsc-admin"\n'
+                      'state_bucket        = "<STATE_BUCKET>"\n')
+    p = uruchom()
+    check("identity_project_id spoza listy jest ODRZUCANY",
+          p.returncode != 0 and "identity_project_id" in p.stdout, p.stdout + p.stderr)
+    podmien("control_plane_projects: []", 'control_plane_projects: ["prj-example-vpcsc-admin"]')
+    check("ANTY-TAUTOLOGIA: z projektem na liscie ten sam tfvars PRZECHODZI", uruchom().returncode == 0)
+    polityka.write_text(oryginal)
+    tfvars.unlink()
+
+    # --- 5. tryb zywy: wlasciciel bucketa stanu z API ----------------------------------------------
+    # Numer z atrapy NIE JEST na liscie -> bramka ma odrzucic i powiedziec, co dopisac. To jest jedyne
+    # sprawdzenie w tym repo, ktore konfrontuje liste z rzeczywistoscia, a nie z kolejnym plikiem.
+    # Placeholdery podmieniamy na wartosci wygladajace na wdrozone: w trybie zywym placeholder jest
+    # osobnym bledem (test 6), a tutaj badamy sciezke, w ktorej konfiguracja JEST dokonczona.
+    versions.write_text(tresc_versions.replace('"<STATE_BUCKET>"', '"bkt-example-tfstate"'))
+    podmien('state_bucket: "<STATE_BUCKET>"', 'state_bucket: "bkt-example-tfstate"')
+    podmien('project_id: "<MONITORING_PROJECT>"', 'project_id: "prj-example-monitoring"')
+    podmien("control_plane_projects: []", 'control_plane_projects: ["prj-example-monitoring"]')
+    p = uruchom("--live", env=env_zywy)
+    check("tryb zywy: projekt bucketa stanu spoza listy jest ODRZUCANY",
+          p.returncode != 0 and "111111111111" in p.stdout, p.stdout + p.stderr)
+    podmien('control_plane_projects: ["prj-example-monitoring"]',
+            'control_plane_projects: ["prj-example-monitoring", "111111111111"]')
+    p = uruchom("--live", env=env_zywy)
+    # Ten sam test pilnuje `--raw` w narzedziu: bez tej flagi atrapa (jak zywy gcloud) nie poda numeru
+    # i bramka padnie na „API nie podalo projectNumber".
+    check("ANTY-TAUTOLOGIA: z numerem projektu na liscie tryb zywy PRZECHODZI",
+          p.returncode == 0 and "jest na liscie" in p.stdout, p.stdout + p.stderr)
+
+    # --- 6. placeholder w trybie zywym = konfiguracja niedokonczona --------------------------------
+    polityka.write_text(oryginal)
+    versions.write_text(tresc_versions)
+    podmien("control_plane_projects: []", 'control_plane_projects: ["111111111111"]')
+    p = uruchom("--live", env=env_zywy)
+    check("tryb zywy ODRZUCA placeholder w monitoring.project_id (offline go przepuszcza)",
+          p.returncode != 0 and "placeholder" in p.stdout, p.stdout + p.stderr)
+    polityka.write_text(oryginal)
+
+    # --- 7. wpiecie w pipeline ---------------------------------------------------------------------
+    # Narzedzie uruchamiane recznie nie jest bramka. Sprawdzamy oba wpiecia ORAZ sciezke `tools/**`
+    # w wyzwalaczu planu: bez niej pull request zmieniajacy sam guard nie uruchamialby go ani razu.
+    # Czytamy KROKI z YAML-a, nie tekst pliku: komentarz w validate.yml tlumaczy, ze tryb zywy jest
+    # w plan.yml, wiec `"--live" not in tekst` wywracalo sie o WLASNA dokumentacje. Ta sama pulapka,
+    # ktora w tym repo trzy razy wywrocila guardy tekstowe (patrz `strip_heredocs`).
+    walidacja = yaml.safe_load((ROOT / ".github/workflows/validate.yml").read_text())
+    plan = (ROOT / ".github/workflows/plan.yml").read_text()
+    wywolania = [str(k.get("run", "")) for k, _ in kroki_workflow(walidacja)
+                 if "tools/control_plane_check.py" in str(k.get("run", ""))]
+    check("validate.yml uruchamia control_plane_check.py w trybie offline",
+          len(wywolania) == 1 and "--live" not in wywolania[0], str(wywolania))
+    check("plan.yml uruchamia control_plane_check.py --live",
+          "tools/control_plane_check.py --live" in plan)
+    wyzwalacz = plan.split("jobs:", 1)[0]
+    check("plan.yml ma `tools/**` w sciezkach wyzwalacza (guard widzi zmiane samego siebie)",
+          '"tools/**"' in wyzwalacz, wyzwalacz)
+
+
 # --------------------------------------------------------------------- narzedzia
 def test_tools() -> None:
     print("\n== narzedzia ==")
@@ -2996,6 +3129,7 @@ def main() -> int:
     test_acm_naming()
     test_lint_and_pinning()
     test_rego()
+    test_control_plane_lista()
     test_tools()
     test_preflight()
     test_eksperyment_wyscigu()

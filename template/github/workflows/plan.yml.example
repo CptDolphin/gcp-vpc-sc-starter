@@ -13,6 +13,12 @@ on:
       - "perimeter/**"
       - "terraform/**"
       - "policy/**"
+      # `tools/**` — bo w tym jobie żyją DWIE bramki napisane w Pythonie (`check_supported_services.py`
+      # i `control_plane_check.py --live`), a bez tej ścieżki pull request zmieniający wyłącznie je nie
+      # uruchamiał ich ani razu. Ta sama pomyłka, którą validate.yml ma już opisaną przy `iam-bootstrap/**`:
+      # bramka, która nie widzi zmiany w pliku, który sama wykonuje, jest bramką tylko z nazwy. Kosztem jest
+      # jeden plan (read-only) na zmianę narzędzi — tanio jak na jedyne miejsce, gdzie widać ich wykonanie.
+      - "tools/**"
       - ".github/workflows/plan.yml"
 
 permissions:
@@ -70,6 +76,14 @@ jobs:
       # VPC-SC does not support. validate.yml stays offline by design; this job already holds credentials.
       - name: baseline against the live list of supported services
         run: python3 tools/check_supported_services.py --policy perimeter/policy.yaml
+
+      # DO JAKIEGO PROJEKTU NALEŻY BUCKET, W KTÓRYM LEŻY STAN — pytanie zadane API, nie plikowi. Lista
+      # `control_plane_projects` chroni przed jedyną awarią, której `git revert` nie cofa, a była do tej
+      # pory wyłącznie deklaracją: nikt nie sprawdzał, czy projekt trzymający stan faktycznie na niej jest.
+      # Offline ta bramka poszła już w `validate.yml`; tutaj dokłada jedyne sprawdzenie czytające
+      # rzeczywistość — i dlatego siedzi obok drugiej bramki żywej, w jedynym jobie z poświadczeniami.
+      - name: control plane list against the live owner of the state bucket
+        run: python3 tools/control_plane_check.py --live
 
       # The plan artifact is what apply consumes. Pinning its digest means the thing that was reviewed is
       # byte-for-byte the thing that gets applied — no re-plan against a moved target between the two jobs.
