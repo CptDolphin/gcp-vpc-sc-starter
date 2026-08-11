@@ -74,11 +74,84 @@ sensu iść dalej — a dowiedzieć się o tym z testu jest tanio, z incydentu d
 
 **Czego to ostatnie polecenie NIE dowodzi.** Odmowa przychodzi z **braku roli** — `vpcScPerimeterWriter`
 świadomie nie zawiera `servicePerimeters.delete` — a nie z warstwy Deny. Wynik byłby identyczny, gdyby
-polityki deny nie było wcale, i przez jakiś czas dokładnie tak było. Deny istnieje na wypadek, że ktoś tę
-rolę **podmieni** („dajmy na chwilę `policyEditor`, żeby odblokować release"), więc jedynym uczciwym testem
-jest odtworzenie tej sytuacji: nadać kontu `apply` rolę **zawierającą** `servicePerimeters.delete`, powtórzyć
-polecenie i sprawdzić, że odmowa **nadal** przychodzi — tym razem z komunikatem o polityce deny. To jest
-ćwiczenie pod nadzorem (wymaga `roles/iam.denyAdmin` i tymczasowego grantu), a nie krok listy kontrolnej.
+polityki deny nie było wcale. Deny istnieje na wypadek, że ktoś tę rolę **podmieni** („dajmy na chwilę
+`policyEditor`, żeby odblokować release"), więc uczciwy test musi odtworzyć tę sytuację — opisuje go
+sekcja niżej.
+
+## Test warstwy Deny — jak sprawdzić, że zakaz BIJE rolę
+
+Rzecz, która wywraca naiwną wersję tego testu, i którą trzeba znać **przed** jego zaplanowaniem:
+**odmowa z warstwy Deny wygląda w API dokładnie tak samo jak odmowa z braku roli.** Wywołanie odbite
+polityką deny kończy się dosłownie tym:
+
+```
+ERROR: (gcloud.access-context-manager.perimeters.delete) PERMISSION_DENIED: The caller does not have permission.
+```
+
+Ani nazwy polityki, ani reguły, ani słowa „deny". Grepowanie komunikatu nie jest dowodem i nie da się na
+nim oprzeć bramki. Rozstrzyga **Policy Troubleshooter v3**, bo rozkłada odpowiedź na dwie niezależne części:
+
+```bash
+gcloud services enable policytroubleshooter.googleapis.com --project=<PROJ>
+
+cat > tuple.json <<'JSON'
+{"accessTuple":{
+  "principal":"sa-vpcsc-apply@<PROJ>.iam.gserviceaccount.com",
+  "fullResourceName":"//accesscontextmanager.googleapis.com/accessPolicies/<POLICY>/servicePerimeters/<PERIMETER>",
+  "permission":"accesscontextmanager.googleapis.com/servicePerimeters.delete"}}
+JSON
+
+curl -sS -X POST -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+  -H "Content-Type: application/json" -H "x-goog-user-project: <PROJ>" -d @tuple.json \
+  https://policytroubleshooter.googleapis.com/v3/iam:troubleshoot
+```
+
+Dowodem jest **para** pól, nigdy jedno:
+
+| pole | wartość dowodząca | co znaczy |
+|---|---|---|
+| `allowPolicyExplanation.allowAccessState` | `ALLOW_ACCESS_STATE_GRANTED` | tożsamość **ma** to uprawnienie z roli |
+| `denyPolicyExplanation.denyAccessState` | `DENY_ACCESS_STATE_DENIED` | mimo to zakaz ją odbija |
+| `overallAccessState` | `CANNOT_ACCESS` | wynik: Deny bije allow |
+
+Samo `CANNOT_ACCESS` niczego nie dowodzi — dokładnie tak wygląda też zwykły brak roli. Dopiero
+`GRANTED` **razem z** `DENIED` mówi, że warstwa zadziałała. `denyPolicyExplanation` niesie przy tym nazwę
+polityki i dopasowaną regułę (`PERMISSION_PATTERN_MATCHED`, `MEMBERSHIP_MATCHED`), więc odpowiedź wskazuje
+konkretny zakaz zamiast „coś zabroniło".
+
+**Kontrola pozytywna jest częścią testu, nie dodatkiem.** Powtórz to samo wywołanie dla uprawnienia,
+którego polityka NIE wymienia — `accesscontextmanager.googleapis.com/servicePerimeters.update` — i oczekuj
+`CAN_ACCESS` + `DENY_ACCESS_STATE_NOT_DENIED`. Bez tej drugiej krotki test przechodzi także wtedy, gdy
+zepsuta jest impersonacja albo samo narzędzie i odpowiada „nie wolno" na wszystko.
+
+Test „na żywo" (realna próba skasowania) wymaga trzech rzeczy naraz, więc jest ćwiczeniem pod nadzorem,
+a nie krokiem listy kontrolnej:
+
+1. tymczasowej roli **zawierającej** `servicePerimeters.delete` dla konta `apply` (np.
+   `roles/accesscontextmanager.policyEditor`) — odbieranej w tym samym oknie,
+2. **perimetru jednorazowego** — nigdy produkcyjnego; to jest operacja kasująca i nie ma cofnięcia,
+3. okna czasowego: **propagacja polityki deny nie jest natychmiastowa.** Na żywej organizacji pierwsza
+   ważna próba wypadła 7 min 31 s po utworzeniu polityki i była już odbita — to jest **górna granica**,
+   nie pomiar punktowy. Planuj minuty, nie sekundy, i nie raportuj „nie działa" po pierwszej próbie.
+
+## Kto ma trzymać `roles/iam.denyAdmin`
+
+**Nie właściciel perimetru.** Cała wartość tej warstwy polega na tym, że przeżywa podmianę roli przez
+operatora perimetru. Jeśli ta sama osoba lub grupa może zakaz zdjąć, warstwa nie stoi **ponad** rolami,
+tylko **obok** nich: chroni przed cudzym błędem, ale nie przed własnym — a to drugie jest częstsze.
+
+| kto | co dostaje | dlaczego akurat tyle |
+|---|---|---|
+| zespół IAM / bezpieczeństwa org | `roles/iam.denyAdmin` | jedyna rola z `denypolicies.create`; ma być **rozłączna** z właścicielami `iam-bootstrap` i repozytorium perimetru. Grupa, nie osoba |
+| właściciel perimetru | `vpcScDenyReader` | ma **umieć sprawdzić**, że zakaz stoi (i mieć czysty `terraform plan`), bez prawa jego zmiany |
+| pipeline perimetru | nic z rodziny `denypolicies` | jest po stronie **zakazywanej**, nie zarządzającej |
+
+Gdy rozdzielenie jest niewykonalne (mała organizacja, jedna osoba na org), poprawnym wariantem jest
+**nadanie `denyAdmin` na czas zmiany i odebranie po niej**. `manage_deny_policy = true` i
+`terraform plan = No changes` utrzymują się wtedy na samym odczycie (`vpcScDenyReader`), a każda modyfikacja
+warstwy wymaga świadomego ponownego nadania — czyli break-glass dla samego guardrailu. To jedyna wersja
+rozdziału obowiązków osiągalna bez drugiego człowieka i trzeba ją zapisać, bo inaczej „nadaliśmy na chwilę"
+po cichu zamienia się w „mamy na stałe".
 
 ## Czy guardrail w ogóle istnieje — jedno polecenie
 
