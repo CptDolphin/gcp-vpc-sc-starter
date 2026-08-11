@@ -18,7 +18,7 @@ output "deny_policy_managed_here" {
 
 output "alert_topic" {
   description = "PELNA sciezka tematu Pub/Sub — do wklejenia w `perimeter/alerting.yaml` jako `channels.machine.pubsub_topic`. Cloud Monitoring przyjmuje wylacznie te postac; sama nazwa daje kanal, ktory powstaje i nie publikuje niczego."
-  value       = var.monitoring_project_id == "" ? "" : "projects/${var.monitoring_project_id}/topics/${google_pubsub_topic.alerty[0].name}"
+  value       = local.zarzadza_tematem_alertow == 0 ? "" : "projects/${var.monitoring_project_id}/topics/${google_pubsub_topic.alerty[0].name}"
 }
 
 output "watch_service_account" {

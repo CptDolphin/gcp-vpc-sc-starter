@@ -44,6 +44,12 @@ variable "apply_environment" {
   }
 }
 
+variable "manage_alert_topic" {
+  description = "Czy TEN stack tworzy temat Pub/Sub dla kanalu maszynowego alertow (razem z subskrypcja-ewidencja i prawem publikacji dla agenta powiadomien). Domyslnie WYLACZONE — temat z prawem publikacji jest sciezka wyprowadzenia danych, wiec wdrozenie ma go dostac swiadomie, a nie przy okazji. Wylaczenie zostawia alerty z samymi kanalami e-mail; wlaczenie wymaga poswiadczen do chmury juz przy `plan` (dwa zasoby serviceusage budza providera), wiec bramka bez dostepu do GCP planuje ten stack tylko przy `false`."
+  type        = bool
+  default     = false
+}
+
 variable "alert_topic_name" {
   description = "Nazwa tematu Pub/Sub dla kanalu maszynowego alertow (musi zgadzac sie z `channels.machine.pubsub_topic` w perimeter/alerting.yaml). Kanal jest OPCJONALNY po stronie perimetru, ale temat powstaje razem z projektem monitoringu — nieuzywany temat nic nie kosztuje, a brakujacy blokuje utworzenie kanalu."
   type        = string
