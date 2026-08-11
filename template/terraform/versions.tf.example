@@ -13,6 +13,15 @@ terraform {
       source  = "hashicorp/google"
       version = "~> 7.0"
     }
+    # `time` — WYŁĄCZNIE dla `time_sleep.deskryptory_widoczne` w `alerts.tf`. Cloud Monitoring potwierdza
+    # utworzenie deskryptora metryki, ZANIM stanie się on widoczny dla walidacji polityk alertów (zmierzone:
+    # `Error 404: Cannot find metric(s)` na deskryptorze utworzonym w tym samym apply). `depends_on` tego nie
+    # rozwiązuje — zależność jest spełniona, a zasób jeszcze nie istnieje dla konsumenta. Provider jest
+    # bezstanowy i nie dotyka żadnego API chmury; to jest opóźnienie, nie integracja.
+    time = {
+      source  = "hashicorp/time"
+      version = "~> 0.13"
+    }
   }
 
   # Backend GCS. Stan perimetru = stan granicy bezpieczeństwa: bucket z versioning + soft-delete,
