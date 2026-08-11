@@ -1,0 +1,160 @@
+# .github/workflows/watch.yml
+# Obserwator granicy: co godzinę odpowiada na cztery pytania i publikuje odpowiedzi jako metryki.
+#
+#   * czy zmergowana zmiana granicy jest ZASTOSOWANA?          -> apply_pending_seconds
+#   * ile z limitu 6000 atrybutów zjada `spec`, a ile `status`? -> attribute_budget_percent
+#   * ile dni zostało do ściany przy dzisiejszym tempie?        -> attribute_budget_days_to_limit
+#   * czy chmura zgadza się z Gitem?                            -> drift_resources
+#   * czy ktoś siedzi w granicy po `review_by`?                 -> members_expired
+#
+# DLACZEGO TO NIE JEST „NASŁUCH NA NIEUDANY WORKFLOW". Trzy tryby awarii `apply` dają ten sam objaw, ale
+# tylko JEDEN z nich generuje zdarzenie: przebieg nieudany. Przebieg, który się nie odpalił (zły `paths`,
+# wyłączone Actions, brak minut) i przebieg wiszący nie generują NICZEGO — a granica jest wtedy tak samo
+# rozjechana z Gitem. Ten workflow mierzy STAN, nie zdarzenia, więc widzi wszystkie trzy jedną liczbą.
+#
+# DLACZEGO CO GODZINĘ, A NIE CO 5 MINUT. `terraform plan` na tej konfiguracji trwa ~40 s, a minuty Actions
+# w repozytorium prywatnym są limitowane; 24 przebiegi na dobę to ~35 min dziennie. Kadencja jest ZWIĄZANA
+# z `alignment_period = 3600s` w `terraform/alerts.tf` — okno wyrównania krótsze od kadencji publikacji
+# daje puste kubełki między zapisami, a warunek z pustym kubełkiem nigdy nie utrzyma się przez wymagany
+# czas. Zmieniasz cron -> zmień okno.
+#
+# DWA JOBY, DWIE TOŻSAMOŚCI — najważniejsza rzecz w tym pliku. `measure` liczy i jest READ-ONLY (konto
+# `plan`, to samo, które może impersonować każdy pull request). `publish` pisze do Cloud Monitoring i ma
+# WYŁĄCZNIE `timeSeries.create` (konto `watch`). Gdyby to był jeden job, konto dostępne z pull requesta
+# zyskałoby prawo zapisu metryk — czyli autor dowolnego PR-a mógłby opublikować „budżet 5%, zaległości 0"
+# i uciszyć wszystkie cztery alerty naraz. Podział kosztuje ~15 s startu joba.
+
+name: watch
+
+on:
+  schedule:
+    - cron: "17 * * * *" # 17. minuta, nie 0: o pełnej godzinie kolejka GitHuba jest najdłuższa
+  # Po KAŻDYM apply — udanym i nieudanym. Bez tego pierwszy pomiar po wdrożeniu przychodzi dopiero
+  # w następnej pełnej godzinie, a `condition_absent` w alercie o `apply` jest znaczący DOPIERO PO
+  # pierwszym zapisie: metryka, do której nigdy nic nie napisano, nie jest „nieobecna", tylko nieznana.
+  workflow_run:
+    workflows: [apply]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  actions: read # odczyt historii przebiegów `apply` — to z niej bierze się wiek zaległej zmiany
+
+concurrency:
+  group: vpc-sc-watch
+  cancel-in-progress: true
+
+jobs:
+  measure:
+    name: policz (read-only)
+    runs-on: ubuntu-latest
+    outputs:
+      metryki: ${{ steps.licz.outputs.metryki }}
+    steps:
+      # `fetch-depth: 0` JEST WARUNKIEM POPRAWNOŚCI, nie optymalizacją na odwrót: wiek zaległej zmiany
+      # liczymy z `git log <sha-ostatniego-udanego-apply>..HEAD`. W płytkim klonie tego SHA po prostu nie
+      # ma, a skrypt wpada wtedy w gałąź awaryjną i liczy od HEAD — czyli zaniża wiek do zera po każdym
+      # merge'u i alert nigdy nie odpala.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v2.1.9
+        id: auth
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.PLAN_SERVICE_ACCOUNT }}
+          # Token OAuth zamiast pliku poświadczeń: skrypt woła Monitoring API zwykłym `urllib`, bez
+          # instalowania bibliotek Google. Mniej zależności w jobie, który ma działać, gdy inne nie działają.
+          token_format: access_token
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: "1.15.5"
+
+      # `-lock-timeout=2m`: ten plan bierze blokadę stanu tak samo jak każdy inny. Kolizja z trwającym
+      # `apply` kończy się tu porażką joba — i to jest ZAMIERZONE, a nie zaniedbanie. Jeden brakujący
+      # pomiar mieści się w oknie `watchdog_absent_seconds` (3 h = trzy przebiegi), a wymuszanie
+      # `-lock=false` dałoby odczyt stanu w trakcie zapisu, czyli losowy wynik dryfu.
+      - name: plan (detailed exit code)
+        id: plan
+        run: |
+          terraform -chdir=terraform init -input=false
+          set +e
+          terraform -chdir=terraform plan -input=false -lock-timeout=2m -no-color -out=tfplan.binary
+          code=$?
+          set -e
+          if [ "$code" != "0" ]; then
+            echo "::error::terraform plan zakonczyl sie kodem $code"
+            exit "$code"
+          fi
+          terraform -chdir=terraform show -json tfplan.binary > terraform/plan.json
+
+      - name: policz metryki
+        id: licz
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GOOGLE_ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
+        run: |
+          pip install --quiet pyyaml
+          python3 tools/collect_declarations.py > declarations.json
+          # `|| true`, bo `attribute_budget.py` wychodzi kodem 1 PO PRZEKROCZENIU PROGU — a to jest
+          # dokładnie ten stan, o którym ma powiadomić alert. Obserwator, który pada wtedy, gdy jest
+          # co zgłosić, jest gorszy niż jego brak.
+          python3 tools/attribute_budget.py --input declarations.json --format json > budget.json || true
+          python3 tools/perimeter_watch.py measure \
+            --repo "${{ github.repository }}" \
+            --project "${{ vars.MONITORING_PROJECT }}" \
+            --branch "${{ github.event.repository.default_branch || 'main' }}" \
+            > metryki.json
+
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          d = json.load(open("metryki.json"))
+          print("### Obserwator granicy\n")
+          print(f"Zaleganie apply: **{d['powod_zalegania']}**\n")
+          print("| metryka | wartosc |\n|---|---|")
+          for k, v in d["podsumowanie"].items():
+              print(f"| `{k}` | `{v}` |")
+          PY
+
+          # Jedna linia do outputu joba — punkty jadą do drugiego joba, który ma prawo je zapisać.
+          python3 -c "import json;print('metryki='+json.dumps(json.load(open('metryki.json'))))" >> "$GITHUB_OUTPUT"
+
+  publish:
+    name: opublikuj (timeSeries.create)
+    needs: measure
+    runs-on: ubuntu-latest
+    # `always()` NIE: gdy `measure` padnie, nie ma czego publikować, a publikacja zera byłaby KŁAMSTWEM
+    # w bezpiecznym kierunku tylko pozornie — wyzerowałaby zaległość apply i uciszyła alert.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v2.1.9
+        id: auth
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          # JEDYNE miejsce w tym repozytorium, które używa konta `watch`. Ma dokładnie jedno uprawnienie:
+          # `monitoring.timeSeries.create` w projekcie monitoringu. Nie czyta perimetru, nie czyta stanu,
+          # nie czyta kontraktu — więc nawet przejęte nie mówi nic o granicy, a jedynie kłamie o telemetrii.
+          service_account: ${{ vars.WATCH_SERVICE_ACCOUNT }}
+          token_format: access_token
+
+      - name: zapisz metryki
+        env:
+          GOOGLE_ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
+          METRYKI: ${{ needs.measure.outputs.metryki }}
+        run: |
+          printf '%s' "$METRYKI" > metryki.json
+          python3 tools/perimeter_watch.py publish --input metryki.json \
+            --project "${{ vars.MONITORING_PROJECT }}"
