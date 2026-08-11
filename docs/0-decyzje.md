@@ -1,6 +1,6 @@
-# Decyzje, na których stoi ten starter (DEC-1…DEC-8)
+# Decyzje, na których stoi ten starter (DEC-1…DEC-10)
 
-Osiem rozstrzygnięć, które określają kształt repozytorium. Kod odsyła tutaj skrótem `DEC-1`…`DEC-8` — jeśli komentarz
+Dziesięć rozstrzygnięć, które określają kształt repozytorium. Kod odsyła tutaj skrótem `DEC-1`…`DEC-10` — jeśli komentarz
 w pliku mówi „(DEC-4)", to znaczy: „powód tej linijki jest opisany w DEC-4, nie zmieniaj jej bez przeczytania".
 
 Każda pozycja ma tę samą strukturę: **decyzja** · **dlaczego** · **co odrzucono i dlaczego**. Odrzucone warianty są
@@ -371,3 +371,84 @@ ani jednego sekretu: publiczny starter czyta się anonimowo.
   z tego dnia wykryto przypadkiem, przy pomiarze czegoś innego. Zapisany wymóg bez sygnału to założenie.
 - *Codzienny harmonogram.* Starter zmienia się seriami po kilka poprawek; codzienne przypomnienie o tym samym
   rozjeździe to szum. Tydzień + `workflow_dispatch` przed promocją pokrywa realny rytm.
+
+---
+
+## DEC-10 — Baseline to JEDNA reguła z listą zasobów; reguły profilowe zostają per członek
+
+**Problem.** Perimetr ma limit **6000 atrybutów na konfigurację**, liczony osobno dla `spec` (dry-run)
+i `status` (egzekwowana). Atrybutem jest każda tożsamość, każde źródło, każdy zasób w `ingress_to.resources`,
+każda nazwa usługi i każdy selektor metody. Renderer początkowo produkował regułę baseline **dla każdego
+członka osobno**, więc cała treść reguły — tożsamości, źródło, usługi, metody — powielała się tyle razy, ilu
+było członków, choć różniła się wyłącznie jedną pozycją: numerem projektu.
+
+Policzone niezależnie z odpowiedzi `servicePerimeters.get` na żywej organizacji (dwie reguły baseline:
+skaner i pipeline raportu naruszeń):
+
+```
+security-scanner-read     = 1 tożsamość + 1 źródło + 1 zasób + 4 usługi +  9 metod = 16
+platform-violations-read  = 1 tożsamość + 1 źródło + 1 zasób + 1 usługa  +  1 metoda =  5
+                                                                 razem  = 21 NA CZŁONKA
+6000 / (21 + koszt reguł profilowych) → sufit ~230 członków
+```
+
+Organizacja o kilkuset projektach przekracza ten próg **w trakcie wdrożenia**, nie po nim — a objaw jest
+paskudny: apply pada na `Error 400` przy dodawaniu kolejnego członka, czyli po review i po tym, jak dywizja
+usłyszała „zrobione". Limit dotyczy KONFIGURACJI, więc nie da się go obejść dzieleniem PR-ów.
+
+**Decyzja.** `baseline_ingress` renderuje się jako **jedna reguła na tytuł**, klucz i tytuł `baseline--<tytuł>`,
+a przynależność członka wyraża **jedna pozycja w `ingress_to.resources`**. Konfiguracja egzekwowana dostaje
+ten sam kształt z listą zawężoną do członków `stage: enforced`. Koszt spada z `treść_reguły × członkowie`
+na `treść_reguły + członkowie`:
+
+```
+przed:  21 × N          500 członków → 10 500 atrybutów  (konfiguracja NIE POWSTAJE)
+po:     19 + 2 × N      500 członków →  1 019 atrybutów  (~6× zapasu do limitu)
+```
+
+**Reguły profilowe zostają per członek — świadomie, nie z zaniedbania.** Kolaps ma sens tylko tam, gdzie
+treść jest wspólna Z DEFINICJI. Baseline taki jest: to maszyneria perimetru (skaner, raport naruszeń), ta
+sama dla każdego. Profile są odwrotnością — różnią się tożsamościami wołającego, access levelami i metodami,
+bo różnią się zespoły. Zbicie ich w jedną regułę wymagałoby albo sumowania tożsamości (reguła autoryzowałaby
+konto jednej dywizji na projekcie drugiej — cicha eskalacja uprawnień), albo grupowania po identycznym
+kształcie (klucz zależny od treści, czyli przetasowanie cudzych zasobów przy każdej zmianie parametru).
+
+**Cena, którą płacimy.** Jedna reguła = **jeden blast-radius**: zła zmiana baseline'u dotyka wszystkich
+członków naraz, a nie jednego. Poprzedni kształt dawał też audytowalność „kto ma co" wprost w nazwie zasobu.
+Bilans: budżet atrybutów jest limitem **twardym** (API odmawia), a audytowalność ma tańsze zamienniki —
+`ingress_to.resources` nadal wymienia każdego członka po numerze, a `terraform plan` pokazuje dopisanie
+projektu do listy równie czytelnie jak powstanie nowej reguły. Wymóg wynikający z tej ceny: zmiana
+`baseline_ingress` jest zmianą dotykającą wszystkich i tak ma być recenzowana (CODEOWNERS security).
+
+**Migracja istniejącego wdrożenia NIE JEST refaktorem adresu — zmierzone.** Naturalny odruch to bloki
+`moved{}` (zmiana kształtu renderowania zmienia adresy w stanie). Tutaj **nie pomagają i plan jest z nimi
+identyczny**: w providerze `hashicorp/google` (zmierzone na 7.43) `title` ORAZ `ingress_to.resources`
+w `google_access_context_manager_service_perimeter[_dry_run]_ingress_policy` są **ForceNew**, więc
+przeniesiony zasób i tak jest zastępowany (`# forces replacement`). Do tego `moved` jest z definicji 1:1,
+a kolaps jest N→1. Wniosek: plan **zawsze** pokaże `N to add, N×M to destroy` i nie jest to błąd konfiguracji.
+Bezpieczeństwo migracji zapewnia **kolejność, nie plan**:
+
+1. `terraform apply -target='...ingress_policy.rule["baseline--<tytuł>"]'` dla każdej reguły zbiorczej —
+   krok czysto **addytywny** (`N to add, 0 to destroy`). Od tej chwili baseline jest w konfiguracji DWA razy:
+   zbiorczo i po staremu. Autoryzacja jest nadzbiorem, więc nie ma okna bez pokrycia.
+2. Pełny apply — usuwa reguły per-członkowe, których treść już niesie reguła zbiorcza.
+
+Kroku 1 nie da się pominąć „bo to tylko sekunda": reguły ACM to osobne obiekty w tej samej liście, a Terraform
+nie porządkuje usunięcia jednego względem powstania drugiego. Przy pojedynczym apply istnieje moment, w którym
+członek nie ma reguły baseline — czyli dokładnie ta awaria, po którą baseline istnieje. Dla wdrożenia, które
+jeszcze nikogo nie promowało, prościej jest zrobić kolaps **przed pierwszą promocją**: w konfiguracji
+egzekwowanej nie ma wtedy żadnej reguły baseline, a dry-run niczego nie blokuje. Migrację warto uruchomić
+z `-parallelism=1`: każda reguła to osobny PATCH na tym samym obiekcie org-level, chroniony eTagiem.
+
+**Odrzucone.**
+- *Zostawić kształt per członek i podnieść limit.* Limit 6000 nie jest kwotą do podniesienia w konsoli —
+  to ograniczenie konfiguracji perimetru.
+- *Drugi perimetr po przekroczeniu progu.* Dzielenie organizacji na perimetry jest decyzją o modelu ochrony
+  (co z czym może rozmawiać), a nie sposobem na budżet. Podejmowana pod presją zapchanego licznika daje
+  granice przebiegające tam, gdzie skończyło się miejsce. Kryterium rewizji z DEC-1 zostaje — tylko przestaje
+  być wymuszane arytmetyką renderera.
+- *Kolaps także reguł profilowych.* Patrz wyżej: sumowanie tożsamości między dywizjami to cicha eskalacja
+  uprawnień, a klucz zależny od treści przetasowuje cudze zasoby.
+- *Grupowanie baseline'u po access levelu / etapie zamiast po tytule.* Dawałoby regułę, której skład zmienia
+  się przy promocji dowolnego członka — czyli replace reguły wspólnej w najgorszym możliwym momencie.
+  Rozdział dry-run/enforced na dwa warianty tej samej reguły trzyma tę zmienność w liście zasobów.
