@@ -12,6 +12,7 @@ Co ten test naprawdę sprawdza (i czego NIE):
 Wymaga na PATH: terraform (1.15.5), conftest, python3 (pyyaml). Opcjonalnie: actionlint, check-jsonschema.
 Uruchomienie:  python3 selftest/selftest.py
 """
+import datetime
 import hashlib
 import json
 import os
@@ -119,6 +120,9 @@ def bootstrap() -> None:
         "tools/check_supported_services.py",
         "tools/control_plane_check.py",
         "tools/perimeter_to_policy.py", "tools/brownfield_import.sh",
+        "tools/perimeter_watch.py", "terraform/alerts.tf",
+        "perimeter/alerting.yaml", "schemas/alerting.schema.json",
+        ".github/workflows/watch.yml",
         ".tflint.hcl", ".github/dependabot.yml", "tests/README.md",
         "tests/snow-approved.json", "tests/snow-not-approved.json", "tests/snow-self-approved.json",
         "tests/snow-wrong-project.json", "tests/dispatch-example.json",
@@ -1546,6 +1550,223 @@ def test_monitoring() -> None:
           and "monitoring:" in (ROOT / "perimeter/policy.yaml").read_text())
 
 
+# --------------------------------------------------------------------- alerty granicy
+def test_alerty() -> None:
+    """Cztery objawy zepsutej granicy mają mieć alert, runbook i producenta, który liczy to samo.
+
+    Ten test istnieje, bo w tym systemie WSZYSTKIE dotychczasowe defekty alertingu wyglądały identycznie:
+    konfiguracja obecna, wartość nigdy nie osiągalna, cisza brana za spokój (`dryRun="false"`, kanał pusty,
+    reguła bez źródła). Asercje celują więc w OSIĄGALNOŚĆ warunku, nie w jego obecność.
+    """
+    print("\n== alerty granicy ==")
+    alerts = (ROOT / "terraform/alerts.tf").read_text()
+    watch_py = (ROOT / "tools/perimeter_watch.py").read_text()
+    runbook = (ROOT / "docs/7-alerty.md").read_text()
+
+    # 1. PRODUCENT I KONSUMENT MUSZĄ MÓWIĆ O TEJ SAMEJ METRYCE. Rozjazd tych dwóch list daje alert
+    # obserwujący metrykę, do której nikt nie pisze — czyli ciszę nie do odróżnienia od zdrowia. To jest
+    # jedyna bramka, która ten rozjazd łapie, bo `terraform validate` widzi tylko jedną stronę.
+    typy_tf = set(re.findall(r'"(custom\.googleapis\.com/vpcsc/[a-z_]+)"', alerts))
+    typy_py = set(re.findall(r'"(custom\.googleapis\.com/vpcsc/[a-z_]+)"', watch_py))
+    check("nazwy metryk zgodne miedzy alerts.tf a perimeter_watch.py", typy_tf == typy_py,
+          f"tylko w tf={sorted(typy_tf - typy_py)} tylko w py={sorted(typy_py - typy_tf)}")
+    check("pieć metryk obserwatora (apply/budzet%/budzet-dni/dryf/wygasli)", len(typy_tf) == 5,
+          str(sorted(typy_tf)))
+
+    # 2. KAŻDY ALERT MA RUNBOOK NA ISTNIEJĄCĄ KOTWICĘ. Kotwica, której nie ma, ląduje na początku
+    # dokumentu — czyli o 3:00 daje spis treści zamiast procedury. Sprawdzamy OBA pliki z alertami.
+    kotwice_doc = set(re.findall(r'<a id="([a-z0-9-]+)"></a>', runbook))
+    monitoring = (ROOT / "terraform/monitoring.tf").read_text()
+    uzyte = set(re.findall(r'\$\{local\.runbook\}#([a-z0-9-]+)"', alerts + monitoring))
+    check("kazda kotwica z alertow istnieje w docs/7-alerty.md", uzyte and uzyte <= kotwice_doc,
+          f"uzyte={sorted(uzyte)} w dokumencie={sorted(kotwice_doc)}")
+
+    polityki = re.findall(r'resource "google_monitoring_alert_policy" "(\w+)"(.*?)\n}\n',
+                          alerts + monitoring, re.S)
+    check("znaleziono polityki alertow", len(polityki) >= 7, str([n for n, _ in polityki]))
+    bez_linku = [n for n, tresc in polityki if "links {" not in tresc]
+    check("ZADNA polityka alertu nie jest bez runbook-linku", not bez_linku, str(bez_linku))
+    bez_kanalu = [n for n, tresc in polityki if "notification_channels" not in tresc]
+    check("ZADNA polityka alertu nie jest bez kanalu", not bez_kanalu, str(bez_kanalu))
+
+    # 3. ALERT O APPLY ŁAPIE TRZY TRYBY AWARII — warunek o WIEKU, nie nasłuch zdarzenia — plus czwarty
+    # (martwy obserwator) przez BRAK danych. Bez drugiego warunku martwy `watch.yml` daje wykres zamrożony
+    # na ostatniej dobrej wartości, czyli ciszę wyglądającą na zdrowie.
+    apply_pol = next(t for n, t in polityki if n == "vpcsc_apply_stale")
+    check("alert apply ma warunek progowy na WIEKU niezastosowanej zmiany",
+          "apply_pending_seconds" in apply_pol and "COMPARISON_GT" in apply_pol)
+    check("alert apply ma warunek na BRAK danych (martwy obserwator)", "condition_absent" in apply_pol)
+    check("alert apply jest CRITICAL", 'severity     = "CRITICAL"' in apply_pol)
+
+    # 4. BUDŻET LICZONY OSOBNO DLA `spec` I `status` — limit 6000 jest NA KONFIGURACJĘ. Grupowanie po
+    # etykiecie zamiast dwóch polityk, żeby incydent NIÓSŁ W SOBIE, o którą konfigurację chodzi.
+    budzet = next(t for n, t in polityki if n == "vpcsc_attribute_budget")
+    check("alert budzetu grupuje po etykiecie config (spec vs status osobno)",
+          'group_by_fields      = ["metric.label.config"]' in budzet)
+    # Sprawdzamy REFERENCJE do locali, nie literalne nazwy metryk: w HCL filtr jest interpolowany
+    # (`${local.metryka.budzet_procent}`), więc literał `attribute_budget_percent` w tym zasobie nie
+    # występuje i asercja o nim przechodziłaby tylko wtedy, gdyby ktoś zdublował nazwę na sztywno.
+    check("alert budzetu ma OBA wymiary: statyczny prog i prognoze",
+          "local.metryka.budzet_procent" in budzet and "local.metryka.budzet_dni" in budzet)
+    krytyczny = next(t for n, t in polityki if n == "vpcsc_attribute_budget_exhaustion")
+    check("prognoza krytyczna jest OSOBNA polityka (polityka ma jedna severity)",
+          'severity     = "CRITICAL"' in krytyczny and "days_to_limit_critical" in krytyczny)
+
+    # 5. DRYF NIE MOŻE STRZELAĆ PO KAŻDYM APPLY. Zmierzone: konfiguracja w ACM wraca natychmiast, SKUTEK
+    # propaguje się ~20 s dłużej. Reguła z zerowym oknem trwania opisywałaby normalną pracę pipeline'u.
+    dryf = next(t for n, t in polityki if n == "vpcsc_drift")
+    okno = re.search(r'duration\s+= "\$\{local\.progi\.drift_persist_seconds\}s"', dryf)
+    check("alert dryfu wymaga TRWANIA (okno z alerting.yaml, nie 0s)", okno is not None, dryf[:400])
+    progi = yaml.safe_load((ROOT / "perimeter/alerting.yaml").read_text())["thresholds"]
+    check("okno dryfu >= 600 s (30x zmierzona propagacja skutku ~20 s)",
+          progi["drift_persist_seconds"] >= 600, str(progi["drift_persist_seconds"]))
+    check("prog ostrzegawczy prognozy > krytycznego (inaczej warning nigdy nie wyprzedzi)",
+          progi["days_to_limit_warning"] > progi["days_to_limit_critical"], str(progi))
+    check("watchdog tolerancyjniejszy niz prog zaleglosci apply",
+          progi["watchdog_absent_seconds"] > progi["apply_pending_seconds"], str(progi))
+
+    # 6. DWA KANAŁY, ROZŁĄCZNIE UŻYTE. Alert o obejściu procesu w tej samej skrzynce co „zbliżasz się do
+    # 70%" kończy się wyuczoną obojętnością na całą kategorię.
+    check("dryf idzie na kanal BEZPIECZENSTWA", "local.kanal_bezpieczenstwo" in dryf)
+    check("budzet idzie na kanal POJEMNOSCIOWY", "local.kanal_pojemnosc" in budzet)
+    oob = next(t for n, t in polityki if n == "vpcsc_out_of_band_change")
+    check("zmiana poza pipeline'em: kanal bezpieczenstwa i CRITICAL",
+          "local.kanal_bezpieczenstwo" in oob and 'severity = "CRITICAL"' in oob)
+
+    # 7. FILTR `dryRun="false"` NIE MA PRAWA WRÓCIĆ — nigdzie. Pole `dryRun` przy odmowie EGZEKWOWANEJ
+    # nie istnieje, więc ten filtr nie dopasowuje NICZEGO. Siedział jednocześnie w metryce, w sondzie
+    # i w asercji selftestu, która go utrwalała; skanujemy więc CAŁE repo, nie jeden plik.
+    # SZUKAMY PEŁNEJ ŚCIEŻKI POLA, NIE SAMEGO `dryRun="false"` — i to jest różnica między bramką a bramką,
+    # która uczy kasowania komentarzy. Krótka postać występuje legalnie w KILKUNASTU miejscach: w komentarzu
+    # nad poprawnym filtrem, w treści alertu, w docstringu raportu, w runbooku. To są zdania OSTRZEGAJĄCE
+    # przed tym filtrem; guard, który je zgłasza, każe usunąć dokładnie tę wiedzę, dla której powstał.
+    # Defektem jest FILTR, a filtr w tym systemie zawsze niesie prefiks `protoPayload.metadata.`.
+    #
+    # Skanujemy wyłącznie ŹRÓDŁA i pomijamy `.terraform/`: leży tam pobrany provider (~200 MB w jednym
+    # pliku binarnym), a `read_text()` na nim zawieszał ten test na minuty. Bramka, która trwa tyle, że
+    # przestaje się ją uruchamiać, jest bramką tylko z nazwy.
+    rozszerzenia = {".tf", ".yaml", ".yml", ".json", ".py", ".sh", ".md", ".rego", ".hcl"}
+    zly = 'protoPayload.metadata.dryRun="false"'
+    trafienia = []
+    poprawny_filtr = False
+    for f in ROOT.rglob("*"):
+        if not f.is_file() or f.suffix not in rozszerzenia or ".terraform" in f.parts:
+            continue
+        tresc = f.read_text(errors="ignore").replace('\\"', '"')
+        if zly in tresc:
+            trafienia.append(str(f.relative_to(ROOT)))
+        if 'NOT protoPayload.metadata.dryRun="true"' in tresc:
+            poprawny_filtr = True
+    check("nigdzie w repo nie ma filtru dryRun=false (nie lapie NIGDY niczego)", not trafienia,
+          str(trafienia))
+    # ANTY-TAUTOLOGIA: powyższe przeszłoby także wtedy, gdyby w repo nie było ŻADNEGO filtru na naruszenia.
+    check("poprawna postac filtru (NEGACJA dryRun=true) jest obecna", poprawny_filtr)
+
+    # 8. CZYSTE FUNKCJE PRODUCENTA — liczby, nie kształt pliku. To jest jedyne miejsce, w którym sprawdzamy,
+    # że dyskryminator „dryf vs opóźnienie propagacji" i sentynela prognozy realnie działają.
+    sys.path.insert(0, str(ROOT / "tools"))
+    import perimeter_watch as pw
+
+    plan_ze_zmiana = {"resource_changes": [{"change": {"actions": ["update"]}},
+                                           {"change": {"actions": ["no-op"]}}]}
+    check("dryf liczy tylko realne zmiany", pw.dryf_z_planu(plan_ze_zmiana, False) == 1)
+    check("dryf = 0, gdy w Gicie czeka niezastosowana zmiana (dyskryminator propagacji)",
+          pw.dryf_z_planu(plan_ze_zmiana, True) == 0)
+
+    check("brak historii => sentynela, nie falszywy alarm",
+          pw.dni_do_sciany([], 42.0) == pw.BRAK_PROGNOZY_DNI)
+    plaska = [(1_700_000_000 + i * 86400, 40.0) for i in range(30)]
+    check("plaski wykres => sentynela (nie dzielimy przez zero)",
+          pw.dni_do_sciany(plaska, 40.0) == pw.BRAK_PROGNOZY_DNI)
+    # 1 punkt procentowy na dobę, stan 70% => do 100% zostaje 30 dni.
+    rosnaca = [(1_700_000_000 + i * 86400, 40.0 + i) for i in range(31)]
+    dni = pw.dni_do_sciany(rosnaca, 70.0)
+    check("prognoza liczona z nachylenia 30 dni (1 pp/dobe, 70% => ~30 dni)", abs(dni - 30.0) < 0.5,
+          f"policzone {dni}")
+    krotka = [(1_700_000_000 + i * 86400, 40.0 + i) for i in range(3)]
+    check("za krotka historia => sentynela (nie prognozuj z trzech punktow)",
+          pw.dni_do_sciany(krotka, 70.0) == pw.BRAK_PROGNOZY_DNI)
+
+    doc = {"members": [{"review_by": "2020-01-01"}, {"review_by": "2099-01-01"}]}
+    check("wygasli liczy wpisy po review_by",
+          pw.wygasli_czlonkowie(doc, datetime.date(2026, 8, 11)) == 1)
+
+    # 8b. BUDZET LICZONY Z ZYWEJ GRANICY, NIE Z DEKLARACJI. `attribute_budget.py` modeluje renderer na
+    # podstawie plikow YAML — wlasciwie na pull requescie („czy MOJA zmiana sie zmiesci"), ale strukturalnie
+    # slepo na wszystko, co jest w granicy, a czego nie ma w deklaracji: zdublowane reguly po nieudanym
+    # odzysku stanu, reczne dopiski, dryf. Alert na tej liczbie milczalby dokladnie w tym scenariuszu,
+    # w ktorym sufit zostaje przekroczony bez niczyjej wiedzy.
+    check("obserwator czyta ZYWA granice z Access Context Managera",
+          "accesscontextmanager.googleapis.com" in watch_py and "def pobierz_perimetr" in watch_py)
+    check("metryka budzetu liczy sie z obiektu API, nie z declarations.json",
+          "procenty_budzetu(perimetr, limit)" in watch_py)
+    # FAIL-CLOSED: gdy zywej granicy nie da sie odczytac, NIE podstawiamy liczby z deklaracji. Wartosc
+    # z YAML-i wygladalaby poprawnie i opisywala co innego — czyli dokladnie ten tryb awarii, ktory ten
+    # plik ma tropic. Brak punktu jest uczciwszy niz zly punkt.
+    check("brak odczytu granicy => ZADNEGO punktu budzetu (nie podstawiamy deklaracji)",
+          "procenty, prognoza = {}, {}" in watch_py)
+
+    zywa = {
+        "ingressPolicies": [{
+            "ingressFrom": {"identities": ["serviceAccount:a@b.iam.gserviceaccount.com"],
+                            "sources": [{"accessLevel": "*"}]},
+            "ingressTo": {"resources": ["projects/1"],
+                          "operations": [{"serviceName": "storage.googleapis.com",
+                                          "methodSelectors": [{"method": "*"}]}]},
+        }],
+        "egressPolicies": [{
+            "egressFrom": {"identities": ["serviceAccount:a@b.iam.gserviceaccount.com"]},
+            "egressTo": {"externalResources": ["s3://kubelek"],
+                         "operations": [{"serviceName": "bigquery.googleapis.com",
+                                         "methodSelectors": [{"permission": "bigquery.tables.get"}]}]},
+        }],
+    }
+    # ingress: 1 tozsamosc + 1 zrodlo + 1 zasob + (1 usluga + 1 selektor) = 5
+    # egress:  1 tozsamosc + 1 zasob zewnetrzny + (1 usluga + 1 selektor)  = 4
+    check("koszt zywej konfiguracji liczy tozsamosci, zrodla, cele i selektory",
+          pw.koszt_konfiguracji(zywa) == 9, str(pw.koszt_konfiguracji(zywa)))
+    check("zasoby zewnetrzne (BigQuery Omni) tez konsumuja budzet",
+          pw.koszt_konfiguracji({"egressPolicies": [{"egressTo": {"externalResources": ["s3://x", "s3://y"]}}]}) == 2)
+    check("pusta konfiguracja kosztuje zero (a nie wywraca sie na braku kluczy)",
+          pw.koszt_konfiguracji({}) == 0)
+    check("procenty licza sie OSOBNO dla spec i status",
+          pw.procenty_budzetu({"spec": zywa, "status": {}}, 900) == {"spec": 1.0, "status": 0.0},
+          str(pw.procenty_budzetu({"spec": zywa, "status": {}}, 900)))
+
+    # 9. PRODUCENT MUSI PATRZEĆ NA TE SAME KATALOGI, CO WYZWALACZ `apply.yml`. Rozjazd znaczy: zmiana
+    # w katalogu, który uruchamia apply, nie jest liczona jako zaległa (albo odwrotnie — wieczna zaległość
+    # od pliku, którego apply nigdy nie zastosuje).
+    apply_wf = yaml.safe_load((ROOT / ".github/workflows/apply.yml").read_text())
+    sciezki_apply = {p.split("/")[0] for p in apply_wf[True]["push"]["paths"]}
+    domyslne = re.search(r'"--sciezki", default="([^"]+)"', watch_py)
+    check("obserwator patrzy na te same katalogi co wyzwalacz apply.yml",
+          domyslne and set(domyslne.group(1).split(",")) == sciezki_apply,
+          f"apply={sorted(sciezki_apply)} watch={domyslne.group(1) if domyslne else None}")
+
+    # 10. DWA JOBY, DWIE TOŻSAMOŚCI. Gdyby liczył i pisał jeden job, konto `plan` — impersonowalne
+    # z KAŻDEGO pull requesta — zyskałoby `timeSeries.create`, czyli prawo do uciszenia wszystkich alertów.
+    watch_wf = yaml.safe_load((ROOT / ".github/workflows/watch.yml").read_text())
+    joby = watch_wf["jobs"]
+    konta = {j: [k["with"]["service_account"] for k in joby[j]["steps"]
+                 if isinstance(k, dict) and "google-github-actions/auth" in str(k.get("uses", ""))]
+             for j in joby}
+    check("job measure uzywa konta PLAN (read-only)",
+          konta["measure"] == ["${{ vars.PLAN_SERVICE_ACCOUNT }}"], str(konta))
+    check("job publish uzywa OSOBNEGO konta WATCH (jedyny zapis)",
+          konta["publish"] == ["${{ vars.WATCH_SERVICE_ACCOUNT }}"], str(konta))
+
+    iam = (ROOT / "iam-bootstrap/main.tf").read_text()
+    check("konto watch dostaje WYLACZNIE metricWriter", 'role    = "roles/monitoring.metricWriter"' in iam)
+    check("konto watch zwiazane refem (wezej niz plan, ktory bierze caly repository)",
+          "attribute.ref/${var.watch_ref}" in iam)
+    # PUŁAPKA #1975 W FORMIE ASERCJI: konto apply zaczyna od REFRESHU, więc musi umieć PRZECZYTAĆ każdy
+    # zasób, którym zarządza. Brak `get`/`list` na nowym typie wywraca KAŻDY apply, także niezwiązany.
+    for uprawnienie in ("monitoring.notificationChannels.get", "monitoring.notificationChannels.list",
+                        "monitoring.metricDescriptors.get", "monitoring.metricDescriptors.list"):
+        check(f"rola apply umie CZYTAC {uprawnienie} (refresh przed zmiana)",
+              f'"{uprawnienie}"' in iam)
+
+
 # --------------------------------------------------------------------- brownfield
 def test_brownfield() -> None:
     """Przejęcie cudzego perimetru to moment, w którym najłatwiej nadpisać cudzą konfigurację."""
@@ -2505,7 +2726,7 @@ def test_preflight() -> None:
 def test_workflows() -> None:
     print("\n== workflows ==")
     wf = sorted((ROOT / ".github/workflows").glob("*.yml"))
-    check("trzynascie workflow po rozpakowaniu", len(wf) == 13, str([f.name for f in wf]))
+    check("czternascie workflow po rozpakowaniu", len(wf) == 14, str([f.name for f in wf]))
 
     if have("actionlint"):
         p = sh(["actionlint", *[str(f) for f in wf]])
@@ -2894,10 +3115,32 @@ def test_schemas() -> None:
     pairs = [("schemas/policy.schema.json", ["perimeter/policy.yaml"]),
              ("schemas/profile.schema.json", sorted(str(p.relative_to(ROOT)) for p in (ROOT / "perimeter/profiles").glob("*.yaml"))),
              ("schemas/projects.schema.json", ["perimeter/projects.yaml"]),
-             ("schemas/access-level.schema.json", sorted(str(p.relative_to(ROOT)) for p in (ROOT / "perimeter/access-levels").glob("*.yaml")))]
+             ("schemas/access-level.schema.json", sorted(str(p.relative_to(ROOT)) for p in (ROOT / "perimeter/access-levels").glob("*.yaml"))),
+             ("schemas/alerting.schema.json", ["perimeter/alerting.yaml"])]
     for schema, files in pairs:
         p = sh(["check-jsonschema", "--schemafile", schema, *files], cwd=ROOT)
         check(f"schema {pathlib.Path(schema).stem} akceptuje przyklady", p.returncode == 0, p.stdout[-500:])
+
+    # NEGATYWY DO SCHEMATU ALERTINGU. Oba przypadki są ciche na wdrożeniu: ukośnik na końcu bazy URL daje
+    # `//7-alerty.md`, czyli 404 z alertu o 3:00, a brak jednego z kanałów daje politykę bez odbiorcy —
+    # incydent się otwiera i nie idzie do nikogo. Jedno i drugie wygląda w konsoli na skonfigurowane.
+    alerting = yaml.safe_load((ROOT / "perimeter/alerting.yaml").read_text())
+
+    def _alerting_odrzuca(nazwa: str, mutacja) -> None:
+        import copy
+        zly = copy.deepcopy(alerting)
+        mutacja(zly)
+        sciezka = ROOT / f"alerting-{nazwa}.yaml"
+        sciezka.write_text(yaml.safe_dump(zly, sort_keys=False, allow_unicode=True))
+        p = sh(["check-jsonschema", "--schemafile", "schemas/alerting.schema.json",
+                str(sciezka.relative_to(ROOT))], cwd=ROOT)
+        check(f"schema alertingu ODRZUCA {nazwa}", p.returncode != 0, p.stdout[-300:])
+
+    _alerting_odrzuca("ukosnik-na-koncu-runbooka",
+                      lambda d: d.__setitem__("runbook_base_url", d["runbook_base_url"] + "/"))
+    _alerting_odrzuca("brak-kanalu-bezpieczenstwa", lambda d: d["channels"].pop("security"))
+    _alerting_odrzuca("prog-zaleglosci-ponizej-minimum",
+                      lambda d: d["thresholds"].__setitem__("apply_pending_seconds", 60))
 
     # Furtka `control_plane_exception` musi przejść PRZEZ SCHEMĘ, bo validate.yml sprawdza schematy ZANIM
     # uruchomi reguły OPA (`additionalProperties: false` odrzuciłoby ją wcześniej). Gdyby jej tam brakło,
@@ -3124,6 +3367,7 @@ def main() -> int:
     test_kanal_dywizji()
     test_kanal_ticketowy()
     test_monitoring()
+    test_alerty()
     test_brownfield()
     test_external_egress_and_guard()
     test_acm_naming()

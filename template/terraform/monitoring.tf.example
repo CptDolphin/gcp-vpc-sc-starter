@@ -143,7 +143,10 @@ resource "google_monitoring_alert_policy" "vpcsc_enforced_denials" {
     }
   }
 
-  notification_channels = local.monitoring.notification_channels
+  # OBA KANAŁY (`alerts.tf`), bo w chwili odpalenia nie wiadomo, czy to awaria, czy zadziałała kontrola —
+  # a pierwszym krokiem runbooka jest właśnie to rozstrzygnąć. Wcześniej stała tu goła lista z `policy.yaml`,
+  # która na żywym wdrożeniu była PUSTA: polityka istniała, incydent się otwierał, i nie szedł do nikogo.
+  notification_channels = local.kanal_oba
 
   # Każdy alert critical MUSI nieść procedurę — inaczej o 3:00 ktoś zgaduje. Alert bez runbooka to
   # pół rozwiązania: budzi człowieka i zostawia go z pytaniem, co teraz.
@@ -184,6 +187,11 @@ resource "google_monitoring_alert_policy" "vpcsc_enforced_denials" {
 
       Pełna procedura: `docs/3-runbook-promocja-i-break-glass.md` §B.
     DOC
+
+    links {
+      display_name = "runbook"
+      url          = "${local.runbook}#odmowa-w-trybie-egzekwowanym"
+    }
   }
 }
 
@@ -232,7 +240,14 @@ resource "google_monitoring_alert_policy" "vpcsc_out_of_band_change" {
   project      = local.monitoring.project_id
   display_name = "VPC-SC: konfiguracja zmieniona poza pipeline'em"
   combiner     = "OR"
-  severity     = "WARNING"
+
+  # PODNIESIONE Z `WARNING` DO `CRITICAL`. Powód nie jest kosmetyczny: `WARNING` znaczy „obejrzyj w godzinach
+  # pracy", a to jest jedyny sygnał, który odróżnia zmianę granicy bezpieczeństwa wykonaną przez PROCES od
+  # wykonanej przez CZŁOWIEKA z konsoli. Jeśli to drugie jest nieautoryzowane, każda godzina zwłoki to
+  # godzina z otwartą granicą i skasowanym śladem. Wyjątkiem, którego ta zmiana nie psuje, jest szum:
+  # własne konto apply jest z filtru metryki wykluczone, więc normalna praca pipeline'u nie odpala tego
+  # alertu ANI RAZU (potwierdzone na wdrożeniu: metryka pusta przez cały okres, w którym apply chodził).
+  severity = "CRITICAL"
 
   conditions {
     display_name = "zmiana przez tożsamość inną niż apply-SA"
@@ -255,7 +270,8 @@ resource "google_monitoring_alert_policy" "vpcsc_out_of_band_change" {
     }
   }
 
-  notification_channels = local.monitoring.notification_channels
+  # KANAŁ BEZPIECZEŃSTWA, nie pojemnościowy: to jest sygnał obejścia procesu, a nie informacja operacyjna.
+  notification_channels = local.kanal_bezpieczenstwo
 
   documentation {
     mime_type = "text/markdown"
@@ -282,5 +298,10 @@ resource "google_monitoring_alert_policy" "vpcsc_out_of_band_change" {
       repo) albo dopisać tę zmianę do repo, jeśli była zasadna. Wybór zależy od tego, czy zmiana miała sens —
       a nie od tego, co jest łatwiejsze.
     DOC
+
+    links {
+      display_name = "runbook"
+      url          = "${local.runbook}#dryf-granicy"
+    }
   }
 }

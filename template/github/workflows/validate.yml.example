@@ -68,6 +68,40 @@ jobs:
           check-jsonschema --schemafile schemas/profile.schema.json perimeter/profiles/*.yaml
           check-jsonschema --schemafile schemas/projects.schema.json perimeter/projects.yaml
           check-jsonschema --schemafile schemas/access-level.schema.json perimeter/access-levels/*.yaml
+          # `alerting.yaml` jest OPCJONALNY (brak = alerty wyłączone, bezpieczna degradacja), ale gdy jest,
+          # musi być kompletny. `if`, a NIE `[ -f … ] && … || echo`: ten drugi zapis połyka też PORAŻKĘ
+          # walidacji (`||` łapie każdy niezerowy kod, nie tylko brak pliku), czyli daje bramkę, która
+          # świeci na zielono na złym pliku. Ta sama pułapka co `set -e` z ostatnim poleceniem w potoku.
+          if [ -f perimeter/alerting.yaml ]; then
+            check-jsonschema --schemafile schemas/alerting.schema.json perimeter/alerting.yaml
+          else
+            echo "perimeter/alerting.yaml nie istnieje — alerty wyłączone (świadomie dopuszczone)"
+          fi
+
+      # PROGI MUSZĄ BYĆ SPÓJNE — schemat sprawdza kształt, nie sens. `days_to_limit_warning` mniejszy od
+      # `critical` daje konstrukcję, w której ostrzeżenie nigdy nie przyjdzie przed alarmem krytycznym:
+      # oba warunki są `<`, więc mniejszy próg jest ZAWSZE spełniony jako pierwszy. Schemat JSON tego nie
+      # wyrazi (to relacja między dwoma polami), a wykryte na żywo znaczy „przez pół roku nie było eskalacji
+      # i nikt tego nie zauważył, bo alert i tak przyszedł".
+      - name: guard - progi alertów spójne
+        run: |
+          [ -f perimeter/alerting.yaml ] || { echo "brak alerting.yaml — nic do sprawdzenia"; exit 0; }
+          python3 - <<'PY'
+          import sys, yaml
+          p = yaml.safe_load(open("perimeter/alerting.yaml"))["thresholds"]
+          bledy = []
+          if p["days_to_limit_warning"] <= p["days_to_limit_critical"]:
+              bledy.append(f"days_to_limit_warning ({p['days_to_limit_warning']}) musi byc WIEKSZY niz "
+                           f"days_to_limit_critical ({p['days_to_limit_critical']}) — inaczej ostrzezenie "
+                           f"nigdy nie wyprzedzi alarmu krytycznego")
+          if p["watchdog_absent_seconds"] <= p["apply_pending_seconds"]:
+              bledy.append(f"watchdog_absent_seconds ({p['watchdog_absent_seconds']}) musi byc WIEKSZY niz "
+                           f"apply_pending_seconds ({p['apply_pending_seconds']}) — inaczej brak jednego "
+                           f"pomiaru odpala alert szybciej niz realna zaleglosc apply")
+          for b in bledy:
+              print(f"::error::{b}")
+          sys.exit(1 if bledy else 0)
+          PY
 
       # LISTA `control_plane_projects` MUSI OPISYWAĆ MIEJSCE, W KTÓRYM MASZYNERIA PERIMETRU NAPRAWDĘ LEŻY.
       # Bramka OPA odrzuca członka wskazującego projekt Z TEJ LISTY — więc projekt płaszczyzny sterowania,

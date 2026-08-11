@@ -133,8 +133,15 @@ terraform -chdir=terraform output members_enforced        # członek na liście
 # właścicielem chronionego zasobu; `--organization=` czyta tylko `organizations/<id>/logs/…` i nic poniżej.
 # Zmierzone: 0 wpisów na organizacji przy 30 w projekcie członka, ten sam filtr i to samo okno.
 gcloud logging read 'protoPayload.metadata."@type"="type.googleapis.com/google.cloud.audit.VpcServiceControlAuditMetadata"
-  AND protoPayload.metadata.dryRun="false"' --project=<PROJEKT_CZLONKA> --freshness=1h --limit=20
+  AND NOT protoPayload.metadata.dryRun="true"' --project=<PROJEKT_CZLONKA> --freshness=1h --limit=20
 ```
+
+**Filtr to NEGACJA `dryRun="true"`, a nie `dryRun="false"` — i to nie jest niuans składniowy.**
+Wpis o odmowie EGZEKWOWANEJ **nie ma pola `dryRun` w ogóle**; pojawia się ono wyłącznie przy
+naruszeniach dry-run, z wartością `true`. `dryRun="false"` nie dopasowuje więc **nigdy niczego** —
+w żadnej organizacji. Zapytanie z tym filtrem jest puste ZAWSZE, a zdanie niżej każe czytać pustkę
+jako sukces: procedura potwierdzałaby wtedy działanie ruchu również wtedy, gdy cała dywizja jest
+zablokowana. Ten sam filtr siedział wcześniej w metryce alertu, w sondzie i w asercji selftestu.
 
 Puste drugie zapytanie przez pierwszą godzinę = ruch dywizji działa. Niepuste = masz incydent, przejdź do
 sekcji B, zanim ktoś zadzwoni.
@@ -207,7 +214,7 @@ o jego ruchu — po naprawie promocja wymaga takiego samego dowodu jak za pierws
 # ZAKRES = PROJEKT, w którym stanął ruch (patrz uwaga o zakresie w części A, krok 6). Na organizacji
 # tych wpisów NIE MA i pusty wynik przeczytasz jako „to nie perimetr" — czyli odwrotnie niż jest.
 gcloud logging read 'protoPayload.metadata."@type"="type.googleapis.com/google.cloud.audit.VpcServiceControlAuditMetadata"
-  AND protoPayload.metadata.dryRun="false"' --project=<PROJEKT_CZLONKA> --freshness=1h \
+  AND NOT protoPayload.metadata.dryRun="true"' --project=<PROJEKT_CZLONKA> --freshness=1h \
   --format='table(protoPayload.authenticationInfo.principalEmail, protoPayload.methodName,
                   protoPayload.metadata.violationReason)'
 ```

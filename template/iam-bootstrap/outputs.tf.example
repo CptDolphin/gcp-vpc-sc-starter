@@ -16,6 +16,11 @@ output "deny_policy_managed_here" {
   value       = var.manage_deny_policy
 }
 
+output "watch_service_account" {
+  description = "Adres konta obserwatora — do wpisania jako zmienna repozytorium `WATCH_SERVICE_ACCOUNT` (używa jej `watch.yml`). Pusty string = sekcja `monitoring` wyłączona, więc obserwatora nie ma i workflow nie ruszy: to jest poprawny stan wdrożenia bez alertów, a nie brak konfiguracji."
+  value       = var.monitoring_project_id == "" ? "" : google_service_account.watch[0].email
+}
+
 output "deny_reader_role_id" {
   description = "Pełne ID roli własnej do odczytu warstwy deny — do nadania kolejnym osobom bez wchodzenia w ten stack (`gcloud organizations add-iam-policy-binding <ORG_ID> --member=… --role=<ta wartość>`)."
   value       = google_organization_iam_custom_role.deny_reader.id

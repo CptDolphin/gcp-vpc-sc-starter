@@ -1,19 +1,20 @@
 # Dokumentacja startera perimetru VPC-SC
 
-Siedem dokumentów, siedem różnych momentów:
+Osiem dokumentów, osiem różnych momentów:
 
 | Dokument | Kiedy go czytasz |
 |---|---|
-| [0 — Decyzje (DEC-1…DEC-8)](0-decyzje.md) | pytasz „dlaczego akurat tak"; przed każdą zmianą kształtu repo |
+| [0 — Decyzje (DEC-1…DEC-13)](0-decyzje.md) | pytasz „dlaczego akurat tak"; przed każdą zmianą kształtu repo |
 | [1 — Wdrożenie](1-wdrozenie.md) | stawiasz repo od zera; kolejność etapów i placeholdery |
 | [2 — Uprawnienia i WIF](2-uprawnienia-i-wif.md) | zamawiasz dostępy u architekta; rola po roli z uzasadnieniem i gotową listą do ticketu |
 | [3 — Runbook: promocja i break-glass](3-runbook-promocja-i-break-glass.md) | promujesz członka do enforced albo perimetr właśnie zablokował produkcję |
 | [4 — Brownfield: import](4-brownfield-import.md) | perimetr już istnieje i chcesz się podłączyć bez nadpisania cudzej konfiguracji |
 | [5 — Kanał ServiceNow](5-servicenow-intake.md) | budujesz pozycję katalogową i mapowanie pól formularza na wniosek |
 | [6 — Układ repozytoriów](6-uklad-repozytoriow.md) | architekt pyta o skalę: plik na projekt czy jeden `projects.yml` przy 100–200 projektach |
+| [7 — Alerty granicy](7-alerty.md) | któryś alert właśnie odpalił — procedura per objaw; albo dokładasz alert i szukasz, gdzie dopisać kotwicę |
 
 Decyzje, na których stoi całość — z odrzuconymi wariantami — są w [`0-decyzje.md`](0-decyzje.md)
-(`DEC-1`…`DEC-8`). Kod odsyła do nich tym skrótem; numeracja `DEC-` jest rozłączna z `D1`…`D5`,
+(`DEC-1`…`DEC-13`). Kod odsyła do nich tym skrótem; numeracja `DEC-` jest rozłączna z `D1`…`D5`,
 którymi oznaczone są diagramy.
 
 ## Diagramy

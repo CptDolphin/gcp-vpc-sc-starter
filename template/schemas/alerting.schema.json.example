@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/vpc-sc/alerting.schema.json",
+  "title": "Alerting perimetru",
+  "description": "Kto zostaje obudzony i przy jakich progach. Plik jest OPCJONALNY — jego brak wyłącza polityki alertów (bezpieczna degradacja), ale gdy już jest, musi być kompletny: alert z połową konfiguracji budzi człowieka i nie mówi mu, do kogo należy problem.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "channels",
+    "thresholds",
+    "runbook_base_url"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "channels": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "DWA kanały, bo alert pojemnościowy i alert o obejściu procesu mają różnych odbiorców. Wspólny kanał kończy się wyuczoną obojętnością na całą kategorię.",
+      "required": [
+        "capacity",
+        "security"
+      ],
+      "properties": {
+        "capacity": {
+          "$ref": "#/$defs/channel"
+        },
+        "security": {
+          "$ref": "#/$defs/channel"
+        }
+      }
+    },
+    "thresholds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "attribute_budget_percent",
+        "days_to_limit_warning",
+        "days_to_limit_critical",
+        "apply_pending_seconds",
+        "watchdog_absent_seconds",
+        "drift_persist_seconds"
+      ],
+      "properties": {
+        "attribute_budget_percent": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 100,
+          "description": "Próg statyczny budżetu atrybutów, liczony OSOBNO dla `spec` i `status`."
+        },
+        "days_to_limit_warning": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Prognoza wyczerpania budżetu — poziom ostrzegawczy. MUSI być większy od `days_to_limit_critical`, inaczej warning nigdy nie odpali przed criticalem."
+        },
+        "days_to_limit_critical": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "apply_pending_seconds": {
+          "type": "integer",
+          "minimum": 300,
+          "description": "Minimum 300 s: apply trwa ~60 s, a serializacja `concurrency` przy dwóch wnioskach naraz przesuwa go o kilka minut. Niżej alert opisywałby normalną pracę pipeline'u."
+        },
+        "watchdog_absent_seconds": {
+          "type": "integer",
+          "minimum": 3600,
+          "description": "Musi tolerować co najmniej dwa pominięte przebiegi obserwatora — cron GitHuba jest best-effort."
+        },
+        "drift_persist_seconds": {
+          "type": "integer",
+          "minimum": 600,
+          "description": "Jak długo różnica Git↔chmura musi się utrzymać. Minimum 600 s, bo skutek zmiany w ACM propaguje się ~20 s dłużej niż sama konfiguracja — krótsze okno strzela po każdym apply."
+        }
+      }
+    },
+    "runbook_base_url": {
+      "type": "string",
+      "pattern": "^https://[^ ]+[^/ ]$",
+      "description": "Baza URL dokumentacji BEZ ukośnika na końcu — polityki doklejają `/7-alerty.md#kotwica`. Ukośnik na końcu dałby `//7-alerty.md`, czyli 404 z alertu o 3:00."
+    }
+  },
+  "$defs": {
+    "channel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "email"
+      ],
+      "properties": {
+        "email": {
+          "type": "string",
+          "format": "email",
+          "pattern": "^[^@ ]+@[^@ ]+\\.[^@ ]+$",
+          "description": "Adres odbiorcy. Kanał e-mail założony przez API startuje jako UNVERIFIED i do czasu kliknięcia linku Google NIE dostarcza powiadomień — polityka wygląda wtedy na uzbrojoną, a skrzynka milczy."
+        }
+      }
+    }
+  }
+}

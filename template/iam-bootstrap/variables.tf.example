@@ -44,6 +44,20 @@ variable "apply_environment" {
   }
 }
 
+variable "watch_ref" {
+  description = "Ref GitHuba, z którego wolno impersonować konto `watch` (obserwator granicy, `watch.yml`). Domyślnie gałąź domyślna. WĘŻEJ niż konto `plan`, mimo że `watch` robi mniej: `plan` jest read-only, a `watch` MA prawo zapisu metryki — czyli prawo do skłamania o stanie granicy. Token z pull requesta niesie `refs/pull/N/merge`, więc do tej wartości nie pasuje."
+  type        = string
+  default     = "refs/heads/main"
+
+  validation {
+    # Sama nazwa gałęzi (`main`) zamiast pełnego refa dałaby `principalSet` dopasowujący NIC — grant
+    # powstaje, workflow pada na `unable to impersonate`, a diagnoza schodzi na WIF i role. Wymuszamy
+    # kształt, w którym ta pomyłka nie przechodzi przez `plan`.
+    condition     = startswith(var.watch_ref, "refs/")
+    error_message = "watch_ref to PEŁNY ref (np. `refs/heads/main`), nie sama nazwa gałęzi."
+  }
+}
+
 variable "state_bucket" {
   description = "Bucket ze stanem Terraform repozytorium perimetru (versioning + soft-delete, BEZ retention-lock — lock łamie backend przy pierwszym zapisie)."
   type        = string

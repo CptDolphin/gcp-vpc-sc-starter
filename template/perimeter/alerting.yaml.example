@@ -1,0 +1,78 @@
+# Kto zostaje obudzony, gdy granica psuje sie po cichu — i przy jakich progach.
+#
+# DLACZEGO OSOBNY PLIK, A NIE SEKCJA W `policy.yaml`. To sa dwie rozne polityki z dwoma roznymi
+# wlascicielami i dwiema roznymi kadencjami zmian:
+#   * `policy.yaml` odpowiada na pytanie CO GRANICA PRZEPUSZCZA. Zmienia sie przy kazdym wniosku dywizji,
+#     recenzuje ja wlasciciel granicy, a kazda jej linijka renderuje sie na konfiguracje ACM.
+#   * ten plik odpowiada na pytanie KOGO BOLI, GDY MASZYNERIA PRZESTANIE DZIALAC. Zmienia sie przy zmianie
+#     dyzuru albo progu pojemnosci, recenzuje go SRE, i nie renderuje sie na granice ANI JEDNYM atrybutem.
+# Trzymanie ich razem daloby jeden plik, w ktorym zmiana adresu e-mail wpada w te sama sciezke review co
+# dopuszczenie nowego projektu do granicy — i odwrotnie: kazdy wniosek dywizji konfliktowalby z kazda
+# zmiana dyzuru. Rozdzielenie kosztuje jeden `yamldecode`.
+#
+# BRAK TEGO PLIKU = ALERTY WYLACZONE, i to jest bezpieczna degradacja, nie awaria: `monitoring.tf` renderuje
+# wtedy same metryki, bez ani jednej polityki alertu i bez ani jednego kanalu. Wdrozenie, ktore jeszcze nie
+# ma dyzuru, dostaje pomiar bez fikcji, ze ktos go oglada.
+
+schema_version: 1
+
+# --- KANALY -----------------------------------------------------------------------------------------
+#
+# DWA KANALY, NIE JEDEN — i to jest wymaganie, nie estetyka. Alert pojemnosciowy („budzet sie konczy")
+# czyta sie w godzinach pracy i planuje sie wokol niego prace. Alert o zmianie granicy poza pipeline'em
+# jest sygnalem, ze KTOS OBSZEDL PROCES albo ze trwa incydent — ten musi trafic do innego odbiorcy niz
+# ten, ktory dostaje comiesieczne „zblizasz sie do 70%". Wspolny kanal konczy sie tak samo zawsze:
+# odbiorca uczy sie ignorowac cala kategorie, bo dziewiec na dziesiec wiadomosci nie wymaga reakcji.
+#
+# `email` to najnizszy wspolny mianownik, ktory dziala wszedzie i nie wymaga zadnego integratora. Kanal
+# realnie budzacy (PagerDuty / Opsgenie / webhook do dyzuru) podmienia sie TUTAJ i nigdzie indziej —
+# `monitoring.tf` czyta te dwie nazwy, nie zna typu kanalu.
+#
+# UWAGA OPERACYJNA, KTORA WYWRACA PIERWSZE WDROZENIE: kanal e-mail zalozony przez API startuje jako
+# `verificationStatus: UNVERIFIED`. Google wysyla na ten adres jeden mail z linkiem i DO CZASU KLIKNIECIA
+# NIE DOSTARCZA POWIADOMIEN — polityka alertu wyglada wtedy na uzbrojona (ma `notificationChannels`),
+# incydent sie otwiera, a do skrzynki nie przychodzi nic. Po pierwszym `apply` sprawdz:
+#   gcloud alpha monitoring channels list --project=<projekt> --format='table(displayName,verificationStatus)'
+channels:
+  # Pojemnosc i higiena: budzet atrybutow, czlonkowie po `review_by`, nieudany apply.
+  capacity:
+    email: "example-platform@example.com"
+  # Granica bezpieczenstwa: konfiguracja zmieniona poza Gitem, ruch odrzucony w trybie egzekwowanym.
+  security:
+    email: "example-secops@example.com"
+
+# --- PROGI ------------------------------------------------------------------------------------------
+thresholds:
+  # Budzet atrybutow — prog STATYCZNY, ten sam, ktorego pilnuje bramka `tools/attribute_budget.py` na PR-ze.
+  # Liczony ODDZIELNIE dla `spec` (dry-run) i `status` (egzekwowana): limit 6000 jest NA KONFIGURACJE, nie
+  # laczny, wiec jedna liczba dla obu myli w obie strony naraz.
+  attribute_budget_percent: 70
+
+  # Budzet atrybutow — wymiar PREDYKCYJNY. Statyczny prog mowi „gdzie jestes", predykcyjny „ile masz czasu";
+  # przy +50 projektow na miesiac ta druga liczba jest wazniejsza, bo 65% z nachyleniem 200 atrybutow na
+  # tydzien jest gorsze niz 72% na plaskim wykresie. `dni_do_sciany = (limit - uzyte) / nachylenie_30d`.
+  days_to_limit_warning: 90
+  days_to_limit_critical: 30
+
+  # `apply` — po ilu sekundach od zmergowania zmiany granicy, ktora NIE zostala zastosowana, to jest incydent.
+  # 3600 s, a nie 300: apply trwa ~60 s, ale kolejka `concurrency` przy dwoch wnioskach naraz potrafi go
+  # przesunac o kilkanascie minut, a environment z wymaganym recenzentem — o tyle, ile trwa review.
+  apply_pending_seconds: 3600
+
+  # Watchdog: po ilu sekundach BRAKU pomiaru uznajemy, ze zepsul sie sam obserwator. Musi tolerowac co
+  # najmniej dwa pominiete przebiegi (cron GitHuba jest best-effort i potrafi sie spoznic o kilkanascie
+  # minut), stad 3x kadencja godzinna.
+  watchdog_absent_seconds: 10800
+
+  # Dryf — jak dlugo roznica miedzy Gitem a chmura musi sie UTRZYMAC, zanim uznamy ja za zmiane spoza Gita.
+  # DLACZEGO NIE 0: konfiguracja w ACM zmienia sie natychmiast, ale SKUTEK propaguje sie ~20 s dluzej
+  # (zmierzone przy rollbacku: 46 s do apply, 78 s do powrotu ruchu). Regula liczaca roznice w oknie
+  # krotszym niz propagacja strzelalaby po KAZDYM apply i nauczylaby dyzurnego ignorowac ja w tydzien.
+  # 3600 s to 180x zmierzona propagacja — margines jest tu tani, bo dryf utrzymuje sie do czasu naprawy.
+  drift_persist_seconds: 3600
+
+# --- RUNBOOK ----------------------------------------------------------------------------------------
+# Kazda polityka alertu niesie `documentation.links` z URL-em na KONKRETNA kotwice w `docs/7-alerty.md`.
+# Alert bez procedury budzi czlowieka i zostawia go z pytaniem, co teraz — czyli jest polowa rozwiazania.
+# Baza jest konfiguracja, bo docelowe repo ma inny adres niz starter; kotwice sa stale i pilnuje ich selftest.
+runbook_base_url: "https://github.com/example-org/example-perimeter/blob/main/docs"
