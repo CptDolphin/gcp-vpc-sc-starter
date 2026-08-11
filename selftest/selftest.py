@@ -230,6 +230,11 @@ def test_terraform() -> None:
         r = sh(["terraform", f"-chdir={tf}", "console"], input=wyrazenie + "\n")
         return r.stdout.strip().splitlines()[-1].strip() if r.stdout.strip() else ""
 
+    # Drugi czlonek jest przy okazji `stage: enforced`, zeby ta sama podmianka pokryla DRUGA sciezke, ktorej
+    # material startera nie uruchamia: `baseline_rules_enforced`. W swiezym repo nikt nie jest promowany, wiec
+    # ta mapa jest PUSTA i kazda asercja o niej przechodzi trywialnie — czyli kod konfiguracji EGZEKWOWANEJ
+    # wykonalby sie pierwszy raz przy pierwszej promocji, na zywej granicy. To jest dokladnie ta klasa awarii,
+    # ktora perimetr zna z autopsji (regula baseline obecna i nieautoryzujaca niczego).
     czlonkowie_przed = konsola("length(local.members)")
     baseline_przed = konsola("length(local.baseline_rules_all)")
 
@@ -238,24 +243,46 @@ def test_terraform() -> None:
     dane = yaml.safe_load(wzor.read_text())
     dane["project_id"] = "prj-selftest-kopia"
     dane["project_number"] = "999999999999"
+    dane["stage"] = "enforced"
     kopia.write_text(yaml.safe_dump(dane, allow_unicode=True, sort_keys=False))
+    klucz_all = "sort(keys(local.baseline_rules_all))[0]"
+    klucz_enf = "sort(keys(local.baseline_rules_enforced))[0]"
     try:
         czlonkowie_po = konsola("length(local.members)")
         baseline_po = konsola("length(local.baseline_rules_all)")
-        zasoby_po = konsola("length(local.baseline_rules_all[sort(keys(local.baseline_rules_all))[0]].resources)")
+        zasoby_po = konsola(f"length(local.baseline_rules_all[{klucz_all}].resources)")
+        enforced_po = konsola("length(local.enforced_members)")
+        baseline_enf = konsola("length(local.baseline_rules_enforced)")
+        # `join`, a nie sama lista: `terraform console` drukuje liste WIELOLINIOWO, a helper czyta ostatnia
+        # linie — czyli asercja badalaby nawias zamykajacy. Jedna linia jest tez porownywalna wprost.
+        zasoby_enf = konsola(f"join(\",\", local.baseline_rules_enforced[{klucz_enf}].resources)")
     finally:
         kopia.unlink()
 
     # Premisy sa czescia asercji: gdyby przykladowy czlonek albo baseline zniknal z materialu, ponizsze
     # rownosci byly by prawdziwe „bo nic nie ma", a test meldowalby zielono nie badajac niczego.
-    check("kolaps baseline: premisa (jeden czlonek i niepusty baseline w materiale startera)",
-          czlonkowie_przed == "1" and czlonkowie_po == "2" and baseline_przed not in ("0", ""),
-          f"czlonkowie {czlonkowie_przed!r}->{czlonkowie_po!r}, reguly baseline {baseline_przed!r}")
+    check("kolaps baseline: premisa (jeden czlonek dry-run i niepusty baseline w materiale startera)",
+          czlonkowie_przed == "1" and czlonkowie_po == "2" and enforced_po == "1"
+          and baseline_przed not in ("0", ""),
+          f"czlonkowie {czlonkowie_przed!r}->{czlonkowie_po!r}, enforced {enforced_po!r}, "
+          f"reguly baseline {baseline_przed!r}")
     check("kolaps baseline: drugi czlonek NIE mnozy regul baseline",
           baseline_przed == baseline_po,
           f"regul baseline przy jednym czlonku={baseline_przed!r}, przy dwoch={baseline_po!r}")
     check("kolaps baseline: drugi czlonek dokłada JEDEN zasob do reguly zbiorczej",
           zasoby_po == "2", f"len(resources) reguly baseline przy dwoch czlonkach={zasoby_po!r}")
+
+    # KONFIGURACJA EGZEKWOWANA. Regula zbiorcza MUSI w niej powstac (inaczej promocja zabiera skanerowi
+    # i raportowi naruszen dostep dokladnie w chwili, w ktorej zaczyna byc potrzebny) i MUSI celowac
+    # WYLACZNIE w czlonka `stage: enforced` — szersza lista autoryzowalaby w statusie projekt, ktorego
+    # w statusie nie ma. Sprawdzamy TRESC listy, nie jej dlugosc: przy jednym promowanym „1 zasob" byloby
+    # prawda takze wtedy, gdyby renderer wpisal tam nie tego czlonka.
+    check("kolaps baseline: regula zbiorcza POWSTAJE w konfiguracji egzekwowanej",
+          baseline_enf == baseline_przed,
+          f"regul baseline enforced={baseline_enf!r}, oczekiwane={baseline_przed!r}")
+    check("kolaps baseline: enforced celuje WYLACZNIE w czlonka stage: enforced",
+          zasoby_enf.strip('"') == "projects/999999999999",
+          f"resources reguly baseline w konfiguracji egzekwowanej={zasoby_enf!r}")
 
     # KOLEJNOSC DESTROY: regula ingress referuje access level po NAZWIE (string z YAML), wiec Terraform sam
     # nie zbuduje krawedzi i moze skasowac poziom przed regula — API odrzuca `you must first remove the
