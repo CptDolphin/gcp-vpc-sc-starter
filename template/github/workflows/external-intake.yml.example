@@ -5,19 +5,57 @@
 # instead of calling a ticketing system back, we check the request against perimeter/contributors.yaml,
 # which lives HERE and can only be changed with networking + security approval. A repository cannot widen
 # its own list of allowed projects, because that list is not in its repository.
+#
+# WHY workflow_dispatch AND NOT repository_dispatch. The trigger is chosen by the PERMISSION it forces on
+# the other side, not by taste. `repository_dispatch` can only be sent with Contents WRITE — the right to
+# write code in THIS repository. Compose that with a default branch without branch protection (a paid
+# feature for private repositories on several GitHub plans) and with apply running automatically from that
+# branch, and a division's credential stops being "the right to ask" and becomes a path to mutating the
+# organization's boundary with every gate bypassed: schema, OPA, budget and pre-flight all hang off
+# `pull_request`, and a push straight to the default branch runs none of them. `workflow_dispatch` needs
+# `actions: write`, which starts workflows and writes no code — measured, and disjoint from `contents` in
+# both directions.
+#
+# ONE channel, not two. `repository_dispatch: vpc-sc-external` was REMOVED rather than kept alongside for
+# a transition period: while both are live the wider permission is still the one the sender must hold, so
+# the narrowing buys nothing and the material would document a requirement that is not the real one.
+# (`intake.yml` — the ServiceNow channel — still listens on `repository_dispatch`. Its sender is the
+# ticketing integration, a different credential with a different owner; see docs/5-servicenow-intake.md.)
+#
+# WHAT `actions: write` STILL ALLOWS, said out loud rather than left flattering: re-running and cancelling
+# workflows in this repository, and DELETING run logs. Narrower than code write, not zero. The audit trail
+# that matters therefore lives in git — the pull request and its commit — not only in run history.
 
 name: external-intake
 
 on:
-  repository_dispatch:
-    types: [vpc-sc-external]
+  # Inputs are flat strings (max 10, 65535 characters each), so the nested declaration travels as ONE
+  # input holding JSON. `project_id` is repeated as its own input because `concurrency` is evaluated
+  # before any step runs and cannot parse JSON; the first step refuses the request when the two disagree.
+  workflow_dispatch:
+    inputs:
+      member:
+        description: The member declaration as a JSON object (the division's request.yaml plus change_ref).
+        required: true
+      project_id:
+        description: Project id from that declaration, repeated flat for the concurrency group.
+        required: true
+      source_repository:
+        description: ORG/REPO of the requesting repository.
+        required: true
+      source_sha:
+        description: Commit in the requesting repository the request was built from.
+        required: true
+      change_ref:
+        description: "Reference to the approved change, `pr:ORG/REPO#NUMBER`."
+        required: true
 
 permissions:
-  contents: write
+  contents: write # the bot commits the member file on a branch of THIS repository
   pull-requests: write
 
 concurrency:
-  group: external-intake-${{ github.event.client_payload.member.project_id }}
+  group: external-intake-${{ github.event.inputs.project_id }}
   cancel-in-progress: false
 
 jobs:
@@ -25,6 +63,20 @@ jobs:
     name: validate an external request and open a PR
     runs-on: ubuntu-latest
     steps:
+      # The dispatch endpoint takes a `ref` and runs the workflow FILE as it exists there. The sender picks
+      # that ref. It cannot create one — `actions: write` writes no code — but branches left behind by open
+      # pull requests do exist, and the version of this file on such a branch is not the version that was
+      # reviewed. Refusing anything but the default branch costs three lines and closes that gap from this
+      # side; the action closes it from the other by reading the default branch from the API.
+      - name: only the default branch handles external requests
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          [ "$GITHUB_REF_NAME" = "$DEFAULT_BRANCH" ] || {
+            echo "::error::zgloszenie zewnetrzne uruchomione na '$GITHUB_REF_NAME', a nie na '$DEFAULT_BRANCH'"
+            exit 1
+          }
+
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
@@ -39,13 +91,41 @@ jobs:
           tar -xzf /tmp/conftest.tar.gz -C /tmp conftest
           sudo mv /tmp/conftest /usr/local/bin/
 
-      # The dispatching repository is taken from the EVENT, never from the payload body. A payload can claim
-      # any source; github.event.client_payload.source_repository is written by the sender, but the App
-      # installation that delivered it is not — so we cross-check both and refuse on mismatch.
-      - name: write the member file
+      # WHO SENT THIS, recorded before anything is decided on it. `github.triggering_actor` is written by
+      # GitHub, not by the sender, so unlike every field of the payload it cannot be spoofed — but it names
+      # the APP INSTALLATION, not the repository, and one App installed on thirty division repositories
+      # produces the same actor for all thirty. So it is evidence of WHICH CREDENTIAL was used, not of which
+      # repository used it. That second question is answered by `contributors.yaml` below, and by nothing
+      # else. Writing this down is the point: an audit trail described as stronger than it is, is worse than
+      # a weak one honestly labelled.
+      - name: record who dispatched this
         env:
-          MEMBER_JSON: ${{ toJSON(github.event.client_payload.member) }}
-          SOURCE_REPO: ${{ github.event.client_payload.source_repository }}
+          ACTOR: ${{ github.triggering_actor }}
+          SOURCE_REPO: ${{ inputs.source_repository }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          CHANGE_REF: ${{ inputs.change_ref }}
+        run: |
+          {
+            echo "| ślad | wartość |"
+            echo "|---|---|"
+            echo "| \`triggering_actor\` (od GitHuba, niepodrabialny) | \`$ACTOR\` |"
+            echo "| \`source_repository\` (deklarowane w payloadzie) | \`$SOURCE_REPO\` |"
+            echo "| \`source_sha\` (deklarowane w payloadzie) | \`$SOURCE_SHA\` |"
+            echo "| \`change_ref\` (ustawiane przez akcję contrib) | \`$CHANGE_REF\` |"
+            echo
+            echo "Aktor identyfikuje INSTALACJĘ aplikacji, nie repozytorium — o to, czy TO repozytorium może"
+            echo "prosić o TEN projekt, pyta \`perimeter/contributors.yaml\` niżej."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # The payload is parsed HERE, from an environment variable, and never interpolated into a shell or a
+      # Python literal: `${{ inputs.member }}` pasted into code would let a request body become code.
+      - name: write the member file
+        id: render
+        env:
+          MEMBER_JSON: ${{ inputs.member }}
+          SOURCE_REPO: ${{ inputs.source_repository }}
+          PROJECT_ID: ${{ inputs.project_id }}
+          CHANGE_REF: ${{ inputs.change_ref }}
         run: |
           python3 - <<'PY'
           import datetime, json, os, pathlib, sys, yaml
@@ -54,7 +134,19 @@ jobs:
 
           member = json.loads(os.environ["MEMBER_JSON"])
           source = os.environ["SOURCE_REPO"]
-          ref = member.get("change_ref", "")
+
+          # change_ref travels as its own input AND inside the declaration. They must agree: the flat one is
+          # what the summary and the pull request quote, the nested one is what the OPA rules read.
+          if member.get("change_ref") != os.environ["CHANGE_REF"]:
+              sys.exit("change_ref w deklaracji rozni sie od change_ref w zgloszeniu")
+          ref = member["change_ref"]
+
+          # The concurrency group is built from the flat project_id, before any of this runs. If it named a
+          # different project than the declaration, two requests for one project would run in parallel while
+          # appearing serialised — so the disagreement is refused rather than resolved in favour of either.
+          if member.get("project_id") != os.environ["PROJECT_ID"]:
+              sys.exit(f"project_id w deklaracji ({member.get('project_id')!r}) rozni sie od "
+                       f"project_id w zgloszeniu ({os.environ['PROJECT_ID']!r})")
 
           # change_ref MUST point at the repository that actually sent this. Otherwise a repository could
           # claim a reference belonging to someone else's PR and inherit their allowed-project list.
@@ -93,6 +185,12 @@ jobs:
 
           out.write_text(yaml.safe_dump(member, sort_keys=False, allow_unicode=True))
           print(f"zapisano {out}")
+
+          # Branch name and PR title are built from these outputs rather than from the inputs context, so
+          # no part of a request body is ever evaluated as an expression or as shell. (Not even in a
+          # comment: actionlint parses expression syntax inside `run:`, heredoc or not.)
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write(f"division={member['division']}\nproject_id={member['project_id']}\n")
           PY
 
       - name: schema
@@ -108,18 +206,23 @@ jobs:
       - name: open the pull request
         uses: peter-evans/create-pull-request@c5a7806660adbe173f04e3e038b0ccdcd758773c # v6.1.0
         with:
-          branch: external/${{ github.event.client_payload.member.division }}-${{ github.event.client_payload.member.project_id }}
-          title: "onboard (external): ${{ github.event.client_payload.member.division }} / ${{ github.event.client_payload.member.project_id }}"
-          commit-message: "onboard: ${{ github.event.client_payload.member.project_id }} requested by ${{ github.event.client_payload.source_repository }}"
+          branch: external/${{ steps.render.outputs.division }}-${{ steps.render.outputs.project_id }}
+          title: "onboard (external): ${{ steps.render.outputs.division }} / ${{ steps.render.outputs.project_id }}"
+          commit-message: "onboard: ${{ steps.render.outputs.project_id }} requested by ${{ inputs.source_repository }}"
           body: |
-            Requested from **${{ github.event.client_payload.source_repository }}**
-            (commit `${{ github.event.client_payload.source_sha }}`).
+            Requested from **${{ inputs.source_repository }}**
+            (commit `${{ inputs.source_sha }}`), dispatched by `${{ github.triggering_actor }}`.
 
             Verified before this PR was opened:
+            - the request was handled by the default branch, not by a leftover feature branch,
             - `change_ref` points at the dispatching repository,
             - that repository is allowed to request this project (`perimeter/contributors.yaml`),
             - the declared division matches the one mapped to that repository,
             - the member enters the **dry-run** configuration — nothing is blocked, nothing is protected yet.
+
+            `triggering_actor` names the App installation that sent this, not the repository — one App on
+            many division repositories yields one actor. The repository claim is bounded by
+            `contributors.yaml`, and by nothing else.
 
             Still to be checked by a reviewer: whether the requested profiles match the described use case,
             and whether the project's network prerequisites are in place (pre-flight runs on `plan`).

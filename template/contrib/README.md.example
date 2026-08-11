@@ -19,7 +19,8 @@ musiałoby dostać prawo zmiany granicy **całej firmy**, bo uprawnień ACM nie 
 
 | Co | Po co |
 |---|---|
-| token GitHub App z `contents: write` na repo perimetru (i niczym więcej) | pobranie **kontraktu** i **paczki bramek** z release'ów oraz wysłanie zgłoszenia; dlaczego akurat tyle — §„Zakres tokenu" niżej |
+| token GitHub App z **`Contents: Read-only`** na repo perimetru | pobranie **kontraktu** i **paczki bramek** — jedno i drugie jest assetem release'u, a release'y są zasobem `Contents` |
+| token GitHub App z **`Actions: Read and write`** na repo perimetru | wysłanie zgłoszenia (`workflow_dispatch`); to uprawnienie URUCHAMIA workflow i **nie daje prawa zapisu kodu** — §„Zakres tokenu" niżej |
 
 **To wszystko.** Zero uprawnień do Access Context Managera, zero dostępu do stanu Terraform, zero tożsamości
 w Google Cloud.
@@ -126,18 +127,44 @@ odwrotnie, i to w obie strony:
 |---|---|---|
 | `contents: read` + `pull-requests: write` | `POST /repos/{o}/{r}/dispatches` | **403** `Resource not accessible by integration` |
 | `contents: write` | `POST /repos/{o}/{r}/dispatches` | **204** |
-| `actions: write` | `POST /repos/{o}/{r}/actions/workflows/{plik}/dispatches` | **204** |
+| `actions: write` (bez `contents`) | `POST /repos/{o}/{r}/actions/workflows/{plik}/dispatches` | **204** |
 | `contents: write` **bez** `actions` | `POST /repos/{o}/{r}/actions/workflows/{plik}/dispatches` | **403** |
+| `contents: read` (bez niczego więcej) | `GET /repos/{o}/{r}/releases` + pobranie assetu | **200** |
 
-- **`repository_dispatch` wymaga `contents: write`** — bez tego ostatni krok akcji `contrib` pada na 403.
-- **`pull_requests` nie jest potrzebne w ogóle** — PR-a otwiera po swojej stronie `external-intake.yml`,
-  własnym `GITHUB_TOKEN`-em repozytorium perimetru.
+Wiersze 3–4 są tu najważniejsze: **`actions` i `contents` są rozłączne w obie strony.** Token, który
+potrafi uruchomić workflow przyjmujący zgłoszenia, **nie potrafi zapisać ani jednego bajtu** w repozytorium
+perimetru. Wiersz 5 zamyka drugą połowę: `Contents: Read-only` wystarcza do pobrania kontraktu i paczki
+bramek, bo obie są **assetami release'u**.
 
-`contents: write` to prawo zapisu do repozytorium perimetru, czyli **więcej niż „otworzyć PR"**. GitHub nie
-ma uprawnienia o ziarnie „wyślij zdarzenie", więc kanału nie ogranicza zakres tokenu, tylko: mapowanie
-`contributors.yaml` po tamtej stronie, payload traktowany jako dane (a nie autoryzacja) i apply wyłącznie
-z gałęzi domyślnej. Wariant węższy — `workflow_dispatch` na `actions: write`, które **nie daje zapisu do
-kodu** — jest zmierzony w wierszach 3–4 i wymaga zmiany po obu stronach kanału.
+- **Kanał jedzie `workflow_dispatch`-em i wymaga `actions: write`.** `pull_requests` nie jest potrzebne
+  w ogóle — PR-a otwiera po swojej stronie `external-intake.yml`, własnym `GITHUB_TOKEN`-em repozytorium
+  perimetru.
+- **`repository_dispatch` był tu wcześniej i został wycofany**, bo wymaga `contents: write`, czyli prawa
+  zapisu do KODU perimetru. To „więcej niż otworzyć PR" — i składa się z drugim faktem: bramki treści
+  (schema, OPA, budżet, pre-flight) wiszą na zdarzeniu `pull_request`, a apply rusza z **pushu na gałąź
+  domyślną**. Poświadczenie z prawem zapisu jest więc ścieżką do zmiany granicy z pominięciem wszystkich
+  bramek wszędzie tam, gdzie gałąź domyślna nie jest chroniona (ochrona gałęzi to na części planów GitHuba
+  funkcja płatna dla repozytoriów prywatnych — patrz „Prerekwizyt" niżej).
+- **Czego `actions: write` NIE odbiera i o czym nie milczymy:** pozwala też ponawiać i anulować przebiegi
+  oraz **kasować logi przebiegów** w repo perimetru. Węższe niż zapis kodu, ale nie zerowe. Ślad, który
+  ma znaczenie, siedzi więc w gicie (PR i commit), a nie wyłącznie w historii przebiegów.
+
+Kanału i tak nie ogranicza sam zakres tokenu, tylko cztery rzeczy poza nim: mapowanie `contributors.yaml`
+po tamtej stronie, payload traktowany jako dane (a nie autoryzacja), apply wyłącznie z gałęzi domyślnej
+i **ochrona tej gałęzi**.
+
+### Prerekwizyt po stronie perimetru: gałąź domyślna MUSI być chroniona
+
+To nie jest zalecenie higieniczne. Bramki treści uruchamiają się na `pull_request`; push prosto na gałąź
+domyślną nie uruchamia **ani jednej** z nich, a apply rusza właśnie z tej gałęzi. Ochrona gałęzi jest tym,
+co sprawia, że słowo „bramka" cokolwiek znaczy.
+
+Zmierzone: na darmowym planie GitHuba dla repozytorium **prywatnego** `GET /repos/{o}/{r}/branches/main/protection`
+odpowiada **403** `Upgrade to GitHub Pro or make this repository public to enable this feature.` Upublicznienie
+repo perimetru nie jest obejściem — jego treść to mapa tego, co i skąd sięga po wasze dane.
+
+`tools/bootstrap_github.sh` odczytuje ten stan z API (nie z kodu wyjścia `PUT`-a), nazywa przyczynę i
+**kończy się błędem**, gdy ochrony nie ma. Świadome odstępstwo: `--no-branch-protection "<powód>"`.
 
 **Bramki przypinasz, kontraktu NIE.** To nie jest niekonsekwencja: bramki są **regułami**, więc pin daje
 powtarzalną walidację. Kontrakt jest **stanem świata** — przypięty pokazywałby profile i access levels,
@@ -146,8 +173,9 @@ których już nie ma, czyli dawałby zielono na wejściu, które repo perimetru 
 ## Co się dzieje po twojej stronie granicy
 
 1. Action waliduje plik lokalnie (schema + reguły onboardingu).
-2. Wysyła zgłoszenie z `change_ref: pr:TWOJE-REPO#NUMER` — **ustawianym przez action**, nie przez ciebie;
-   samodzielnie zadeklarowana referencja niczego by nie dowodziła.
+2. Wysyła zgłoszenie (`workflow_dispatch` na `external-intake.yml`, na gałęzi domyślnej repo perimetru)
+   z `change_ref: pr:TWOJE-REPO#NUMER` — **ustawianym przez action**, nie przez ciebie; samodzielnie
+   zadeklarowana referencja niczego by nie dowodziła.
 3. Repo perimetru sprawdza, czy twoje repozytorium ma ten projekt na liście dozwolonych
    (`perimeter/contributors.yaml`) i czy dywizja się zgadza — po czym otwiera PR.
 4. Zespół sieciowy zatwierdza, apply dodaje projekt do konfiguracji **dry-run**: nic nie jest blokowane
@@ -180,5 +208,6 @@ konfiguracją egzekwowaną (czyli innym perimetrem — to odczyt z żywego GCP) 
 | `profil … nie istnieje` | literówka albo profil, którego nie ma; `jq '.profiles[].name' contract.json` |
 | `access level … nie istnieje` | `jq '.access_levels' contract.json` — wskazujesz nazwę, nie zakres IP |
 | `brak kontraktu` | apply perimetru jeszcze nie przeszedł (release `contract` nie istnieje) albo twój token nie ma dostępu do release'ów repo perimetru |
-| `Resource not accessible by integration` (HTTP 403) na wysyłce zgłoszenia | token ma `contents: read` zamiast `contents: write` — `repository_dispatch` wymaga zapisu (§„Zakres tokenu") |
+| `Resource not accessible by integration` (HTTP 403) na wysyłce zgłoszenia | aplikacja nie ma `Actions: Read and write` na repo perimetru — `workflow_dispatch` wymaga `actions: write`, a `contents: write` na tym endpoincie **nie wystarcza** (§„Zakres tokenu") |
+| `Workflow does not have 'workflow_dispatch' trigger` (HTTP 422) | repo perimetru jest na starym kanale albo plik `external-intake.yml` nie istnieje na jego **gałęzi domyślnej** — GitHub przyjmuje `workflow_dispatch` tylko dla workflowów obecnych na tej gałęzi |
 | `profil … wymaga parametru …` | profil deklaruje parametr, którego nie podałeś — parametry są w pliku profilu |

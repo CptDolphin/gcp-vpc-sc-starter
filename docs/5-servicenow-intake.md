@@ -92,9 +92,17 @@ Content-Type: application/json
 }
 ```
 
-Token integracji potrzebuje **wyłącznie** `contents: write` + `pull-requests: write` na tym jednym
-repozytorium. Nie dotyka GCP — cała moc zapisu w chmurze siedzi w koncie apply, za environmentem z
-reviewerami.
+Token integracji potrzebuje `contents: write` na tym jednym repozytorium — tyle wymaga
+`repository_dispatch` (zmierzone; `pull-requests: write` **nie jest** potrzebne, bo PR-a otwiera po tej
+stronie `intake.yml` własnym `GITHUB_TOKEN`-em). Nie dotyka GCP — cała moc zapisu w chmurze siedzi
+w koncie apply, za environmentem z reviewerami.
+
+> **Ten kanał świadomie ZOSTAJE na `repository_dispatch`, a kanał dywizji został z niego zdjęty.** Różnica
+> jest w tym, kto trzyma poświadczenie. Integracja ticketowa to jeden system pod kontrolą tego samego
+> zespołu, co perimetr; kanał dywizji rozdaje token na zewnątrz, jednej instalacji na wiele repozytoriów
+> zespołów, i tam „ma prawo zapisu do kodu perimetru" jest zdaniem, którego nie chcemy wypowiadać
+> (`docs/0-decyzje.md` §DEC-7). Dla obu kanałów obowiązuje ten sam prerekwizyt: **chroniona gałąź
+> domyślna** — bez niej `contents: write` omija wszystkie bramki treści, bo te wiszą na `pull_request`.
 
 ---
 

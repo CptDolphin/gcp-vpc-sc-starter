@@ -919,6 +919,148 @@ def test_przyklad_repo_dywizji() -> None:
           (p.stdout + p.stderr)[-900:])
 
 
+# --------------------------------------------------- kanal dywizji: ktorym zdarzeniem i jakim prawem
+#
+# DLACZEGO to jest osobny test, a nie linijka w test_workflows(): przedmiotem jest UPRAWNIENIE, ktorego
+# selftest zobaczyc nie moze — nie ma API GitHuba i nie ma tokenu. Widzi za to jedyna rzecz, ktora to
+# uprawnienie WYZNACZA: endpoint wolany przez akcje i zdarzenie, na ktore nasluchuje druga strona.
+# `POST /repos/{o}/{r}/dispatches` wymaga `contents: write`, czyli prawa zapisu do KODU perimetru;
+# `POST /repos/{o}/{r}/actions/workflows/{plik}/dispatches` wymaga `actions: write`, ktore nie zapisuje
+# nic (zmierzone w obie strony, tabela w contrib/README.md). Powrot do pierwszego endpointu poszerza wiec
+# poswiadczenie DYWIZJI o prawo pisania w repozytorium perimetru — cicho, jedna linijka i bez sladu
+# w dokumentacji. To jest dokladnie ten rodzaj regresji, ktory ma padac tutaj.
+def kanal_zgloszenia(tekst: str) -> str:
+    """Ktorym endpointem akcja `contrib` wysyla zgloszenie — czytane z KODU, nie z komentarzy.
+
+    Komentarze sa wycinane, bo ten plik ma ich wiecej niz kodu i oba endpointy sa w nich OPISANE.
+    Detektor czytajacy komentarz twierdzilby, ze kanal jest jednoczesnie jednym i drugim.
+    """
+    kod = "\n".join(l for l in tekst.splitlines() if not l.lstrip().startswith("#"))
+    wf = re.search(r"/actions/workflows/\S*?/dispatches", kod) is not None
+    # Adres workflow-dispatcha KONCZY SIE na `/dispatches` i zawiera `repos/`, wiec bez wyciecia go
+    # najpierw kazdy `workflow_dispatch` wygladalby rowniez jak `repository_dispatch`.
+    bez_wf = re.sub(r"\S*/actions/workflows/\S*?/dispatches", "", kod)
+    repo = re.search(r"repos/\S*?/dispatches", bez_wf) is not None
+    if wf and repo:
+        return "oba"
+    if wf:
+        return "workflow_dispatch"
+    if repo:
+        return "repository_dispatch"
+    return "brak"
+
+
+def klucze_inputs_akcji(tekst: str) -> set:
+    """Nazwy `inputs`, ktore akcja realnie wysyla — z parowania nawiasow, nie z listy w tescie."""
+    start = tekst.find('"inputs": {')
+    if start < 0:
+        return set()
+    i = tekst.index("{", start + len('"inputs"'))
+    glebokosc, j = 0, i
+    while j < len(tekst):
+        if tekst[j] == "{":
+            glebokosc += 1
+        elif tekst[j] == "}":
+            glebokosc -= 1
+            if glebokosc == 0:
+                break
+        j += 1
+    return set(re.findall(r'"([a-z_]+)"\s*:', tekst[i:j + 1]))
+
+
+def test_kanal_dywizji() -> None:
+    print("\n== kanal dywizji (workflow_dispatch, nie repository_dispatch) ==")
+    akcja = (ROOT / "contrib/action.yml").read_text()
+    ext_tekst = (ROOT / ".github/workflows/external-intake.yml").read_text()
+    ext = yaml.safe_load(ext_tekst)
+    # `on:` w YAML-u jest wartoscia logiczna True (YAML 1.1), a nie napisem — stad ten odczyt.
+    zdarzenia = set((ext.get(True) or ext.get("on") or {}).keys())
+
+    check("contrib: zgloszenie idzie workflow_dispatch-em (endpoint /actions/workflows/.../dispatches)",
+          kanal_zgloszenia(akcja) == "workflow_dispatch", f"wykryto: {kanal_zgloszenia(akcja)}")
+    check("contrib: akcja NIE wola POST /repos/{o}/{r}/dispatches (to wymagaloby contents: write)",
+          kanal_zgloszenia(akcja) not in ("repository_dispatch", "oba"))
+
+    # ANTY-TAUTOLOGIA. Detektor, ktory zawsze mowi „workflow_dispatch", zazielenilby obie asercje wyzej
+    # i nie chronilby niczego. Karmimy go wiec czterema probkami o znanym werdykcie — w tym DOKLADNIE tym
+    # kodem, ktory stal w tej akcji przed zawezeniem kanalu.
+    probki = [
+        ("stan po zmianie", 'gh api --method POST "repos/${R}/actions/workflows/${W}/dispatches" --input -',
+         "workflow_dispatch"),
+        ("ROZBROJONY: stary kod sprzed zawezenia", 'gh api --method POST "repos/${R}/dispatches" --input -',
+         "repository_dispatch"),
+        ("oba naraz (okres przejsciowy = szersze uprawnienie nadal wymagane)",
+         'gh api --method POST "repos/${R}/actions/workflows/${W}/dispatches"\n'
+         'gh api --method POST "repos/${R}/dispatches"', "oba"),
+        ("sam komentarz o dispatchu to nie kanal", '# POST /repos/{o}/{r}/dispatches wymaga contents: write',
+         "brak"),
+    ]
+    for nazwa, probka, oczekiwane in probki:
+        check(f"detektor kanalu rozpoznaje: {nazwa}", kanal_zgloszenia(probka) == oczekiwane,
+              f"oczekiwano {oczekiwane}, wyszlo {kanal_zgloszenia(probka)}")
+
+    check("external-intake: nasluchuje workflow_dispatch", "workflow_dispatch" in zdarzenia, str(zdarzenia))
+    # JEDEN kanal, nie dwa. Dopoki `repository_dispatch` jest czynny, nadawca i tak MUSI miec `contents:
+    # write` — a wtedy zawezenie po drugiej stronie jest wylacznie zmiana w dokumentacji.
+    check("external-intake: repository_dispatch WYCOFANY (dwa czynne wejscia = szersze uprawnienie zostaje)",
+          "repository_dispatch" not in zdarzenia, str(zdarzenia))
+
+    deklarowane = set(((ext.get(True) or ext.get("on"))["workflow_dispatch"] or {}).get("inputs", {}))
+    wysylane = klucze_inputs_akcji(akcja)
+    # Producent i konsument musza mowic o TYCH SAMYCH nazwach. Oba zbiory czytamy z plikow — wpisane
+    # w test byly kopia konfiguracji, a badanym trybem awarii jest wlasnie ich rozjazd (ta sama choroba,
+    # ktora wywrocila raz artefakt raportu naruszen).
+    check("kanal: nazwy inputs u nadawcy = nazwy inputs u odbiorcy",
+          wysylane and wysylane == deklarowane, f"akcja={sorted(wysylane)} workflow={sorted(deklarowane)}")
+    # Limit GitHuba to 10 wejsc. Przekroczenie nie jest bledem skladni — objawia sie odrzuceniem
+    # zgloszenia u tej dywizji, ktorej wniosek akurat ma jedno pole za duzo.
+    check("kanal: liczba inputs miesci sie w limicie GitHuba (<= 10)", len(deklarowane) <= 10,
+          f"{len(deklarowane)}")
+
+    # Endpoint dispatcha przyjmuje `ref` i uruchamia workflow W WERSJI Z TEGO REFA. Nadawca ten ref wybiera.
+    # Utworzyc galezi nie moze (`actions: write` nie zapisuje kodu), ale galezie po otwartych PR-ach istnieja
+    # — a wersja tego pliku na takiej galezi nie jest wersja, ktora przeszla review.
+    check("external-intake: odmawia obslugi poza galezia domyslna",
+          "github.event.repository.default_branch" in ext_tekst and "GITHUB_REF_NAME" in ext_tekst)
+    check("contrib: ref brany z API (galaz domyslna perimetru), nie wpisany na sztywno",
+          re.search(r'gh api "repos/\$\{PERIMETER_REPO\}" --jq \.default_branch', akcja) is not None)
+
+    # REKURENCJA. Zmierzone: `workflow_dispatch` wyslany GITHUB_TOKEN-em URUCHAMIA workflow — inaczej niz
+    # mowi intuicja o blokadzie rekurencji dla zdarzen z tego tokenu. Petla jest wiec mozliwa i musi byc
+    # wykluczona konstrukcja: ten workflow nie wysyla zadnego dispatcha i nie nasluchuje na push/PR.
+    check("external-intake: sam nie wysyla dispatcha (petla wykluczona konstrukcja)",
+          kanal_zgloszenia(ext_tekst) == "brak", kanal_zgloszenia(ext_tekst))
+    check("external-intake: nie nasluchuje na push ani pull_request (jedno wejscie)",
+          not ({"push", "pull_request", "pull_request_target"} & zdarzenia), str(zdarzenia))
+
+    # Payload jest DANYMI. `${{ inputs.member }}` wstawione do `run:` albo do nazwy galezi bylo tresci
+    # zgloszenia dana jako KOD — dlatego deklaracja jedzie zmienna srodowiskowa, a nazwy galezi i tytul
+    # PR-a biora sie z outputow kroku, ktory ja rozparsowal.
+    check("external-intake: deklaracja czytana ze zmiennej srodowiskowej, nie wstawiana w kod",
+          "MEMBER_JSON: ${{ inputs.member }}" in ext_tekst
+          and 'json.loads(os.environ["MEMBER_JSON"])' in ext_tekst)
+    check("external-intake: nazwa galezi i tytul PR-a z outputow kroku, nie z inputs",
+          "steps.render.outputs.division" in ext_tekst
+          and "inputs.member }}-" not in ext_tekst)
+    # Grupa concurrency powstaje z PLASKIEGO project_id, zanim cokolwiek sie uruchomi. Gdyby nazywala inny
+    # projekt niz deklaracja, dwa zgloszenia o jeden projekt szlyby rownolegle, WYGLADAJAC na zserializowane.
+    check("external-intake: plaski project_id konfrontowany z deklaracja",
+          'os.environ["PROJECT_ID"]' in ext_tekst and "sys.exit" in ext_tekst)
+
+    # Ochrona galezi domyslnej po stronie perimetru jest PREREKWIZYTEM tego kanalu, nie higiena: bramki
+    # tresci wisza na `pull_request`, a apply rusza z pushu na te galaz. Selftest nie ma jak sprawdzic
+    # ustawienia repozytorium — moze sprawdzic, czy skrypt, ktory je zaklada, traktuje jego brak jako blad.
+    boot = (ROOT / "tools/bootstrap_github.sh").read_text()
+    check("bootstrap: ochrona galezi domyslnej ODCZYTYWANA z API, nie zakladana po PUT",
+          re.search(r'gh api "repos/\$SLUG/branches/\$GALAZ_DOMYSLNA/protection"', boot) is not None)
+    check("bootstrap: brak ochrony galezi konczy sie bledem bez jawnego odstepstwa",
+          "--no-branch-protection" in boot and "NO_BRANCH_PROTECTION" in boot
+          and re.search(r'if \[ -z "\$NO_BRANCH_PROTECTION" \]; then\n\s*echo[^\n]*\n\s*exit 1', boot)
+          is not None)
+    check("bootstrap: przyczyna 'plan bez ochrony galezi' NAZWANA, nie przemilczana",
+          "pgrade to GitHub" in boot)
+
+
 # --------------------------------------------------------------------- monitoring
 def test_monitoring() -> None:
     """Perimetr bez alertu to granica, o której dowiadujesz się od użytkownika."""
@@ -2279,6 +2421,7 @@ def main() -> int:
     test_contract()
     test_kontrakt_dwie_publikacje()
     test_przyklad_repo_dywizji()
+    test_kanal_dywizji()
     test_monitoring()
     test_brownfield()
     test_external_egress_and_guard()
