@@ -205,24 +205,46 @@ jobs:
           PY
 
       # Drugi, NIEZALEŻNY dowód: wpis w audit-logu. Odpowiedź API i log powstają w dwóch różnych miejscach,
-      # więc zgodność między nimi jest mocniejsza niż każde z osobna. `dryRun="false"` = odmowa egzekwowana.
+      # więc zgodność między nimi jest mocniejsza niż każde z osobna.
       # ZAKRES = PROJEKT CZŁONKA: wpis ląduje w logu projektu-właściciela zasobu, nie organizacji.
+      #
+      # ===========================================================================================
+      # DLACZEGO FILTR NIE MOŻE BRZMIEĆ `dryRun="false"` — ZMIERZONE, nie wydedukowane
+      # ===========================================================================================
+      # Wpis o odmowie EGZEKWOWANEJ nie ma pola `dryRun` W OGÓLE. Pole pojawia się WYŁĄCZNIE dla naruszeń
+      # dry-run, i wtedy ma wartość `true`. Odczyt tego samego okna na żywej organizacji, tuż po pierwszej
+      # realnej odmowie:
+      #
+      #   `google.storage.buckets.list`  dryRun=BRAK POLA  ['RESOURCES_NOT_IN_SAME_SERVICE_PERIMETER']  <- odmowa EGZEKWOWANA
+      #   `google.storage.buckets.list`  dryRun=True       ['RESOURCES_NOT_IN_SAME_SERVICE_PERIMETER']  <- to samo wywołanie w dry-run
+      #
+      # Filtr `dryRun="false"` nie dopasowuje więc NICZEGO — nigdy, w żadnej organizacji. Zmierzone: 12 wpisów
+      # w oknie, z czego 6 egzekwowanych, a filtr zwracał 0. Krok wyglądał na uzbrojony i był atrapą.
+      #
+      # Poprawny filtr to NEGACJA: „wszystko, co nie jest jawnie dry-run". Dopisanie `false` do listy wartości
+      # nie pomaga — pola nie ma, więc nie ma czego porównywać.
+      #
+      # DRUGI POWÓD, DLA KTÓREGO TEN KROK NIE UMIAŁ ZŚWIECIĆ NA CZERWONO: `python3 … | tee` oddaje kod wyjścia
+      # OSTATNIEGO ogniwa potoku, czyli `tee` (zawsze 0). `raise SystemExit` w kontroli „brak wpisu = dowody
+      # się nie zgadzają" był pochłaniany przez potok. Dwie niezależne przyczyny, jeden skutek: drugiego
+      # dowodu nie było i nie dało się tego zauważyć. Stąd `set -o pipefail`.
       - name: odmowa w audit-logu
         if: ${{ github.event.inputs.expect == 'blocked' }}
         env:
           PROJEKT: ${{ github.event.inputs.project }}
         run: |
+          set -o pipefail
           gcloud logging read \
             'protoPayload.metadata."@type"="type.googleapis.com/google.cloud.audit.VpcServiceControlAuditMetadata"
-             AND protoPayload.metadata.dryRun="false"' \
-            --project="$PROJEKT" --freshness=1h --limit=5 --format=json > odmowy.json || {
+             AND NOT protoPayload.metadata.dryRun="true"' \
+            --project="$PROJEKT" --freshness=1h --limit=20 --format=json > odmowy.json || {
               echo "::error::nie udalo sie przeczytac audit-logu — brak drugiego dowodu"
               exit 1
             }
           python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
-          import json, pathlib
+          import json, pathlib, sys
           w = json.loads(pathlib.Path("odmowy.json").read_text() or "[]")
-          print(f"\n### wpisy audytowe (dryRun=false, 1 h): {len(w)}\n")
+          print(f"\n### wpisy audytowe odmow EGZEKWOWANYCH (1 h): {len(w)}\n")
           for e in w:
               p = e.get("protoPayload", {})
               md = p.get("metadata", {})
@@ -232,12 +254,19 @@ jobs:
               powody = [md.get("violationReason")] if md.get("violationReason") else []
               for klucz in ("ingressViolations", "egressViolations"):
                   powody += [v.get("violationReason") for v in md.get(klucz, []) if v.get("violationReason")]
-              print(f"- `{p.get('methodName')}` · {powody or 'BRAK POWODU W WPISIE'} · "
+              # `dryRun` wypisujemy JAWNIE — gdyby kiedykolwiek zaczelo przychodzic jako `False` zamiast
+              # znikac, ten wypis pokaze to od razu, zamiast cicho zmienic znaczenie filtra wyzej.
+              print(f"- `{p.get('methodName')}` · dryRun={md.get('dryRun', 'BRAK POLA')!r} · "
+                    f"{powody or 'BRAK POWODU W WPISIE'} · "
+                    f"principal `{p.get('authenticationInfo', {}).get('principalEmail')}` · "
                     f"id `{md.get('vpcServiceControlsUniqueId')}`")
           if not w:
               # Brak wpisu przy zaobserwowanej odmowie oznacza, ze jeden z dwoch dowodow nie istnieje —
               # a wtedy nie wiadomo, ktory z nich klamie. To jest niezgodnosc, nie drobiazg.
-              raise SystemExit("brak wpisu audytowego przy odmowie — dowody sie nie zgadzaja")
+              # UWAGA: log potrafi indeksowac wpis kilkadziesiat sekund; przy pustym wyniku powtorz krok,
+              # zanim uznasz to za rozjazd dowodow.
+              print("\n**BRAK WPISU AUDYTOWEGO PRZY ZAOBSERWOWANEJ ODMOWIE — dowody sie nie zgadzaja.**")
+              sys.exit(1)
           PY
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
