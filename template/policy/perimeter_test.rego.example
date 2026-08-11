@@ -142,6 +142,40 @@ test_baseline_wildcard_resources_allowed if {
 		with data.baseline_ingress as baseline_declaration
 }
 
+# TA SAMA REGUŁA, ALE W KSZTAŁCIE Z PLANU BEZ ZMIAN — i to jest test na zmierzony tryb awarii, nie na
+# wariant składni.
+#
+# Nieustawiony selektor przychodzi w planie TWORZĄCYM zasób jako `null` (fixture wyżej), a w planie,
+# który go tylko odczytał ze stanu (`No changes`), jako **pusty string**. Przed poprawką `uprawnienia_z_planu`
+# liczyło `""` jako ustawione uprawnienie, więc porównanie z pustą deklaracją w `policy.yaml` przestawało
+# się zgadzać, wyjątek dla baseline'u przestawał obowiązywać i bramka odrzucała regułę, która nie zmieniła
+# się ani o bajt. ZMIERZONE na żywym planie repozytorium perimetru: bramka była zielona na pull requeście,
+# który wprowadzał `*` (tam wszystko było `create`), i czerwona na każdym następnym.
+#
+# Werdykt bramki nie może zależeć od tego, czy zasób właśnie powstaje, czy już stoi — dlatego oba kształty
+# mają tu własny test, a nie jeden „reprezentatywny".
+test_baseline_wildcard_allowed_takze_w_planie_bez_zmian if {
+	ze_stanu := json.patch(baseline_rule, [{
+		"op": "replace",
+		"path": "/values/ingress_to/0/operations/0/method_selectors/0/permission",
+		"value": "",
+	}])
+	count(deny) == 0 with input as plan_with([ze_stanu])
+		with data.baseline_ingress as baseline_declaration
+}
+
+# ANTY-TAUTOLOGIA do powyższego: pusty string ma być traktowany jak „nie ustawiono", a NIE jak „wszystko
+# przechodzi". Realne uprawnienie spoza deklaracji nadal musi odbierać wyjątek.
+test_baseline_wildcard_denied_for_extra_permission if {
+	podszywka := json.patch(baseline_rule, [{
+		"op": "replace",
+		"path": "/values/ingress_to/0/operations/0/method_selectors/0",
+		"value": {"method": "google.storage.buckets.get", "permission": "storage.objects.delete"},
+	}])
+	count(deny) > 0 with input as plan_with([podszywka])
+		with data.baseline_ingress as baseline_declaration
+}
+
 # Reguła baseline WOLNO mieć bez access levelu — ten sam predykat rozstrzyga oba wyjątki.
 test_baseline_without_access_level_allowed if {
 	bez_zrodla := json.patch(baseline_rule, [

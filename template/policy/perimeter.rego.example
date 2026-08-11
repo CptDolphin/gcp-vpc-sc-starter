@@ -284,11 +284,25 @@ uslugi_z_planu(r) := {op.service_name |
 }
 
 # `method_selectors` w plan-JSON ma OBA pola, a nieużywane jest `null` — stąd jawne odfiltrowanie.
+# PUSTY STRING ZNACZY „NIE USTAWIONO", TAK SAMO JAK `null` — I TO NIE JEST KOSMETYKA SKŁADNI.
+#
+# ZMIERZONE: te dwa zbiory czyta `regula_odpowiada_baseline`, czyli JEDYNY wyjątek pozwalający regule
+# baseline celować w `*`. W planie, który TWORZY regułę, nieustawiony selektor przychodzi jako `null`,
+# więc `uprawnienia_z_planu` było puste i zgadzało się z pustą deklaracją w `policy.yaml`. W planie bez
+# zmian (`No changes`) ta sama reguła przychodzi ze STANU, a tam provider zapisuje `permission: ""` —
+# zbiór przestawał być pusty, wyjątek przestawał obowiązywać i bramka odrzucała regułę baseline, która
+# nie zmieniła się ani o bajt.
+#
+# Efekt: bramka przechodziła na pull requeście, który wprowadzał `*` (tam wszystko było `create`),
+# i zapalała się na czerwono przy KAŻDYM następnym — czyli blokowała całe repozytorium, a komunikat
+# mówił o gwiazdce zamiast o tym, że porównanie patrzy na artefakt serializacji. Werdykt bramki NIE MOŻE
+# zależeć od tego, czy zasób właśnie powstaje, czy już stoi.
 metody_z_planu(r) := {[op.service_name, sel.method] |
 	some to_block in object.get(r.values, "ingress_to", [])
 	some op in object.get(to_block, "operations", [])
 	some sel in object.get(op, "method_selectors", [])
 	sel.method != null
+	sel.method != ""
 }
 
 uprawnienia_z_planu(r) := {[op.service_name, sel.permission] |
@@ -296,6 +310,7 @@ uprawnienia_z_planu(r) := {[op.service_name, sel.permission] |
 	some op in object.get(to_block, "operations", [])
 	some sel in object.get(op, "method_selectors", [])
 	sel.permission != null
+	sel.permission != ""
 }
 
 metody_zadeklarowane(b) := {[op.service, m] |
