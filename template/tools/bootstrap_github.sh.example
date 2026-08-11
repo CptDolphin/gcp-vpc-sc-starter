@@ -18,12 +18,13 @@
 #       --sa-apply sa-vpcsc-apply@proj.iam.gserviceaccount.com \
 #       --org-id 123456789012
 #
-#   ...--dry-run                     # pokaż, co zostanie wykonane, bez wykonywania
-#   ...--no-human-gate "<powód>"     # świadome odstępstwo: plan bez required reviewers (patrz krok 3)
+#   ...--dry-run                          # pokaż, co zostanie wykonane, bez wykonywania
+#   ...--no-human-gate "<powód>"          # świadome odstępstwo: plan bez required reviewers (krok 3)
+#   ...--no-branch-protection "<powód>"   # świadome odstępstwo: plan bez ochrony gałęzi (krok 4)
 set -euo pipefail
 
 ORG="" REPO="gcp-vpc-sc" NET_TEAM="" SEC_TEAM="" WIF="" SA_PLAN="" SA_APPLY="" ORG_ID="" DRY=0
-NO_HUMAN_GATE=""
+NO_HUMAN_GATE="" NO_BRANCH_PROTECTION=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --org) shift; ORG="${1:-}" ;;
@@ -35,6 +36,7 @@ while [ $# -gt 0 ]; do
     --sa-apply) shift; SA_APPLY="${1:-}" ;;
     --org-id) shift; ORG_ID="${1:-}" ;;
     --no-human-gate) shift; NO_HUMAN_GATE="${1:-}" ;;
+    --no-branch-protection) shift; NO_BRANCH_PROTECTION="${1:-}" ;;
     --dry-run) DRY=1 ;;
     *) echo "nieznany argument: $1" >&2; exit 2 ;;
   esac
@@ -185,6 +187,17 @@ else
 fi
 
 # 4. Ochrona main. `validate` i `plan` jako wymagane statusy — bez nich merge nie wie, czy zmiana jest legalna.
+#
+# TO JEST PREREKWIZYT, NIE OZDOBA — i to jest jedyna rzecz w tym skrypcie, która zmienia się od kroku 3
+# stopniem, nie rodzajem. Wszystkie bramki treści (schema, OPA, budżet, pre-flight) wiszą na zdarzeniu
+# `pull_request`. Push prosto na gałąź domyślną nie uruchamia ANI JEDNEJ z nich, a apply rusza właśnie
+# z tej gałęzi. Ochrona gałęzi jest więc tym, co w ogóle sprawia, że „bramka" znaczy bramkę: bez niej
+# każde poświadczenie z prawem zapisu do tego repozytorium — CI, integracja ticketowa, token dywizji —
+# jest ścieżką do zmiany granicy organizacji z pominięciem wszystkiego.
+#
+# Dlatego kanał dywizji został przestawiony na `workflow_dispatch` (`actions: write`, zero prawa zapisu),
+# a ten skrypt kończy się BŁĘDEM, gdy ochrony nie ma. Ta sama konwencja co przy bramce ludzkiej: brak ma
+# być decyzją zapisaną z powodem (`--no-branch-protection "<powód>"`), a nie odkryciem po fakcie.
 echo "== ochrona main =="
 protection='{
   "required_status_checks": {"strict": true, "contexts": ["declarations", "terraform", "plan"]},
@@ -196,19 +209,51 @@ protection='{
 }'
 if [ "$DRY" -eq 1 ]; then
   echo "  [dry-run] PUT repos/$SLUG/branches/main/protection (status checks + CODEOWNERS + no force-push)"
+  echo "  [dry-run] GET repos/$SLUG/branches/$GALAZ_DOMYSLNA/protection  <-- odczyt rozstrzyga, nie PUT"
 else
-  # Ochrona gałęzi w repozytorium PRYWATNYM też bywa funkcją płatną (odpowiedź 403 „Upgrade to ... or make
-  # this repository public"). To samo traktowanie co wyżej: nie przerywamy, tylko czytamy stan i mówimy głośno.
-  printf '%s' "$protection" | gh api --method PUT "repos/$SLUG/branches/main/protection" --input - >/dev/null || true
-  if gh api "repos/$SLUG/branches/$GALAZ_DOMYSLNA/protection" >/dev/null 2>&1; then
+  # Ochrona gałęzi w repozytorium PRYWATNYM bywa funkcją płatną. Nie przerywamy na PUT, bo jego kod wyjścia
+  # niczego nie dowodzi w żadną stronę — rozstrzyga ODCZYT niżej. Treść odpowiedzi zapisujemy, żeby móc
+  # nazwać PRZYCZYNĘ: „nie ma ochrony" i „ten plan nie ma z czego jej zrobić" to dwie różne decyzje.
+  odpowiedz_put="$(printf '%s' "$protection" \
+    | gh api --method PUT "repos/$SLUG/branches/main/protection" --input - 2>&1 >/dev/null || true)"
+  if odczyt="$(gh api "repos/$SLUG/branches/$GALAZ_DOMYSLNA/protection" 2>&1)"; then
     echo "  ochrona $GALAZ_DOMYSLNA potwierdzona odczytem"
+    # Sam fakt istnienia ochrony to nie to samo co ochrona, o której mówi dokumentacja. Wymagane statusy
+    # są tą jej częścią, która realnie uruchamia bramki treści — a da się je zdjąć, zostawiając resztę.
+    braki="$(printf '%s' "$odczyt" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+ctx = set(d.get("required_status_checks", {}).get("contexts", []))
+brak = [c for c in ("declarations", "terraform", "plan") if c not in ctx]
+print(",".join(brak))
+' 2>/dev/null || echo "?")"
+    [ -z "$braki" ] || echo "  UWAGA: ochrona istnieje, ale bez wymaganych statusów: $braki" >&2
   else
+    powod='odczyt z API jej nie widzi'
+    case "$odpowiedz_put$odczyt" in
+      *pgrade\ to\ GitHub*)
+        powod='API odpowiada 403 "Upgrade to GitHub Pro or make this repository public to enable this
+  feature", czyli TEN PLAN NIE MA OCHRONY GAŁĘZI DLA REPOZYTORIÓW PRYWATNYCH. To nie jest błąd
+  konfiguracji i nie da się tego naprawić żądaniem' ;;
+    esac
     {
-      echo "  OCHRONA GAŁĘZI $GALAZ_DOMYSLNA NIE ISTNIEJE — odczyt z API jej nie widzi."
-      echo "  Skutek: do gałęzi domyślnej można wypchnąć commit z pominięciem PR-a, bramek i CODEOWNERS,"
-      echo "  a apply rusza z pushem na tę gałąź. Upublicznienie repo perimetru NIE jest obejściem:"
-      echo "  jego treść to mapa tego, co i skąd sięga po wasze dane."
+      echo "  OCHRONA GAŁĘZI $GALAZ_DOMYSLNA NIE ISTNIEJE — $powod."
+      echo '  Skutek: do gałęzi domyślnej można wypchnąć commit z pominięciem PR-a, bramek i CODEOWNERS,'
+      echo '  a apply rusza z pushem na tę gałąź. Każde poświadczenie z prawem zapisu do tego repozytorium'
+      echo '  jest wtedy ścieżką do zmiany granicy organizacji bez ani jednej bramki treści.'
+      echo '  Upublicznienie repo perimetru NIE jest obejściem: jego treść to mapa tego, co i skąd sięga'
+      echo '  po wasze dane. Wyjścia są dwa: plan GitHuba z ochroną gałęzi dla repo prywatnych albo'
+      echo '  świadome odstępstwo z powodem.'
+      echo '  Co zostaje bez niej i jest realne: kanał dywizji na workflow_dispatch (token dywizji nie ma'
+      echo '  prawa zapisu), polityka gałęzi environmentu, warunek na environment w puli WIF, IAM Deny'
+      echo '  i bramki OPA uruchamiane PONOWNIE na planie w apply. Żadna z nich nie zatrzymuje pushu na'
+      echo '  gałąź domyślną — zatrzymuje go WYŁĄCZNIE ochrona gałęzi.'
     } >&2
+    if [ -z "$NO_BRANCH_PROTECTION" ]; then
+      echo "  Świadome odstępstwo: --no-branch-protection \"<powód>\"." >&2
+      exit 1
+    fi
+    echo "  ODSTĘPSTWO ŚWIADOME: $NO_BRANCH_PROTECTION" >&2
   fi
 fi
 
@@ -227,6 +272,16 @@ for env in perimeter-apply break-glass; do
   printf '  %s: reguly ochrony=%s | polityka galezi=%s %s\n' \
     "$env" "$reguly" "$tryb" "${galezie:+($galezie)}"
 done
+
+# Ochrona gałęzi domyślnej w tym samym druku, i z tego samego powodu co environmenty: to jedyna warstwa,
+# która zatrzymuje push z pominięciem bramek treści. Bez niej w wierszu stoi BRAK — nie „?", bo brak
+# odpowiedzi z API i brak ochrony znaczą tu dokładnie to samo dla kogoś, kto push wykonuje.
+ochrona="$(gh api "repos/$SLUG/branches/$GALAZ_DOMYSLNA/protection" \
+  --jq '[(.required_status_checks.contexts // [] | join(",")),
+         (if .required_pull_request_reviews then "review" else "bez review" end),
+         (if .enforce_admins.enabled then "admini tez" else "admini pomijaja" end)] | join(" | ")' \
+  2>/dev/null || echo "BRAK")"
+printf '  %s (galaz domyslna): ochrona=%s\n' "$GALAZ_DOMYSLNA" "${ochrona:-BRAK}"
 
 cat <<'NEXT'
 

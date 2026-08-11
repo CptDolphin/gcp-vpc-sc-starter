@@ -3,8 +3,19 @@
 #
 # The division's repository never applies anything and needs NO permission in Access Context Manager —
 # and, since the contract moved to a release asset, NO identity in Google Cloud at all. It needs exactly
-# one thing: a GitHub App token on THIS repository. See the `app-token` input for what that token really
-# has to be able to do — it is not what the phrase "it only opens a pull request" suggests.
+# one thing: a GitHub App token on THIS repository, with `Contents: Read-only` + `Actions: Read and write`.
+# See the `app-token` input for why those two and not the pair intuition suggests.
+#
+# WHY workflow_dispatch AND NOT repository_dispatch — the reason is a permission, not a preference.
+# `POST /repos/{o}/{r}/dispatches` requires Contents WRITE, i.e. the right to write CODE in the perimeter
+# repository (measured; the table is in contrib/README.md). Compose that with a default branch that has no
+# branch protection — a paid feature for private repositories on several GitHub plans — and with apply
+# running automatically from that branch, and a division's credential becomes a path to mutating the
+# organization's boundary while bypassing every gate: schema, OPA, budget and pre-flight all run on
+# `pull_request`, and a push straight to the default branch runs none of them.
+# `POST /repos/{o}/{r}/actions/workflows/{file}/dispatches` requires `actions: write`, which can START a
+# workflow and cannot write a single byte of code. The narrative — "one right: to cause a pull request to
+# be opened" — becomes true of the token itself, not just of the gates behind it.
 #
 # WHY the contract is fetched from a release and not from `gs://…`: reading the bucket copy requires the
 # division's repository to federate an identity into GCP and hold a grant on the contract prefix. Thirty
@@ -44,18 +55,26 @@ inputs:
     required: true
   app-token:
     description: >
-      Token of a GitHub App installed on both repositories, with `contents: write` on the perimeter
-      repository — and nothing else. MEASURED, because the intuitive answer is wrong in both directions:
-      the last step here calls `POST /repos/{owner}/{repo}/dispatches`, which needs Contents WRITE
-      (`contents: read` + `pull-requests: write` returns HTTP 403 "Resource not accessible by
-      integration"), while `pull_requests` is not needed at all — the pull request is opened on the other
-      side by `external-intake.yml`, with the perimeter repository's own GITHUB_TOKEN. Contents write is
-      broader than "open a pull request"; what actually bounds this channel is `perimeter/contributors.yaml`
-      living on the other side, the payload being data rather than authorization, and apply running only
-      from the default branch. A narrower variant exists (`workflow_dispatch` needs `actions: write`, which
-      grants no code write) and costs a change on both sides of the channel. GITHUB_TOKEN will NOT work
-      either way: it is scoped to the repository it was issued for.
+      Token of a GitHub App installed on both repositories, with exactly two permissions on the perimeter
+      repository: `Contents: Read-only` and `Actions: Read and write`. MEASURED, because every part of that
+      answer is counter-intuitive. `Contents: Read-only` is what downloads the gates bundle and the contract
+      (both are release assets, and release assets sit under Contents). `Actions: Read and write` is what the
+      last step needs: `POST /repos/{o}/{r}/actions/workflows/{file}/dispatches` returns 204 with
+      `actions: write` and 403 with `contents: write` alone — the two permissions are disjoint in BOTH
+      directions, so a token that can start this workflow cannot write a single file in the perimeter
+      repository. `pull_requests` is not needed at all: the pull request is opened on the other side by
+      `external-intake.yml`, with the perimeter repository's own GITHUB_TOKEN. What the token can still do
+      with `actions: write` and we do not hide: re-run and cancel workflows, and delete run logs. Narrower
+      than code write, not zero. GITHUB_TOKEN will NOT work here in any case — it is scoped to the
+      repository it was issued for.
     required: true
+  intake-workflow:
+    description: >
+      File name of the intake workflow in the perimeter repository. A file name, not a path: the API
+      addresses workflows by base name or numeric id. It has to exist on the perimeter repository's DEFAULT
+      branch — GitHub only accepts `workflow_dispatch` for workflows present there.
+    required: false
+    default: external-intake.yml
   gates-version:
     description: >
       Release tag of the gates bundle, or `latest`. Pin it if you want reproducible validation; use `latest`
@@ -118,18 +137,46 @@ runs:
 
     # change_ref is built by the ACTION, not read from the file — a self-declared reference proves nothing,
     # and the perimeter repository cross-checks it against the repository that actually sent the dispatch.
+    #
+    # `workflow_dispatch` carries INPUTS, and inputs are flat strings: at most 10 of them, 65535 characters
+    # each. The declaration is nested (profiles carry parameters), so it travels as ONE input holding JSON
+    # rather than exploded into fields. Two reasons, both about the failure mode rather than tidiness:
+    # a flattened payload would need a re-assembly step on the other side, and every profile parameter added
+    # to the catalogue would silently exceed 10 inputs — an error that only appears for the division whose
+    # request happens to be the eleventh field. `project_id` travels a SECOND time as its own input because
+    # `concurrency` is evaluated before any step runs and cannot parse JSON; the other side refuses the
+    # request if the two disagree, so the duplicate cannot become a way to serialise under a false name.
+    #
+    # `ref` is read from the API rather than hardcoded to `main`: the endpoint runs the workflow FILE as it
+    # exists at that ref, so pointing it anywhere else would run a version of the intake that no one
+    # reviewed. The other side refuses to run off its default branch anyway — that check and this one are
+    # deliberately on both ends, because either alone is a single point of "and then somebody changed it".
     - name: request the change
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.app-token }}
+        MEMBER_FILE: ${{ inputs.member-file }}
+        PERIMETER_REPO: ${{ inputs.perimeter-repo }}
+        INTAKE_WORKFLOW: ${{ inputs.intake-workflow }}
+        PR_NUMBER: ${{ github.event.pull_request.number || github.run_number }}
       run: |
-        change_ref="pr:${GITHUB_REPOSITORY}#${{ github.event.pull_request.number || github.run_number }}"
-        python3 -c "
+        set -euo pipefail
+        CHANGE_REF="pr:${GITHUB_REPOSITORY}#${PR_NUMBER}"
+        REF="$(gh api "repos/${PERIMETER_REPO}" --jq .default_branch)"
+        export CHANGE_REF REF
+        python3 - > dispatch-inputs.json <<'PY'
         import json, os, yaml
-        m = yaml.safe_load(open('${{ inputs.member-file }}'))
-        m['change_ref'] = '$change_ref'
-        print(json.dumps({'event_type': 'vpc-sc-external', 'client_payload': {
-            'member': m, 'source_repository': os.environ['GITHUB_REPOSITORY'],
-            'source_sha': os.environ['GITHUB_SHA']}}))
-        " | gh api --method POST "repos/${{ inputs.perimeter-repo }}/dispatches" --input -
-        echo "Zgłoszenie wysłane jako $change_ref — PR powstanie w ${{ inputs.perimeter-repo }}."
+        m = yaml.safe_load(open(os.environ["MEMBER_FILE"]))
+        m["change_ref"] = os.environ["CHANGE_REF"]
+        print(json.dumps({"ref": os.environ["REF"], "inputs": {
+            "member": json.dumps(m, sort_keys=True),
+            "project_id": str(m["project_id"]),
+            "source_repository": os.environ["GITHUB_REPOSITORY"],
+            "source_sha": os.environ["GITHUB_SHA"],
+            "change_ref": os.environ["CHANGE_REF"]}}))
+        PY
+        gh api --method POST \
+          "repos/${PERIMETER_REPO}/actions/workflows/${INTAKE_WORKFLOW}/dispatches" \
+          --input dispatch-inputs.json
+        rm -f dispatch-inputs.json
+        echo "Zgłoszenie wysłane jako ${CHANGE_REF} (${INTAKE_WORKFLOW}@${REF}) — PR powstanie w ${PERIMETER_REPO}."
