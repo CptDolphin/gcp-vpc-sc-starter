@@ -4082,6 +4082,20 @@ def test_boundary_probe() -> None:
     check("boundary-probe: filtr nie uzywa dryRun rownego false",
           not any('dryRun="false"' in w for w in kod_workflow))
 
+    # KORELACJA PO IDENTYFIKATORZE (#1999, druga polowa). Ponawianie samo w sobie nie wystarczylo:
+    # przelot zaliczyl sie w 0 s na TRZECH odmowach z POPRZEDNIEGO przebiegu, ktorych identyfikatory nie
+    # mialy ani jednego wspolnego z dwoma z tego przebiegu. Krok dowodzil wiec „byly jakies odmowy
+    # w godzinie", a nie „TE wywolania zostaly odmowione" — i przeszedlby przy wylaczonej granicy.
+    check("boundary-probe: krok audytowy koreluje po vpcServiceControlsUniqueId",
+          "oczekiwane-id.txt" in audyt
+          and "vpcServiceControlsUniqueIdentifier" in audyt
+          and "vpcServiceControlsUniqueId" in audyt)
+
+    # Pusty zbior oczekiwanych identyfikatorow NIE moze znaczyc „zaliczone" — inaczej brak odmowy
+    # w odpowiedziach (czyli granica, ktora nie zadzialala) dawalby zielony krok przez brak danych.
+    check("boundary-probe: brak identyfikatorow w odpowiedziach konczy krok bledem",
+          "zadna sonda nie zwrocila identyfikatora VPC-SC" in audyt)
+
     # Wyciagamy kod werdyktu z pliku i uruchamiamy go na wejsciach, ktorych nigdy nie widzial.
     # `[-1]` — bierzemy OSTATNI heredok python3 tego pliku (werdykt), nie pierwszy (odczyt stanu granicy).
     kod = re.search(r"python3 - <<'PY'[^\n]*\n(.*?)\n\s*PY\n", tresc[tresc.index("- name: sondy"):], re.S)

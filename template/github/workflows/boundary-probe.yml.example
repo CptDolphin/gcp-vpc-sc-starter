@@ -246,6 +246,27 @@ jobs:
           # Czekamy do 2 min: gorna granica jest swiadomie wyzsza od zmierzonych 14 s, bo indeksowanie
           # logu nie ma gwarancji czasowej. Rozroznienie „nie udalo sie przeczytac" od „jeszcze nie ma"
           # zostaje ostre: pierwsze konczy krok NATYCHMIAST, drugie tylko przedluza czekanie.
+          # KORELACJA PO IDENTYFIKATORZE, NIE „jakiekolwiek odmowy w oknie". Zmierzone 2026-08-12 na
+          # pierwszym zielonym przelocie po naprawie ponawiania: krok zaliczyl sie w 0 s, bo w oknie 1 h
+          # lezaly TRZY odmowy z POPRZEDNIEGO przelotu sondy — a identyfikatory tych wpisow nie mialy ANI
+          # JEDNEGO wspolnego z dwoma, ktore dostaly sondy tego przebiegu. Czyli krok przeszedlby takze
+          # wtedy, gdyby TE wywolania nie zostaly odmowione: dowodzil istnienia odmow w ogole, a nie
+          # odmowy tych konkretnych wywolan. Ponawianie bylo konieczne, ale niewystarczajace.
+          #
+          # `vpcServiceControlsUniqueIdentifier` z ODPOWIEDZI API i `vpcServiceControlsUniqueId` we WPISIE
+          # audytowym niosa te sama wartosc (zmierzone #1941) — i tylko ona wiaze dwa zrodla dowodu z tym
+          # samym wywolaniem.
+          grep -ohE 'vpcServiceControlsUniqueIdentifier: [A-Za-z0-9_-]+' sondy/*.out \
+            | awk '{print $2}' | sort -u > oczekiwane-id.txt || true
+          if [ ! -s oczekiwane-id.txt ]; then
+            # Pusty zbior oczekiwanych NIE moze znaczyc „zaliczone". Przy `expect=blocked` brak choc jednego
+            # identyfikatora w odpowiedziach oznacza, ze zadna sonda nie dostala odmowy VPC-SC — a wtedy nie
+            # ma czego korelowac i milczenie byloby zaliczeniem pustki.
+            echo "::error::zadna sonda nie zwrocila identyfikatora VPC-SC — nie ma czego szukac w audit-logu"
+            exit 1
+          fi
+          echo "oczekiwane identyfikatory: $(wc -l < oczekiwane-id.txt)"
+
           PROBY=8
           ODSTEP=15
           CZEKANO=0
@@ -253,11 +274,11 @@ jobs:
             if ! gcloud logging read \
                  'protoPayload.metadata."@type"="type.googleapis.com/google.cloud.audit.VpcServiceControlAuditMetadata"
                   AND NOT protoPayload.metadata.dryRun="true"' \
-                 --project="$PROJEKT" --freshness=1h --limit=20 --format=json > odmowy.json; then
+                 --project="$PROJEKT" --freshness=1h --limit=50 --format=json > odmowy.json; then
               echo "::error::nie udalo sie przeczytac audit-logu — brak drugiego dowodu"
               exit 1
             fi
-            if [ "$(python3 -c 'import json,pathlib;print(len(json.loads(pathlib.Path("odmowy.json").read_text() or "[]")))')" -gt 0 ]; then
+            if python3 -c 'import json,pathlib,sys; wpisy=json.loads(pathlib.Path("odmowy.json").read_text() or "[]"); w_logu={e.get("protoPayload",{}).get("metadata",{}).get("vpcServiceControlsUniqueId") for e in wpisy}; sys.exit(0 if set(pathlib.Path("oczekiwane-id.txt").read_text().split()) <= w_logu else 1)'; then
               break
             fi
             if [ "$PROBA" -lt "$PROBY" ]; then
@@ -287,12 +308,19 @@ jobs:
                     f"{powody or 'BRAK POWODU W WPISIE'} · "
                     f"principal `{p.get('authenticationInfo', {}).get('principalEmail')}` · "
                     f"id `{md.get('vpcServiceControlsUniqueId')}`")
-          if not w:
+          # WERDYKT PO IDENTYFIKATORACH, nie po liczbie wpisow. „Sa jakies odmowy w oknie" jest prawda takze
+          # wtedy, gdy pochodza z poprzedniego przelotu sondy — zmierzone: 3 wpisy w logu, 2 identyfikatory
+          # z odpowiedzi, ZERO wspolnych, a krok zaliczyl sie w 0 s. Pytamy wiec o TE wywolania.
+          oczekiwane = set(pathlib.Path("oczekiwane-id.txt").read_text().split())
+          w_logu = {e.get("protoPayload", {}).get("metadata", {}).get("vpcServiceControlsUniqueId") for e in w}
+          brakuje = sorted(oczekiwane - w_logu)
+          print(f"\nidentyfikatory sond: {len(oczekiwane)} · z tego w audit-logu: {len(oczekiwane) - len(brakuje)}")
+          if brakuje:
               # Brak wpisu przy zaobserwowanej odmowie oznacza, ze jeden z dwoch dowodow nie istnieje —
               # a wtedy nie wiadomo, ktory z nich klamie. To jest niezgodnosc, nie drobiazg.
-              # UWAGA: log potrafi indeksowac wpis kilkadziesiat sekund; przy pustym wyniku powtorz krok,
-              # zanim uznasz to za rozjazd dowodow.
-              print("\n**BRAK WPISU AUDYTOWEGO PRZY ZAOBSERWOWANEJ ODMOWIE — dowody sie nie zgadzaja.**")
+              print("\n**ODMOWA BEZ WPISU AUDYTOWEGO — dowody sie nie zgadzaja.** Brakuje:")
+              for i in brakuje:
+                  print(f"- `{i}`")
               sys.exit(1)
           PY
 
