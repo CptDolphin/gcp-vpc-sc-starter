@@ -1,0 +1,63 @@
+# .github/actions/bramka-promocji/action.yml
+# JEDNA bramka, jeden wywołujący — i to jest cała jej definicja: wyłącznie mutator.
+#
+# DLACZEGO OSOBNA AKCJA, A NIE KROK W `bramki-tresci` ALBO `bramki-zywe`. Tamte dwa zestawy pytają o TREŚĆ
+# zmiany („czy ta deklaracja jest dopuszczalna") i dlatego biegną na OBU torach: pull request i apply.
+# Ta bramka pyta o MOMENT („czy wykonanie tego apply, teraz, zacznie komuś odmawiać") — a to pytanie nie
+# ma sensu na pull requeście: promujący pull request MA być zielony, przejrzany i scalony; zatrzymanie
+# należy się dopiero wykonaniu.
+#
+# Rozdział jest więc po ROLI, nie po wygodzie, i osobny plik czyni tę asymetrię widoczną w drzewie.
+# Alternatywa — wspólna akcja z wejściem `blokuj: true|false` — chowa ją we fladze, którą wystarczy
+# przestawić na `false` w jednym miejscu, żeby bramka zniknęła z mutatora i nadal wyglądała na obecną.
+# To ta sama klasa defektu, którą zamyka DEC-16: kontrola stojąca obok ścieżki, którą zmienia się granicę.
+#
+# DLACZEGO NIE DRUGI WORKFLOW „promote.yml". Bo apply istnieje w tym repozytorium DOKŁADNIE RAZ i tak ma
+# zostać: drugi workflow z własnym `terraform apply` to druga kopia mutatora (własny checkout, własna
+# wymiana tokenu WIF, własna publikacja kontraktu), która rozjedzie się z pierwszą przy pierwszej zmianie —
+# a rozjazd mutatora jest awarią, o której dowiadujesz się na żywej granicy. Zamiast tego jeden workflow
+# ma dwa tryby, rozróżniane WEJŚCIEM, którego GitHub nie wyprodukuje sam: pole formularza `promocje`
+# istnieje tylko przy ręcznym uruchomieniu (`workflow_dispatch`). `promotion_hold.py` odrzuca zatwierdzenie
+# przyniesione przez jakiekolwiek inne zdarzenie, więc wpisanie go na stałe w plik nie jest obejściem.
+#
+# GDZIE STOI W JOBIE APPLIKUJĄCYM: po `bramki-zywe`, PRZED `terraform plan`. Trzy powody, każdy mierzalny:
+#   * to jedno wywołanie API — tańsze niż plan i niepotrzebujące planu;
+#   * zatrzymanie następuje PRZED wzięciem zamka stanu, więc przebieg wstrzymany nie blokuje niczyjego apply;
+#   * po `bramki-zywe`, bo tamte odrzucają deklarację niewykonalną (usługa spoza VPC-SC, bucket stanu
+#     w złym projekcie) — nie ma po co pytać człowieka o zgodę na apply, który i tak by nie przeszedł.
+
+name: bramka promocji
+description: >-
+  Wstrzymuje apply, który zacząłby egzekwować granicę wobec członka będącego dziś w dry-run. Zwalnia
+  wyłącznie ręczne uruchomienie z listą kluczy członków równą zbiorowi oczekujących promocji.
+
+inputs:
+  zatwierdzone_promocje:
+    description: >-
+      Zawartość pola `promocje` z ręcznego uruchomienia. Puste (każdy `push`) znaczy „ten przebieg nie
+      ma zgody na promowanie nikogo" — czyli bezpieczna wartość domyślna, a nie brak konfiguracji.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    # Ta akcja bywa jedyną, która w danym przebiegu czyta YAML-e repozytorium (`bramki-tresci` nie biegną
+    # w jobie applikującym), więc nie zakłada, że ktoś przed nią zainstalował pyyaml. Instalacja jest
+    # idempotentna i kosztuje sekundy.
+    - name: pyyaml dla bramki
+      shell: bash
+      run: pip install --quiet pyyaml
+
+    # Wejście idzie przez `env`, nie przez interpolację do `run:`. Treść pola formularza jest DANYMI —
+    # wstawiona wprost w skrypt byłaby wykonywana przez powłokę, a autorem tej treści jest człowiek
+    # uruchamiający apply, czyli dokładnie ta osoba, której świadome działanie ta bramka ma wymusić.
+    - name: promocja do enforced wymaga świadomego uruchomienia
+      shell: bash
+      env:
+        ZATWIERDZONE: ${{ inputs.zatwierdzone_promocje }}
+        ZDARZENIE: ${{ github.event_name }}
+        KTO: ${{ github.triggering_actor }}
+      run: |
+        python3 tools/promotion_hold.py \
+          --zatwierdzone "$ZATWIERDZONE" --zdarzenie "$ZDARZENIE" --kto "$KTO"

@@ -110,7 +110,27 @@ gh workflow run violations-report.yml -f days=14
 4. Bramki muszą przejść. Jeśli `promotion_gate` odrzuca — nie obchodź go zmianą `dry_run_since`. To pole jest
    datą wejścia do dry-run, nie parametrem do dostrojenia.
 
-5. Merge → apply czeka na zatwierdzenie w environment `perimeter-apply`.
+5. **Merge NIE JEST promocją — apply zatrzyma się sam.** Po scaleniu `apply.yml` rusza, wykonuje bramki
+   i **staje na bramce promocji**, zanim weźmie zamek stanu. Przebieg jest CZERWONY i wypisuje, kogo ten
+   apply zacząłby egzekwować. To jest zamierzone: promocja to jedyna zmiana w tym repozytorium, której
+   skutkiem jest odmowa ruchu (DEC-17).
+
+   Przeczytaj listę z podsumowania przebiegu i uruchom apply ręcznie, wpisując **dokładnie tych** członków:
+
+```bash
+gh workflow run apply.yml -f promocje="<dywizja>-<project_id>" && gh run watch
+```
+
+   Lista musi być **równa** zbiorowi oczekujących promocji — nie podzbiorem ani nadzbiorem. Jeśli w
+   międzyczasie ktoś scalił drugą promocję, bramka stanie ponownie: masz wtedy zatwierdzić obie świadomie
+   albo zrewertować jedną. Drugie wyjście z zatrzymanego apply jest zawsze dostępne i nie wymaga niczyjej
+   zgody: `git revert <commit promocji> && git push` — zdejmowanie egzekwowania nie jest bramkowane.
+
+   Environment `perimeter-apply` **nie jest** tą bramką: wymagani recenzenci to funkcja płatna dla
+   repozytoriów prywatnych i na planie bez niej environment zostaje bez ani jednej reguły ochrony
+   (`tools/bootstrap_github.sh` odczytuje to z API i mówi o tym wprost). Gdy wasz plan ją ma — zostawcie
+   włączoną; obie warstwy się składają, bo dają co innego: recenzent to **druga tożsamość**, bramka
+   promocji to **drugi świadomy akt w momencie skutku**.
 
 6. **Zmierz po apply** (done = zmierzone). Najpierw ta sama sonda co w kroku 0b, tylko z drugim
    oczekiwaniem — to jest **jedyny** dowód, że granica cokolwiek blokuje:

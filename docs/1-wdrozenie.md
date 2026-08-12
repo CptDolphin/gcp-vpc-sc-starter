@@ -100,7 +100,11 @@ Wszystko to robi `tools/bootstrap_github.sh` — i, co ważniejsze, **czyta wyni
 > odstępstwo).
 
 > Environment jest bramką **niezależną** od CODEOWNERS: nawet zmergowany PR nie zaaplikuje się, dopóki
-> człowiek nie zatwierdzi uruchomienia. To jedyne miejsce, w którym „merge" i „zmiana granicy" są rozdzielone.
+> człowiek nie zatwierdzi uruchomienia. Rozdziela „merge" od „zmiany granicy" dla **każdego** apply — i to
+> jest jego zaleta oraz jego koszt (patrz niżej). Drugie takie rozdzielenie, węższe i działające na każdym
+> planie, robi **bramka promocji** (DEC-17): zatrzymuje wyłącznie ten apply, który zacząłby egzekwować
+> granicę wobec kogoś nowego. Nie zastępują się nawzajem — recenzent to druga tożsamość, bramka promocji
+> to drugi świadomy akt w momencie skutku.
 
 **Zweryfikuj, że bramka istnieje — nie zakładaj tego po wysłaniu ustawienia:**
 
@@ -117,12 +121,23 @@ ważą inaczej:
 |---|---|---|
 | polityka gałęzi (`branch_policies` puste, `deployment_branch_policy: null`) | **dziura**, nie odstępstwo: `principalSet` konta apply pinuje samą nazwę environment, więc job z `environment: perimeter-apply` na **dowolnej** gałęzi dostaje tożsamość zapisującą | ustaw natychmiast — działa na każdym planie GitHuba |
 | **ochrona gałęzi domyślnej** (`403` albo `404` na `branches/main/protection`) | **prerekwizyt**: bez niej bramki treści są omijalne pushem, a apply rusza z tego samego miejsca. Na darmowym planie dla repo prywatnego API odpowiada `403 Upgrade to GitHub Pro or make this repository public to enable this feature.` | plan GitHuba z ochroną gałęzi dla repo prywatnych **albo** zapisane odstępstwo (`bootstrap_github.sh --no-branch-protection "<powód>"`). Upublicznienie repo perimetru **nie jest** obejściem — jego treść to mapa dostępów do waszych danych |
-| wymagani recenzenci (`protection_rules: []`) | funkcja płatna; na części planów prywatnych API ją odrzuca (`Please ensure the billing plan supports…`) | jeśli plan jej nie ma: **zapisz świadome odstępstwo z powodem** i wymień kontrole, które zostają — polityka gałęzi, `principalSet` na environment, IAM Deny na kasowaniu, bramki OPA uruchamiane **ponownie** na planie w apply, `git revert` + apply jako droga wycofania. Zaznacz też, czego one NIE dają: pary oczu na treści zmiany |
+| wymagani recenzenci (`protection_rules: []`) | funkcja płatna; na części planów prywatnych API ją odrzuca (`Please ensure the billing plan supports…`) | jeśli plan jej nie ma: **zapisz świadome odstępstwo z powodem** i wymień kontrole, które zostają — polityka gałęzi, `principalSet` na environment, **bramka promocji na ścieżce apply (DEC-17, działa na każdym planie)**, IAM Deny na kasowaniu, bramki OPA uruchamiane **ponownie** na planie w apply, `git revert` + apply jako droga wycofania. Zaznacz też, czego one NIE dają: pary oczu na treści zmiany |
 
-Nie zastępuj wtedy apply ręcznym `workflow_dispatch` w przekonaniu, że to przywraca bramkę: pauza to nie
-kontrola, a gdy „zatwierdza" ta sama osoba, która zmergowała, w tej samej minucie — jest to ta sama para
-oczu w innym oknie przeglądarki. Jeśli w waszym środowisku bramka ludzka istnieje, **używajcie jej**;
+Nie zastępuj wtedy **całego** apply ręcznym `workflow_dispatch` w przekonaniu, że to przywraca bramkę:
+pauza przed każdym apply to nie kontrola, tylko przycisk, który po tygodniu klika się bez czytania —
+a gdy „zatwierdza" ta sama osoba, która zmergowała, w tej samej minucie, jest to ta sama para oczu
+w innym oknie przeglądarki. Jeśli w waszym środowisku bramka ludzka istnieje, **używajcie jej**;
 odstępstwo opisane wyżej jest wyjątkiem dla środowisk, w których jej po prostu nie ma.
+
+**Czym różni się od tego bramka promocji (DEC-17), która zostaje włączona zawsze.** Trzema rzeczami, i to
+one decydują, czy pauza jest czytana:
+* **zakresem** — staje wyłącznie przed apply, który zaczyna komuś ODMAWIAĆ ruchu; przy pozostałych
+  przebiegach nie istnieje, więc nie zamienia się w rutynę;
+* **treścią zgody** — nie pyta „zatwierdzasz?", tylko wymaga wypisania **kogo** ten przebieg odetnie;
+  zbiór musi być równy oczekującym promocjom, więc zgoda „na wszystko" jest niewyrażalna, a zgoda
+  nieaktualna (ktoś dołożył drugą promocję) zatrzymuje przebieg ponownie;
+* **tym, czego nie udaje** — nie jest przeglądem TREŚCI zmiany i nie zastępuje CODEOWNERS ani recenzenta.
+  Odpowiada na jedno pytanie: czy człowiek świadomie wybrał ten moment na odcięcie ruchu.
 
 ## Etap 5 — pierwszy członek, zawsze w dry-run
 
