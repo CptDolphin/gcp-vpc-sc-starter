@@ -1,0 +1,42 @@
+# .github/actions/bramki-zywe/action.yml
+# Dwie bramki, które NIE CZYTAJĄ PLIKU — pytają API, jak wygląda rzeczywistość.
+#
+# DLACZEGO OSOBNA AKCJA OD `bramki-tresci`. Rozdział idzie po WYMAGANIU ŚRODOWISKA, nie po ważności:
+# tamten zestaw ma być wykonywalny bez żadnej tożsamości w chmurze (szybki feedback na pull requeście
+# i wykonalność na każdej gałęzi), a ten wymaga poświadczeń. Sklejone w jedną akcję zmusiłyby
+# `validate.yml` do wymiany tokenu WIF, czyli zamieniłyby tani, offline'owy tor w tor zależny od chmury.
+#
+# KTO WOŁA: `plan.yml` (pull request) i job bramek w `apply.yml` (mutator). Trzeci wywołujący byłby
+# sygnałem, że coś jest nie tak — te dwa tory to całość ścieżek, którymi zmienia się granica.
+#
+# WYMAGANIE WYWOŁUJĄCEGO: krok `google-github-actions/auth` MUSI stać wcześniej w tym samym jobie.
+# Ta akcja świadomie NIE uwierzytelnia się sama — uwierzytelnienie wybiera TOŻSAMOŚĆ, a to jest decyzja
+# wywołującego (`plan` read-only kontra `apply` zapisujący), nie szczegół implementacji bramki.
+
+name: bramki żywe
+description: Konfrontacja deklaracji z API — lista usług wspieranych przez VPC-SC i właściciel bucketa stanu.
+
+runs:
+  using: composite
+  steps:
+    # `gcloud` jest na obrazie runnera, ale obie bramki są w Pythonie i czytają YAML-e repozytorium.
+    # Instalacja jest tania i idempotentna, więc wołający, który uruchamia też `bramki-tresci`, płaci
+    # za nią sekundy — a wołający, który uruchamia SAME bramki żywe (`plan.yml`), nie musi o niej wiedzieć.
+    - name: pyyaml dla narzędzi bramek
+      shell: bash
+      run: pip install --quiet pyyaml
+
+    # The only gate in the pipeline that talks to the live API, and the only place that can catch a service
+    # VPC-SC does not support. `validate.yml` stays offline by design; the callers of this action already
+    # hold credentials.
+    - name: baseline against the live list of supported services
+      shell: bash
+      run: python3 tools/check_supported_services.py --policy perimeter/policy.yaml
+
+    # DO JAKIEGO PROJEKTU NALEŻY BUCKET, W KTÓRYM LEŻY STAN — pytanie zadane API, nie plikowi. Lista
+    # `control_plane_projects` chroni przed jedyną awarią, której `git revert` nie cofa, a była do tej
+    # pory wyłącznie deklaracją: nikt nie sprawdzał, czy projekt trzymający stan faktycznie na niej jest.
+    # Offline ta bramka idzie w `bramki-tresci`; tutaj dokłada jedyne sprawdzenie czytające rzeczywistość.
+    - name: control plane list against the live owner of the state bucket
+      shell: bash
+      run: python3 tools/control_plane_check.py --live
