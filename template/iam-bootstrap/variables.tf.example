@@ -44,6 +44,26 @@ variable "apply_environment" {
   }
 }
 
+variable "break_glass_environment" {
+  description = "Nazwa environment GitHuba, który wolno wymienić na konto apply DRUGĄ drogą — awaryjną (`break-glass.yml`). Musi zgadzać się z polem `environment:` w tamtym workflow; rozjazd tych dwóch nazw kończy się odmową `iam.serviceAccounts.getAccessToken` w środku incydentu."
+  type        = string
+  default     = "break-glass"
+
+  validation {
+    # Pusta wartość dałaby ten sam zbiór dopasowujący każdy token z repozytorium, co pusty
+    # `apply_environment` — a przy tym po cichu, bo droga awaryjna jest uruchamiana rzadko.
+    condition     = length(trimspace(var.break_glass_environment)) > 0
+    error_message = "break_glass_environment nie może być puste — pusta nazwa dopasowuje KAŻDY token z tego repozytorium."
+  }
+
+  validation {
+    # Ta sama nazwa co `apply_environment` znosi jedyną rzecz, którą osobny environment kupuje: inny
+    # zestaw zatwierdzających dla awarii. Zwijanie obu do jednej nazwy ma być decyzją, nie literówką.
+    condition     = trimspace(var.break_glass_environment) != trimspace(var.apply_environment)
+    error_message = "break_glass_environment == apply_environment — droga awaryjna czekałaby wtedy na tych samych ludzi, co rutynowa; to znosi powód jej istnienia."
+  }
+}
+
 variable "manage_alert_topic" {
   description = "Czy TEN stack tworzy temat Pub/Sub dla kanalu maszynowego alertow (razem z subskrypcja-ewidencja i prawem publikacji dla agenta powiadomien). Domyslnie WYLACZONE — temat z prawem publikacji jest sciezka wyprowadzenia danych, wiec wdrozenie ma go dostac swiadomie, a nie przy okazji. Wylaczenie zostawia alerty z samymi kanalami e-mail; wlaczenie wymaga poswiadczen do chmury juz przy `plan` (dwa zasoby serviceusage budza providera), wiec bramka bez dostepu do GCP planuje ten stack tylko przy `false`."
   type        = bool

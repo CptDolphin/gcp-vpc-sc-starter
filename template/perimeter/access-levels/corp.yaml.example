@@ -98,15 +98,24 @@ access_levels:
 
   - name: break_glass
     title: "Break-glass (incident only)"
-    # Wąski zakres bastionu/stanowiska awaryjnego. NIE jest przypisywany do żadnego członka w normalnym
-    # trybie — używa go wyłącznie procedura break-glass, a każde użycie zostawia ślad w audit-logach.
+    # UWAGA — DWIE RÓŻNE PROCEDURY NOSZĄ TU JEDNĄ NAZWĘ, i to jest jedyna rzecz, którą trzeba o tym
+    # poziomie wiedzieć przed jego uzbrojeniem (DEC-29).
     #
-    # NIEUZBROJONY = PROCEDURA BREAK-GLASS NIE JEST GOTOWA. To rozróżnienie jest tu ważniejsze niż gdzie
-    # indziej: poziom awaryjny sprawdza się dopiero w awarii, więc „wygląda na gotowy" jest tu tożsame
-    # z „dowiemy się o tym w najgorszym możliwym momencie". Dopóki `armed: false`, zielony plan i zielone
-    # bramki NIE znaczą „mamy break-glass" — znaczą „mamy plik".
+    # `break-glass.yml` — procedura, którą ten starter ma i która została przećwiczona na żywej granicy —
+    # NIE UŻYWA ŻADNEGO ACCESS LEVELU. Wyprowadza członka z konfiguracji EGZEKWOWANEJ i tym przywraca
+    # ruch; access level jest wtedy bez znaczenia, bo nie ma już czego spełniać.
+    #
+    # Poziom niżej należy do procedury INNEJ, której tu nie ma: „granica dalej egzekwuje, ale wpuść
+    # bastion". Ta wymaga własnej reguły ingress na członku (profil `corp-user-console-access`), własnego
+    # wpisu w `projects.yaml` i własnego opisu w runbooku — sam poziom nie wpuszcza nikogo, bo nic go nie
+    # referuje. Zostawiony bez tego kompletu jest dokładnie tym, przed czym ostrzega pole `armed`:
+    # obiektem, który w konsoli wygląda jak gotowa kontrola awaryjna.
+    #
+    # DECYZJA: NIE UZBRAJAMY GO „na wszelki wypadek". Albo powstaje ta druga procedura razem z regułą,
+    # która poziom referuje — albo poziom znika. Uzbrojony placeholder bez reguły daje bowiem najgorszy
+    # z możliwych wyników: audyt widzi kontrolę, incydent nie ma z niej pożytku.
     armed: false
-    unarmed_reason: "procedura break-glass nieuzbrojona: brak adresu bastionu, placeholder RFC 5737 nie wpuszcza nikogo"
+    unarmed_reason: "poziom nalezy do procedury 'wpusc bastion przy dzialajacej granicy', ktorej ten starter NIE MA; break-glass.yml wyprowadza czlonka z enforced i access levelu nie uzywa (DEC-29)"
     ip_subnetworks:
       - "192.0.2.10/32" # TEST-NET-1 (RFC 5737) — placeholder, podmień
 
