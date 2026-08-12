@@ -490,6 +490,35 @@ resource "google_service_account_iam_member" "apply_wif" {
   member             = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github.name}/attribute.environment/${var.apply_environment}"
 }
 
+# break-glass: TA SAMA tożsamość, DRUGI environment — i bez tego wiązania procedura awaryjna nie działa
+# wcale, wyglądając przy tym na gotową.
+#
+# ZMIERZONE przy pierwszym w historii uruchomieniu `break-glass.yml` (ćwiczenie na żywej granicy): job
+# deklaruje `environment: break-glass`, więc jego token OIDC niesie `attribute.environment=break-glass`,
+# a `principalSet` wyżej dopasowuje wyłącznie `perimeter-apply`. Wynik:
+#
+#     Failed to get existing workspaces: … status code 403:
+#     "Permission 'iam.serviceAccounts.getAccessToken' denied on resource (or it may not exist)"
+#
+# — czyli droga awaryjna nie potrafiła nawet odczytać stanu, nie mówiąc o zapisie granicy. Workflow
+# istniał, environment istniał, runbook opisywał kroki, `plan` był zielony. Bramka, której nie da się
+# przejść, jest w tym gorsza od jej braku: wygląda na obecną dokładnie do momentu, w którym jest potrzebna.
+#
+# DLACZEGO TO SAMO KONTO, A NIE DRUGIE „awaryjne". Rozdział, który kupuje osobny environment, dotyczy
+# ZATWIERDZAJĄCYCH (inny zestaw ludzi o 3:00), a nie uprawnień: obie drogi zapisują ten sam obiekt tym
+# samym zestawem operacji. Drugie konto serwisowe byłoby drugim kompletem grantów, ról i wiązań, który
+# rozjeżdża się cicho — a ujawnia to w incydencie, czyli w jedynym momencie, w którym nie ma czasu na
+# diagnozę IAM. Jedno konto, dwa dopuszczone environmenty, jeden komplet grantów do utrzymania.
+#
+# CZEGO TO NIE POSZERZA. Zbiór refów zdolnych wybić tożsamość zapisującą pozostaje ten sam: oba
+# environmenty mają `deployment_branch_policy` zawężoną do gałęzi domyślnej (ustawia i ODCZYTUJE ją
+# `tools/bootstrap_github.sh`). Poszerza się zbiór WORKFLOWÓW — o ten jeden, który i tak miał to robić.
+resource "google_service_account_iam_member" "break_glass_wif" {
+  service_account_id = google_service_account.apply.name
+  role               = "roles/iam.workloadIdentityUser"
+  member             = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github.name}/attribute.environment/${var.break_glass_environment}"
+}
+
 # watch: WYŁĄCZNIE token z gałęzi domyślnej — czyli WĘŻEJ niż `plan`, mimo że to konto robi mniej.
 #
 # DLACZEGO NIE `attribute.repository` jak przy `plan`: tamten zbiór dopasowuje także token z pull requesta,

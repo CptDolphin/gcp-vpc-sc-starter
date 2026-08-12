@@ -4463,6 +4463,91 @@ def test_workflows() -> None:
     check("break-glass: issue postmortem niesie autora i odsylacz do przebiegu",
           "github.actor" in po_issue and "github.run_id" in po_issue)
 
+    # --- CZTERY ASERCJE Z JEDNEGO ZMIERZONEGO PRZEBIEGU (DEC-29) -------------------------------------
+    # Pierwsze w historii uruchomienie tej procedury na zywej granicy wywrocilo sie tak, ze zostawilo stan
+    # GORSZY niz brak procedury: plik przepisany i wypchniety, `apply` odmowiony na tozsamosci, issue
+    # postmortem POMINIETE. Ponizsze cztery testy pilnuja dokladnie tych czterech trybow awarii — kazdy
+    # z nich raz juz zaszedl, wiec zaden nie jest hipoteza.
+    bg_yaml = yaml.safe_load(bg)
+    kroki = bg_yaml["jobs"]["break_glass"]["steps"]
+
+    def indeks(pred) -> int:
+        for i, s in enumerate(kroki):
+            if pred(s):
+                return i
+        return -1
+
+    i_auth = indeks(lambda s: "google-github-actions/auth" in str(s.get("uses", "")))
+    i_init = indeks(lambda s: "init" in str(s.get("run", "")) and "terraform" in str(s.get("run", "")))
+    i_commit = indeks(lambda s: s.get("name") == "commit")
+    i_demote = indeks(lambda s: s.get("id") == "demote")
+    # KOLEJNOSC, nie obecnosc. Wszystkie te kroki byly w pliku takze przed poprawka — problemem bylo to,
+    # ze zapis do repozytorium wyprzedzal zdobycie tozsamosci, wiec nieudany przebieg zostawial commit
+    # twierdzacy cos, czego granica nie zrobila.
+    check("break-glass: tozsamosc i dostep do stanu PRZED zapisem do repozytorium",
+          -1 < i_auth < i_demote and -1 < i_init < i_commit,
+          f"auth={i_auth} init={i_init} demote={i_demote} commit={i_commit}")
+
+    i_issue = indeks(lambda s: s.get("name") == "open the postmortem issue")
+    check("break-glass: postmortem powstaje TAKZE po nieudanym przebiegu (if: always)",
+          i_issue > -1 and "always()" in str(kroki[i_issue].get("if", "")))
+
+    # Werdykt z ZYWEJ granicy, nie z kodu wyjscia `apply` ani z outputow Terraforma — te ostatnie mowia,
+    # co MIALO byc zastosowane, a pytanie brzmi, co JEST w konfiguracji egzekwowanej.
+    i_efekt = indeks(lambda s: "perimeters" in str(s.get("run", "")) and "describe" in str(s.get("run", "")))
+    check("break-glass: EFEKT potwierdzany odczytem zywej granicy, nie zielonym apply",
+          i_efekt > max(indeks(lambda s: s.get("name") == "apply"), 0) and
+          "status" in str(kroki[i_efekt].get("run", "")))
+
+    # Zegar okna obserwacji rusza od nowa: bez tego `dry_run_min_days` jest przy powrocie spelnione
+    # NATYCHMIAST dla kazdego czlonka, ktory przed pierwsza promocja odsiedzial swoje okno.
+    check("break-glass: democja przestawia dry_run_since (zegar obserwacji, nie dowod)",
+          i_demote > -1 and 'm["dry_run_since"] = dt.date.today().isoformat()' in str(kroki[i_demote].get("run", "")))
+
+    # --- BRAMKA, KTORA ZLAPALABY TAMTA AWARIE PRZED INCYDENTEM ---------------------------------------
+    # KAZDY job wykonujacy `terraform apply` deklaruje jakis `environment:`, a `principalSet` konta apply
+    # dopasowuje environmenty PO NAZWIE. Rozjazd tych dwoch zbiorow jest niewidoczny w zadnym `plan`,
+    # w zadnym lincie i w zadnym przegladzie — ujawnia sie odmowa `iam.serviceAccounts.getAccessToken`
+    # przy pierwszym uruchomieniu, czyli w awarii. Porownujemy wiec zbiory, a nie obecnosc pojedynczych
+    # napisow: dopisanie nowej drogi zapisujacej granice bez wiazania IAM ma czerwienic selftest.
+    srodowiska_apply = set()
+    for f in sorted((ROOT / ".github/workflows").glob("*.yml")):
+        doc = yaml.safe_load(f.read_text()) or {}
+        for job in (doc.get("jobs") or {}).values():
+            if not isinstance(job, dict):
+                continue
+            pisze = any("terraform" in str(s.get("run", "")) and "apply" in str(s.get("run", ""))
+                        for s in job.get("steps") or [])
+            if pisze:
+                env = job.get("environment")
+                srodowiska_apply.add(env if isinstance(env, str) else str(env))
+
+    iam_main = (ROOT / "iam-bootstrap/main.tf").read_text()
+    iam_vars = (ROOT / "iam-bootstrap/variables.tf").read_text()
+    # Blok po bloku, nie jednym `findall` z `.*?`. Zmienna BEZ domyślnej wartości (np. `github_repository`)
+    # sprawia, że leniwy wzorzec przeskakuje do `default` NASTĘPNEJ zmiennej i przypisuje cudzą wartość,
+    # a `findall` rusza dalej od końca tamtego dopasowania — czyli gubi zmienne po drodze. Wykryte przez
+    # tę samą asercję, którą ten kod obsługuje: mapa miała jeden wpis zamiast dwóch.
+    granice = [(m.group(1), m.start()) for m in re.finditer(r'(?m)^variable\s+"(\w+)"\s*\{', iam_vars)]
+    domyslne = {}
+    for i, (nazwa_zm, poczatek) in enumerate(granice):
+        koniec = granice[i + 1][1] if i + 1 < len(granice) else len(iam_vars)
+        dom = re.search(r'^\s*default\s*=\s*"([^"]*)"', iam_vars[poczatek:koniec], re.M)
+        if dom:
+            domyslne[nazwa_zm] = dom.group(1)
+    zwiazane = set()
+    for blok in iam_main.split('resource "google_service_account_iam_member"')[1:]:
+        blok = blok.split("\nresource ")[0]
+        if "google_service_account.apply.name" not in blok:
+            continue
+        for zmienna in re.findall(r"attribute\.environment/\$\{var\.(\w+)\}", blok):
+            if zmienna in domyslne:
+                zwiazane.add(domyslne[zmienna])
+
+    check("IAM: kazdy workflow wykonujacy apply ma environment ZWIAZANY z kontem apply",
+          srodowiska_apply and srodowiska_apply <= zwiazane,
+          f"workflow={sorted(srodowiska_apply)} zwiazane_w_iam_bootstrap={sorted(zwiazane)}")
+
     for f in wf:
         body = f.read_text()
         # Uprawnienie wykrywamy po SAMYM KODZIE. `id-token: write` to deklaracja, nie zdanie — a komentarz

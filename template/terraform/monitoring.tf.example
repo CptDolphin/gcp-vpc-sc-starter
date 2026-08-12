@@ -185,7 +185,9 @@ resource "google_monitoring_alert_policy" "vpcsc_enforced_denials" {
 
       **3. Zdecyduj**
 
-      - **legalny przepływ** → `break-glass.yml` (demote członka do dry-run, 2 approverów, auto-postmortem),
+      - **legalny przepływ** → `break-glass.yml` (demote członka do dry-run, auto-postmortem; czy czeka na
+        zatwierdzenie, decyduje environment `break-glass` w TYM repozytorium — na planie bez wymaganych
+        recenzentów rusza od razu, więc nie zakładaj pary oczu, sprawdź `gh api …/environments/break-glass`),
         a potem profil pokrywający ten wzorzec i świeże okno obserwacji;
       - **nielegalny** → to nie jest awaria, to zadziałała granica. Zgłoś do security i **nie** dodawaj reguły.
 
