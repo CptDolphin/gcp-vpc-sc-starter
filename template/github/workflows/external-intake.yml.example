@@ -202,8 +202,14 @@ jobs:
               fh.write(f"division={member['division']}\nproject_id={member['project_id']}\n")
           PY
 
+      # WERDYKT DLA WNIOSKODAWCY, NIE SAM KOD WYJSCIA. Zgloszenie z zewnatrz jest jedynym miejscem, w
+      # ktorym czerwien czyta ktos SPOZA tego repozytorium — a wtedy „bramka odrzucila" i „bramki nie
+      # wykonaly sie" (adnotacja z `./.github/actions/narzedzia`) musza brzmiec inaczej. Bez tego kanal
+      # zewnetrzny mial rozroznienie o jeden krok slabsze niz tor pull requesta (DEC-26).
       - name: schema
-        run: check-jsonschema --schemafile schemas/projects.schema.json perimeter/projects.yaml
+        run: |
+          trap 'echo "::error title=WNIOSEK ODRZUCONY PRZEZ BRAMKE TRESCI::Narzedzia powstaly i bramka odrzucila TRESC tego zgloszenia. Powtorzenie niczego nie zmieni - poprawka jest po stronie wniosku."; echo "## ❌ WERDYKT: ODRZUCONY — treść zgłoszenia nie przeszła bramki" >> "$GITHUB_STEP_SUMMARY"' ERR
+          check-jsonschema --schemafile schemas/projects.schema.json perimeter/projects.yaml
 
       # STAN ZASTOSOWANY — ten sam powód i ta sama degradacja co na torze pull requesta: reguły promocji
       # pytają o PRZEJŚCIE do `enforced`, a bez kontraktu członek już egzekwowany wygląda jak promocja
@@ -221,6 +227,7 @@ jobs:
       # and does its division match the entry?
       - name: ownership and onboarding rules
         run: |
+          trap 'echo "::error title=WNIOSEK ODRZUCONY PRZEZ BRAMKE TRESCI::Narzedzia powstaly i bramka odrzucila TRESC tego zgloszenia. Powtorzenie niczego nie zmieni - poprawka jest po stronie wniosku."; echo "## ❌ WERDYKT: ODRZUCONY — treść zgłoszenia nie przeszła bramki" >> "$GITHUB_STEP_SUMMARY"' ERR
           if [ -f stan/contract.json ]; then
             python3 tools/collect_declarations.py --contract stan/contract.json > declarations.json
           else

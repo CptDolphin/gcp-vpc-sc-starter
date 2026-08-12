@@ -5474,6 +5474,20 @@ def test_werdykt_i_narzedzia() -> None:
     check("zaden tytul adnotacji nie ma przecinka ani `%` (parser GitHuba ucialby tytul)",
           not zle, "; ".join(zle))
 
+    # KAZDA POWIERZCHNIA, NA KTOREJ BRAMKA MOZE ODRZUCIC, MUSI TO POWIEDZIEC SWOIM GLOSEM. Bez tego
+    # rozroznienie „odrzucone / nie sprawdzone" istnieje na torze pull requesta, a na kanalach wejsciowych
+    # — czyli tam, gdzie czerwien czyta ktos SPOZA tego repozytorium — nie istnieje. Lista jest wyliczana
+    # z plikow (kto wola `conftest test`), a nie wpisana: wpisana przestalaby widziec piaty kanal.
+    bez_werdyktu = []
+    for plik in sorted((ROOT / ".github/workflows").glob("*.yml")):
+        tekst = plik.read_text()
+        if "conftest test" not in tekst:
+            continue
+        if "ODRZUCONY PRZEZ BRAMKE TRESCI" not in tekst_wykonywany(plik.name):
+            bez_werdyktu.append(plik.name)
+    check("kazdy workflow wolajacy `conftest test` mowi WPROST, ze to odrzucenie tresci",
+          not bez_werdyktu, f"bez werdyktu: {bez_werdyktu}")
+
     # --- 4. GUARD `continue-on-error`. Uruchamiany, nie ogladany: para pozytyw/negatyw na kopii repo.
     p = sh(["python3", "tools/continue_on_error_check.py"], cwd=ROOT)
     check("continue_on_error_check na czystym repo: zielono", p.returncode == 0, p.stdout + p.stderr)
