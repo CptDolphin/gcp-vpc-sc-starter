@@ -30,7 +30,13 @@ import sys
 NUMERY_PRZYKLADOWE = {"000000000000", "111111111111", "222222222222", "123456789012", "210987654321"}
 
 REGULY_KSZTALTU = [
-    (r"GCP-0\d{3}", "numeracja ADR z repo macierzystego (uzyj DEC-1..DEC-8 z docs/0-decyzje.md)"),
+    # Bez KOŃCA zakresu w tym zdaniu — rejestr rośnie, a wpisana granica jest nieprawdziwa od pierwszej
+    # decyzji dołożonej po jej wpisaniu. Wpisana 2026-08-07 była PRAWDZIWA (rejestr miał wtedy dokładnie
+    # tyle sekcji, ile deklarowała) i przeżyła dwadzieścia jeden kolejnych decyzji, bo nie mierzyło jej
+    # nic: bramka deklaracji biegała wyłącznie na ROZPAKOWANYM repozytorium, a tam `selftest/` nie
+    # istnieje. Najtańsza naprawa to WYKREŚLENIE liczby, nie jej podbicie (DEC-20); od DEC-30 ten
+    # katalog jest już w zasięgu bramki, więc następne takie zdanie zaczerwieni się samo.
+    (r"GCP-0\d{3}", "numeracja ADR z repo macierzystego (uzyj numeracji DEC-<n> z docs/0-decyzje.md)"),
     (r"repo labu|klastrze Hetznera|k8s-hetzner", "odsylacz do repo macierzystego"),
     (r"\bklient(a|owi|em|ci)?\b|deliverable", "jezyk relacji z projektu zamiast instrukcji"),
     (r"RITM(?!0000\d{3}\b)\d{7}", "numer zgloszenia spoza konwencji RITM0000xxx"),

@@ -3314,6 +3314,17 @@ def test_kompletnosc_decyzji() -> None:
     decyzje = ROOT / "docs/0-decyzje.md"
     oryginal = decyzje.read_text()
 
+    # Numer, ktorego w rejestrze NIE MA i miec nie bedzie — fixture dwoch sprawdzen naraz. W sekcji 3
+    # dowodzi, ze `--wzgledem` widzi decyzje NIECYTOWANA; w sekcji 8 jest POWODEM, dla ktorego tryb
+    # domyslny nie moze biegac na drzewie startera.
+    #
+    # Zapisany WPROST, a nie sklejony z kawalkow jak wzorce w samym `decisions_check.py`. Tam sklejenie
+    # jest konieczne: narzedzie skanuje drzewa, z ktorych nie da sie go wylaczyc. Tutaj bylo by ucieczka
+    # przed wlasna bramka — a to jej scope, nie zapis fixture'u, jest tu rzecza do naprawienia. Ten
+    # literal ma zostac czytelny: sekcja 8 sprawdza na nim, ze tryb domyslny NA DRZEWIE STARTERA jest
+    # czerwony na tresci POPRAWNEJ, czyli mierzy powod istnienia `--tylko-deklaracje` (DEC-30).
+    NUMER_FIXTURE = "DEC-999"
+
     def uruchom(*extra):
         return sh([sys.executable, "tools/decisions_check.py", *extra], cwd=ROOT)
 
@@ -3381,10 +3392,10 @@ def test_kompletnosc_decyzji() -> None:
     # falszowalby wynik sprawdzenia wewnetrznego. `starter-drift` z tego samego powodu zapisuje
     # pobrany plik do `/tmp`, a nie do drzewa roboczego.
     wzorzec = pathlib.Path(tempfile.mkdtemp(prefix="vpcsc-wzorzec-")) / "0-decyzje-startera.md"
-    wzorzec.write_text(oryginal + "\n\n## DEC-999 — decyzja obecna wylacznie w starterze\n\ntresc\n")
+    wzorzec.write_text(oryginal + f"\n\n## {NUMER_FIXTURE} — decyzja obecna wylacznie w starterze\n\ntresc\n")
     p = uruchom("--wzgledem", str(wzorzec))
     check("decyzja obecna w starterze i nieobecna tutaj jest ODRZUCANA przez --wzgledem",
-          p.returncode != 0 and "DEC-999" in p.stdout, p.stdout + p.stderr)
+          p.returncode != 0 and NUMER_FIXTURE in p.stdout, p.stdout + p.stderr)
     check("sprawdzenie WEWNETRZNE tego przypadku NIE widzi (dlatego sa dwa, nie jedno)",
           uruchom().returncode == 0)
 
@@ -3511,6 +3522,76 @@ def test_kompletnosc_decyzji() -> None:
     check("para MALEJACA (tytul cytujacy wczesniejsza decyzje) NIE jest czytana jako zakres",
           uruchom().returncode == 0, "")
     decyzje.write_text(oryginal)
+
+    # --- 8. TE SAME DEKLARACJE, ALE W DRZEWIE SAMEGO STARTERA (DEC-30) -----------------------------
+    # Sprawdzenia 7a-7f biegaja na ROZPAKOWANYM repozytorium — i az do teraz TYLKO tam. Rozpakowanie
+    # nie tworzy `selftest/`, `examples/`, `experiments/`, `README.md` ani `install.sh`, wiec zdanie
+    # o zbiorze decyzji stojace w ktorymkolwiek z nich nie mialo wlasciciela: zadna bramka go nie
+    # czytala. Zmierzone: `selftest/skan_samodzielnosci.py` deklarowal zakres urwany na osmej decyzji
+    # i przezyl z nim dwadziescia jeden kolejnych, przy obu bramkach na zielono. To ten sam tryb
+    # awarii co w DEC-20, tyle ze o warstwe wyzej — tam liczby nie mierzylo NIC, tu nie mierzylo jej
+    # nic W TYM KATALOGU.
+    narzedzie = str(ROOT / "tools/decisions_check.py")
+
+    def na_drzewie(gdzie, *extra):
+        return sh([sys.executable, narzedzie, "--root", str(gdzie), *extra])
+
+    # 8a. WLASCICIEL. To jest ta asercja, ktorej brak kosztowal dwadziescia jeden decyzji nieprawdy:
+    #     od teraz kazde zdanie o zakresie w drzewie startera ma bramke, ktora je czyta.
+    p = na_drzewie(STARTER, "--tylko-deklaracje")
+    check("deklaracje o rejestrze w DRZEWIE STARTERA zgadzaja sie ze zbiorem sekcji",
+          p.returncode == 0, p.stdout + p.stderr)
+
+    # 8b. PREMISA DEC-30 — i jednoczesnie jedyny powod, dla ktorego to jest osobny TRYB, a nie po
+    #     prostu ta sama komenda z innym `--root`. Tryb domyslny pyta o rozwiazywalnosc cytowan,
+    #     a drzewo startera cytuje numer nieistniejacy Z PREMEDYTACJA (fixture sekcji 3). Pelna bramka
+    #     bylaby tu czerwona na tresci POPRAWNEJ, czyli naprawialoby sie ja kasowaniem testu
+    #     negatywnego. Gdy ta asercja kiedys spadnie — fixture zniknal — powod istnienia
+    #     `--tylko-deklaracje` trzeba przeliczyc od nowa, a nie dopisywac do niego wyjatkow.
+    p = na_drzewie(STARTER)
+    check("premisa DEC-30: tryb DOMYSLNY na drzewie startera jest czerwony na tresci poprawnej "
+          "(fixture cytuje numer spoza rejestru)",
+          p.returncode != 0 and NUMER_FIXTURE in p.stdout, p.stdout[-600:] + p.stderr[-200:])
+
+    # 8c-8e. Para pozytyw/negatyw na drzewie SYNTETYCZNYM. Drzewa startera nie wolno do tego uzyc:
+    #     test mutujacy plik, ktory wlasnie zatwierdzasz, brudzi katalog roboczy i przy przerwanym
+    #     przebiegu zostawia go w stanie gorszym niz zastal. Numery skladamy z ZMIENNYCH, nigdy
+    #     literalnie — ten plik jest skanowany przez bramke, ktora wlasnie testujemy, wiec wpisany
+    #     wprost zakres bylby jej trafieniem w kazdym przebiegu (ta sama pulapka, co w 7a).
+    pierwszy, ostatni, zmyslony = 1, 2, 9
+    syntet = pathlib.Path(tempfile.mkdtemp(prefix="vpcsc-deklaracje-"))
+    (syntet / "docs").mkdir()
+    (syntet / "docs/0-decyzje.md").write_text(
+        f"# Rejestr\n\n## DEC-{pierwszy} — pierwsza\n\ntresc\n\n## DEC-{ostatni} — druga\n\ntresc\n")
+
+    # 8c. Deklaracja NIEPRAWDZIWA w pliku, ktorego rozpakowanie nie tworzy -> odrzucenie z nazwa pliku.
+    (syntet / "README.md").write_text(f"Rejestr obejmuje DEC-{pierwszy}…DEC-{zmyslony}.\n")
+    p = na_drzewie(syntet, "--tylko-deklaracje")
+    check("nieaktualny zakres w pliku spoza rozpakowanego repo (README.md) jest ODRZUCANY",
+          p.returncode != 0 and "README.md" in p.stdout, p.stdout + p.stderr)
+
+    # 8d. ANTY-TAUTOLOGIA: ta sama komenda na tym samym drzewie po WYKRESLENIU liczby przechodzi.
+    #     Bez tej polowy bramka mogla by odrzucac kazde zdanie ze slowem „DEC" i nikt by nie zauwazyl.
+    (syntet / "README.md").write_text("Rejestr obejmuje numery DEC-<n>; zakresu nie wpisujemy.\n")
+    check("ANTY-TAUTOLOGIA: po wykresleniu liczby ze zdania ta sama komenda PRZECHODZI",
+          na_drzewie(syntet, "--tylko-deklaracje").returncode == 0)
+
+    # 8e. ZAKRES TRYBU, czyli dowod, ze `--tylko-deklaracje` NIE jest ta sama bramka pod inna nazwa:
+    #     cytowanie w pustke musi byc dla niego niewidoczne, a dla trybu domyslnego czerwone. Gdyby ta
+    #     para dawala ten sam wynik, flaga nie mialaby po co istniec i lepiej byloby ja usunac.
+    (syntet / "notatka.md").write_text(f"Powod stoi w DEC-{zmyslony}.\n")
+    check("cytowanie w pustke NIE jest widziane przez --tylko-deklaracje (to nie to samo pytanie)",
+          na_drzewie(syntet, "--tylko-deklaracje").returncode == 0)
+    p = na_drzewie(syntet)
+    check("to samo cytowanie w pustke JEST odrzucane przez tryb domyslny",
+          p.returncode != 0 and f"DEC-{zmyslony}" in p.stdout, p.stdout + p.stderr)
+
+    # 8f. Flagi wykluczaja sie JAWNIE. Bramka wywolana z flaga, ktora zostala cicho zignorowana,
+    #     wyglada w logu identycznie jak dzialajaca — a to jest dokladnie tryb awarii z DEC-28.
+    p = na_drzewie(syntet, "--tylko-deklaracje", "--wzgledem", str(syntet / "docs/0-decyzje.md"))
+    check("--tylko-deklaracje z --wzgledem jest BLEDEM, nie cichym pierwszenstwem", p.returncode != 0,
+          p.stdout + p.stderr)
+    shutil.rmtree(syntet)
 
 
 # --------------------------------------------------------------------- narzedzia

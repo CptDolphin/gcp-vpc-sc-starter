@@ -27,7 +27,7 @@ Numer członka mieszka w rekordzie naruszenia i zależy od KIERUNKU:
 Kierunku nie wolno mylić: przy egressie `resourceNames`/`targetResource` wskazują zasób POZA perimetrem,
 więc przypisanie po nich obwinia stronę wołaną zamiast członka, którego dane wychodzą.
 
-TRZECIA KLASA NARUSZEŃ NIE MA ŻADNEJ Z TYCH DWÓCH TABLIC (`SERVICE_NOT_ALLOWED_FROM_VPC`, DEC-30)
+TRZECIA KLASA NARUSZEŃ NIE MA ŻADNEJ Z TYCH DWÓCH TABLIC (`SERVICE_NOT_ALLOWED_FROM_VPC`, DEC-31)
 -------------------------------------------------------------------------------------------------
 Naruszenie z `vpcAccessibleServices` (`enableRestriction: true`) — wywołanie z sieci WEWNĄTRZ perimetru do
 usługi spoza `allowedServices` — nie ma ani `ingressViolations`, ani `egressViolations`. Nie jest ani
@@ -51,7 +51,7 @@ Ta klasa ZOSTAJE w liczbie bramki. Jej tryb awarii jest fałszywie uspokajający
 spoza `allowedServices`, po promocji przestaje działać, a naruszenie nie jest ani wejściem, ani wyjściem —
 więc licznik zbudowany na dwóch tablicach nie widziałby go z definicji.
 
-ARTEFAKT PROJEKTU ROZLICZENIOWEGO — naruszenie „egress", w którym nic nie wypływa (DEC-30)
+ARTEFAKT PROJEKTU ROZLICZENIOWEGO — naruszenie „egress", w którym nic nie wypływa (DEC-31)
 ------------------------------------------------------------------------------------------
 Wywołanie wykonane z domyślnym `billing/quota_project` operatora dotyka DWÓCH projektów naraz: sondowanego
 (w perimetrze) i rozliczeniowego (poza nim). Granica odrzuca je jako `RESOURCES_NOT_IN_SAME_SERVICE_PERIMETER`
