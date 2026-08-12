@@ -30,7 +30,8 @@
 #     cofa — stała wyłącznie w `validate.yml`, a `terraform plan` przepuszczał tę zmianę na zielono, bo
 #     reguły `vpcsc.perimeter` nie wiedzą nic o płaszczyźnie sterowania. DEC-16.
 #
-# BRAMKI STOJĄ W DWÓCH MIEJSCACH I PODZIAŁ NIE JEST ESTETYCZNY — idzie po TOŻSAMOŚCI:
+# BRAMKI STOJĄ W TRZECH MIEJSCACH I PODZIAŁ NIE JEST ESTETYCZNY — idzie po TOŻSAMOŚCI (a trzecie miejsce
+# istnieje właśnie dlatego, że tożsamość mutatora do jego pytania NIE WYSTARCZA — patrz job `pre-flight`):
 #   * bramki TREŚCI (schematy, `vpcsc.onboarding`, budżet, guardy) w osobnym jobie `bramki`, BEZ
 #     poświadczeń i BEZ `environment`. Job z `environment` nie wykonuje ani jednego kroku na gałęzi spoza
 #     polityki tego environment — GitHub odrzuca CAŁY job. Bramki treści umieszczone w jobie applikującym
@@ -100,13 +101,42 @@ jobs:
         with:
           token_gh: ${{ github.token }}
 
+  # PREREKWIZYTY PROJEKTÓW WCHODZĄCYCH DO GRANICY — ta sama akcja, co na pull requeście (DEC-16).
+  #
+  # DLACZEGO OSOBNY JOB, A NIE KROK W `apply`. Dwa powody i oba są własnościami, nie wygodą:
+  #   * job `apply` deklaruje `environment`, więc na gałęzi spoza polityki tego environment GitHub odrzuca
+  #     GO W CAŁOŚCI — bramka umieszczona w nim byłaby nietestowalna inaczej niż na żywej granicy. Tutaj
+  #     wystarczy `workflow_dispatch` z gałęzi testowej, żeby ZOBACZYĆ, że odrzuca (dokładnie tak, jak przy
+  #     jobie `bramki` wyżej);
+  #   * `needs:` niżej jest twarde: czerwony pre-flight = `apply` nie startuje, więc zamek stanu nie
+  #     zostaje wzięty i nikomu nie blokuje kolejki.
+  #
+  # DLACZEGO KONTO `plan`, SKORO `bramki-zywe` PYTAJĄ KONTEM MUTATORA. Bo tam tożsamość JEST treścią
+  # pytania („czy widzę własny bucket stanu"), a tutaj nie jest: „czy podsieci kandydata mają Private
+  # Google Access" ma tę samą odpowiedź niezależnie od pytającego. Konto `apply` nie ma ani jednej z ról
+  # pre-flightu, a dokładanie ich powiększyłoby zbiór uprawnień, których brak ZATRZYMUJE jedyną drogę
+  # wdrożenia — ten tryb awarii już raz wywrócił apply. Konto `plan` te role ma i jest read-only.
+  # Uzasadnienie, odrzucone warianty i to, czego bramka świadomie nie pilnuje: DEC-23.
+  pre-flight:
+    name: pre-flight (prerekwizyty wchodzacych)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.9
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.PLAN_SERVICE_ACCOUNT }}
+
+      - uses: ./.github/actions/bramka-preflightu
+
   apply:
     name: terraform apply
     runs-on: ubuntu-latest
     # TWARDA ZALEŻNOŚĆ, nie kolejność kroków: czerwone bramki = ten job w ogóle nie startuje, więc żaden
     # `terraform apply` nie ma jak się wykonać. To jest cała różnica między „bramka jest w pipelinie"
     # a „bramka stoi na ścieżce mutatora".
-    needs: bramki
+    needs: [bramki, pre-flight]
     environment: perimeter-apply # this is what puts the environment claim into the OIDC token — see header
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0

@@ -134,6 +134,8 @@ def bootstrap() -> None:
         ".github/actions/bramki-tresci/action.yml", ".github/actions/bramki-zywe/action.yml",
         # Bramka promocji: jedyna bramka WYLACZNIE mutatora — pyta o moment skutku, nie o tresc (DEC-17).
         ".github/actions/bramka-promocji/action.yml", "tools/promotion_hold.py",
+        # Bramka pre-flightu: prerekwizyty CUDZEGO projektu, na obu torach, tozsamoscia `plan` (DEC-23).
+        ".github/actions/bramka-preflightu/action.yml", "tools/preflight_gate.py",
         ".tflint.hcl", ".github/dependabot.yml", "tests/README.md",
         "tests/snow-approved.json", "tests/snow-not-approved.json", "tests/snow-self-approved.json",
         "tests/snow-wrong-project.json", "tests/dispatch-example.json",

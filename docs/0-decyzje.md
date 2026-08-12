@@ -1,7 +1,10 @@
-# Decyzje, na których stoi ten starter (DEC-1…DEC-19)
+# Decyzje, na których stoi ten starter
 
-Dziewiętnaście rozstrzygnięć, które określają kształt repozytorium. Kod odsyła tutaj skrótem `DEC-1`…`DEC-19` — jeśli komentarz
+Rozstrzygnięcia, które określają kształt repozytorium. Kod odsyła tutaj skrótem `DEC-<numer>` — jeśli komentarz
 w pliku mówi „(DEC-4)", to znaczy: „powód tej linijki jest opisany w DEC-4, nie zmieniaj jej bez przeczytania".
+Liczby w nagłówku świadomie nie ma: przez pół roku stała tu wartość mniejsza od realnej i nikt tego nie zauważył,
+bo nic jej nie mierzyło. Kompletności rejestru pilnują dwie bramki — `tools/decisions_check.py` (każda **cytowana**
+decyzja ma sekcję) i `starter-drift` w trybie `--wzgledem` (zbiór decyzji pokrywa zbiór startera, DEC-20).
 
 Każda pozycja ma tę samą strukturę: **decyzja** · **dlaczego** · **co odrzucono i dlaczego**. Odrzucone warianty są
 tu celowo — bez nich decyzja wygląda na jedyną możliwą, a była wyborem. Jeśli któryś z nich wróci jako propozycja,
@@ -140,6 +143,11 @@ dokumentacja do skopiowania, nie jako kod applyowany przez ten pipeline.
 Access · istnieje strefa DNS kierująca ruch API na restricted VIP · dla profili notebookowych osobny check na
 `private.googleapis.com` dla `*.notebooks.googleusercontent.com` · ostrzeżenie (nie blokada) o istniejących
 endpointach Vertex, bo muszą powstać **po** wejściu projektu do perimetru.
+
+**Gdzie ten pre-flight realnie stoi — patrz DEC-23.** Słowo „egzekwowany" w akapicie wyżej opisuje *rolę*
+narzędzia, a nie jego wpięcie: przez pewien czas ta rola była wyłącznie zapisana, bo `preflight_check.sh`
+nie miał ŻADNEGO wyzwalacza. DEC-23 opisuje bramkę, która to zdanie czyni prawdziwym, i mówi wprost, czego
+ta bramka NIE obejmuje (check `--identity`, zmiana wpisu członka już obecnego w granicy).
 
 **Dlaczego.** Wymaganie „po approvalu tworzą się automatycznie odpowiednie zasoby" kusi, by onboarding provisionował
 także sieć i projekty wnioskodawcy. Wtedy repozytorium perimetru staje się właścicielem cudzych VPC — a razem
@@ -1382,3 +1390,129 @@ dywizji to trzydzieści kopii walidatora, z których każda starzeje się osobno
 * Organizacja, która chce mieć własne źródło akcji, publikuje **publiczną kopię startera** i wskazuje ją
   w `uses:` — nic w akcji nie nazywa organizacji, projektu ani perimetru; wszystko środowiskowe wchodzi
   wejściami (`perimeter-repo`, `member-file`, `app-token`) albo przyjeżdża w kontrakcie.
+
+---
+
+## DEC-23 — Pre-flight jest bramką na OBU torach, pyta tożsamością `plan` i tylko o WCHODZĄCYCH
+
+**Decyzja.** `tools/preflight_check.sh` przestaje być narzędziem bez wyzwalacza. Uruchamia go
+`tools/preflight_gate.py` przez akcję złożoną `.github/actions/bramka-preflightu`, wołaną z **osobnego
+joba** w `plan.yml` (tor pull requesta) i w `apply.yml` (mutator); `plan` i `apply` mają ten job w `needs`,
+więc czerwony pre-flight zostawia je w stanie `skipped`. Bramka pyta o **członków wchodzących do granicy** —
+zadeklarowanych w `perimeter/projects.yaml`, których numeru nie ma jeszcze ani w `spec.resources`, ani
+w `status.resources` żywego perimetru. Uwierzytelnia się kontem **`plan`** na obu torach. Nie przekazuje
+`--identity`.
+
+**Dlaczego to w ogóle wymaga decyzji.** Bo przez cały czas istnienia tego repozytorium pre-flight
+**nie był wołany przez nic**: `grep -rn preflight_check` po `.github/`, `tools/` i pre-commicie dawał zero
+trafień w czymkolwiek wykonywalnym, a cztery różne miejsca w materiale — w tym opis pull requesta, który
+czyta recenzent — twierdziły, że jedzie automatycznie. Sam DEC-5 nazywał go bramką *egzekwowaną* i odrzucał
+wariant „pre-flight jako ostrzeżenie" zdaniem *„ostrzeżenie w PR-ze, który i tak scala bot, nie jest bramką"* —
+a on nie był wtedy nawet ostrzeżeniem. Narzędzie zdążyło doczekać się **dwóch rund poprawek** (pięć defektów,
+potem cichy no-op checku kolizji przy więcej niż jednym zasobie w konfiguracji), czyli poprawiano skrypt,
+którego nikt nie uruchamiał. To jest wzorzec „kontrola celująca w pustkę" w najczystszej postaci: kontrola,
+która wygląda na obecną, kosztuje utrzymanie i nie zamyka ani jednego trybu awarii.
+
+Tryb awarii, który ma zamykać, jest przy tym cichy i **opóźniony o cały okres obserwacji**: projekt bez
+Private Google Access i bez prywatnej strefy DNS wchodzi do dry-run z kompletem zielonych bramek, przechodzi
+okno „czysto" (bo nic w nim nie chodzi) i **umiera w dniu promocji** — ruch idzie publicznym endpointem
+i zostaje odcięty. Wygląda to wtedy jak „VPC-SC zepsuł nam deploy", a nie jak brakujący prereq sprzed
+dwóch tygodni.
+
+### Dlaczego zbiorem pracy jest RÓŻNICA ZE ŚWIATEM, a nie diff commitów
+
+    zadeklarowani w perimeter/projects.yaml        ⟶  KTO MA BYĆ członkiem
+    `spec.resources` ∪ `status.resources` (API)    ⟶  KTO JUŻ JEST w granicy
+    różnica                                        ⟶  KOGO pyta pre-flight
+
+Trzy niezależne powody:
+
+1. **Diff znika razem ze zdarzeniem.** `workflow_dispatch`, `gh run rerun` i apply po nieudanym apply nie
+   mają żadnego diffa, a stosują dokładnie tę samą treść. Bramka na diffie byłaby nieobecna w tych trzech
+   przebiegach — czyli tam, gdzie człowiek patrzy najmniej. Ten sam argument stoi za DEC-17.
+2. **Diff zablokowałby własne lekarstwo.** Pull request USUWAJĄCY martwego członka (projekt skasowany,
+   `DELETE_REQUESTED`) dotyka jego wpisu, więc bramka na diffie odpaliłaby pre-flight na projekcie, którego
+   już nie ma, dostała `BŁĄD` i zatrzymała jedyną zmianę naprawiającą ten stan. Pre-flight nie może być
+   bramką na istnienie członków **już obecnych** — to zostało rozstrzygnięte wcześniej i tu nie wraca.
+3. **Ten sam zbiór na obu torach, bez ani jednego `if`.** Porównanie ze światem daje identyczny wynik na
+   pull requeście i u mutatora, więc jedna definicja bramki wystarcza (DEC-16).
+
+Konsekwencja kosztowa jest wprost mierzalna i to ona rozstrzyga pytanie o skalę: przy ustabilizowanym
+perimetrze różnica jest **pusta**, więc bramka kosztuje **jeden** odczyt ACM na przebieg — tak samo przy
+pięciu członkach, jak przy pięciuset. Ten jeden odczyt (`perimeters list`) jest jednocześnie odczytem,
+którego potrzebuje check kolizji perimetrów, więc jedzie do skryptu plikiem (`--lista-perimetrow`) zamiast
+być powtarzany per kandydat. Przy partii 50 wniosków to różnica między 1 a 51 odczytami na limicie
+500/min, który jest najciaśniejszą kwotą w tym stosie.
+
+### Dlaczego tożsamość `plan`, skoro `bramki-zywe` pytają tożsamością mutatora
+
+To jest świadome **odstępstwo** od reguły z DEC-16 i ma dwa oparcia.
+
+**Pomiar.** Konto `apply` nie ma ANI JEDNEJ z ról pre-flightu — jego uprawnienia to własna rola zapisu na
+perimetrze plus dostęp do bucketa stanu. Role read-only potrzebne pre-flightowi (`cloudasset.viewer`,
+`compute.networkViewer`, `dns.reader`, `policyReader`) ma konto `plan`. Dołożenie ich kontu `apply`
+powiększyłoby zbiór uprawnień, których brak **zatrzymuje jedyną drogę wdrożenia** — i dokładnie ten tryb
+awarii już raz wywrócił apply w tym repozytorium. Bramka zabezpieczająca onboarding nie ma prawa być nową
+przyczyną zatrzymania deployu.
+
+**Argument merytoryczny.** Reguła „bramka żywa pyta tożsamością mutatora" broni przypadku, w którym
+**tożsamość jest treścią pytania**: „czy JA widzę własny bucket stanu" ma inną odpowiedź dla `plan`
+i dla `apply`, i różnica wyszłaby dopiero jako czerwony apply. Tutaj podmiotem jest cudzy projekt:
+„czy podsieci kandydata mają Private Google Access" ma tę samą odpowiedź niezależnie od pytającego.
+Odstępstwo dotyczy więc dokładnie tych bramek, dla których uzasadnienie reguły nie zachodzi.
+
+To działa, bo `principalSet` konta `plan` celuje w `attribute.repository`, czyli w **każdy** workflow tego
+repozytorium — także uruchomiony pushem na gałąź domyślną. (Komentarz w `plan.yml` twierdził wcześniej, że
+provider WIF przypina to konto do `event_name == 'pull_request'`; to nieprawda i zostało poprawione w tym
+samym miejscu, bo cała ta decyzja stoi na tym fakcie.)
+
+### Co robi, gdy nie może sprawdzić — per check, i dlaczego akurat tak
+
+Fail-open w bramce bezpieczeństwa jest gorszy od jej braku, bo wygląda na obecną. Fail-closed na cudzym
+projekcie potrafi jednak zatrzymać onboarding z powodu, na który wnioskodawca nie ma wpływu. Podział idzie
+więc po tym, **kto jest właścicielem naprawy**:
+
+| sytuacja | werdykt | dlaczego |
+|---|---|---|
+| nie udało się odczytać listy perimetrów (bramka nie wie, KTO wchodzi) | **czerwono** | „nie wiem, kto wchodzi" ≠ „nikt nie wchodzi". Przepuszczenie dałoby dokładnie tę własność, którą ta decyzja naprawia |
+| projekt nie istnieje / brak dostępu odczytu (check 1) | **czerwono** | Resource Manager tych dwóch przypadków **nie rozróżnia**; skrypt mówi to wprost i wskazuje, kto rozstrzygnie, zamiast zgadywać |
+| kolizja perimetrów nieodczytana (check 2) | **czerwono** | to odczyt NASZEJ organizacji NASZĄ tożsamością; porażka jest naszym problemem, a obecność w cudzej konfiguracji egzekwowanej to twarde ograniczenie ACM — apply padłby po review |
+| PGA / DNS nieodczytane (checki 3–4) | **czerwono** | brak roli u wołającego jest naprawialny i głośny; fail-open kasowałby bramkę dokładnie w tych wdrożeniach, w których zakres ról zawężono z organizacji do folderów dywizji — czyli w tych, które zrobiły więcej dla least-privilege |
+| projekt bez sieci VPC (checki 3–4) | **N/D** | członkostwo w perimetrze nie wymaga ani jednej maszyny; „zawsze wymagaj" kazałoby poprawnemu kandydatowi zbudować sieć, której nie potrzebuje |
+| billing nieodczytany (check 1b) | **uwaga** | hipotezę „brak billingu blokuje API" zmierzono i **obalono dwa razy**; twardy błąd zatrzymywałby kandydata poprawnego |
+| endpointy Vertex nieodczytane (check 5) | **uwaga** | to ostrzeżenie o KOLEJNOŚCI tworzenia zasobów, stan naprawialny po fakcie |
+
+### Czego ta bramka świadomie NIE robi
+
+**Nie woła checku 6 (`--identity`).** Wymaga on `iam.serviceAccounts.get`, którego wdrożenie nie nadaje —
+więc wpięty byłby fail-closed na **każdym** wniosku, z powodu leżącego w naszej konfiguracji. Nadanie
+`roles/iam.serviceAccountViewer` kontu `plan` — impersonowalnemu z **każdego** pull requesta — dałoby prawo
+enumeracji wszystkich kont serwisowych organizacji, i to pod check zamykający tryb awarii, który ACM już
+zamyka: literówkę w adresie odrzuca przy apply komunikatem `invalid or non-existent`, wywracając **całą**
+zmianę, czyli głośno i na **nietkniętej** granicy. Ceną jest nieudany apply po review; ceną alternatywy
+byłoby poszerzenie modelu uprawnień. Check zostaje narzędziem recenzenta uruchamianym z ręki i tak jest
+opisany w `docs/5-servicenow-intake.md`.
+
+**Nie pilnuje zmiany wpisu członka już obecnego w granicy.** Kształtu adresów pilnuje `perimeter.rego` na
+każdym pull requeście, istnienia — ACM przy apply (jak wyżej). Objęcie tego przypadku wymagałoby diffa,
+czyli powrotu wszystkich trzech problemów z sekcji o zbiorze pracy.
+
+### Odrzucone
+
+- **Pre-flight wyłącznie na torze `pull_request`.** Najtańsze i wprost sprzeczne z DEC-16: gałąź domyślna
+  bywa bez ochrony (funkcja płatna na repo prywatnym), więc commit wypchnięty prosto na nią omija cały tor
+  pull requesta i idzie do apply. Bramka stojąca tylko tam chroni pull requesta, a nie granicę.
+- **Krok wewnątrz joba planującego/applikującego zamiast osobnego joba.** Odwraca kolejność kosztu
+  i werdyktu: najpierw pełny plan i **zamek stanu**, potem informacja, że kandydat nie ma PGA. Osobny job
+  daje `skipped` na planie i apply oraz — w `apply.yml` — zostaje wykonywalny z gałęzi testowej, bo nie
+  deklaruje `environment`. Bez tej drugiej własności nie dałoby się ZOBACZYĆ, że bramka odrzuca, inaczej
+  niż na żywej granicy.
+- **Krok w `bramki-zywe`.** Tamten zestaw pyta o rzeczy należące do tego repozytorium i pyta tożsamością
+  mutatora. Ta bramka różni się trzema własnościami naraz (uprawnienia na cudzych projektach, zbiór pracy
+  z żywej granicy, naprawa po stronie kogoś spoza repozytorium). Wspólny plik schowałby tę asymetrię —
+  a razem z nią odstępstwo w tożsamości, które ma być widoczne.
+- **Uruchamianie pre-flightu dla wszystkich zadeklarowanych członków.** Przy 500 członkach to 500 przelotów
+  po API na każdy pull request, przy limicie 500 odczytów/min. Bramka, która przy normalnym rozmiarze
+  wdrożenia wpada we własną kwotę, jest bramką dopóty, dopóki wdrożenie jest małe.
+- **`--warn-only` na ścieżce CI.** To jest dokładnie ten wariant, który DEC-5 odrzucił: ostrzeżenie w pull
+  requeście, który i tak zostanie scalony. Flaga zostaje w skrypcie do użycia z ręki i nic jej nie podaje.
