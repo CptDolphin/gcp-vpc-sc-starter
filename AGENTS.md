@@ -68,7 +68,7 @@ a nie HCL.
 | `<FOLDER_SANDBOX>` | folder pod wariant testowy ze scoped policy (`docs/2` §4a) |
 | `<SHA_WYDANIA>` | tag/SHA paczki bramek przypinanej przez repozytoria zespołów |
 | `@your-org/*` | realne zespoły GitHuba w `CODEOWNERS` |
-| zakresy IP w `access-levels/corp.yaml` | korporacyjne zakresy — w szablonie są adresy TEST-NET z RFC 5737 |
+| zakresy IP w `access-levels/corp.yaml` | korporacyjne zakresy — w szablonie są adresy TEST-NET z RFC 5737. **To jedyny placeholder pilnowany przez bramkę:** dopóki stoją tam adresy dokumentacyjne, poziom musi nieść `armed: false` z powodem, a konfiguracja EGZEKWOWANA nie może go referować bez wygasającego `unarmed_accepted_until` (DEC-19). Po podmianie na własne: `armed: true` + `source_of_truth` + `reviewed` |
 
 Nazwy przykładowe (`example-division`, `prj-example-*`, `000000000000`, `RITM0000001`, `example.com`) są
 **jawnie fikcyjne i spójne w całym repo**. Jeśli zobaczysz nazwę wypadającą z tej konwencji, to jest błąd —
@@ -134,11 +134,19 @@ python3 selftest/selftest.py          # rozpakowuje starter do katalogu tymczaso
 ```
 
 Wymaga na PATH: `terraform` (1.15.5), `conftest`, `tflint`, `python3` z `pyyaml`; opcjonalnie `actionlint`
-i `check-jsonschema` (ich brak daje SKIP z nazwą, nigdy ciche zielone). Oczekiwany wynik: **270/270**.
+i `check-jsonschema` (ich brak daje SKIP z nazwą, nigdy ciche zielone).
 
-Bez `tflint` na PATH przebieg kończy się na **267/267** i wypisuje SKIP z nazwą — trzy asercje
-(`--init` plus lint obu stacków) po prostu się nie wykonują. Liczba niższa niż 270 nie jest błędem
-startera, tylko informacją, czego w tym środowisku nie sprawdzono.
+Oczekiwany wynik: **wszystkie asercje zielone** — ostatni zmierzony przebieg to **530/530** w środowisku
+**bez `tflint`** na PATH (wtedy część lintu wypisuje SKIP z nazwą i po prostu się nie wykonuje).
+**Porównuj z przebiegiem na `main`, nie z liczbą zapisaną tutaj**: liczba asercji rośnie z każdą bramką,
+a różni się też między środowiskami — brakujące narzędzie zmienia mianownik, nie licznik. Czerwona jest
+dopiero asercja z `FAIL`; niższa suma sama w sobie nie jest błędem startera, tylko informacją, czego
+w tym środowisku nie sprawdzono.
+
+Pułapka środowiskowa (kosztowała pełny przebieg): gdy `terraform` na PATH jest **shimem** menedżera wersji
+bez ustawionej wersji globalnej, testy odpalane w katalogu tymczasowym padają na `No version is set for
+shim: terraform` i wyglądają na regresję materiału. Uruchamiaj selftest z katalogiem prawdziwego binarnego
+`terraform` w PATH.
 
 Sam skan samodzielności (bez terraforma i conftesta, sam Python) da się uruchomić na dowolnej ścieżce —
 przydaje się tam, gdzie materiał jest publikowany razem z innymi katalogami:

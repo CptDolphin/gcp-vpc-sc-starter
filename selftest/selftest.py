@@ -2070,12 +2070,16 @@ def test_access_levels_ksztalt() -> None:
             cmd.append(f"-out={out}")
         return sh(cmd)
 
+    # SKLADNIK KOMPOZYCJI = `eu_only`, NIE `corp_network` — swiadomie. `corp_network` w materiale startera
+    # jest NIEUZBROJONY (zakresy dokumentacyjne, DEC-19), wiec kompozycja nad nim wywraca sie na bramce
+    # uzbrojenia — i ten test mierzylby wtedy uzbrojenie zamiast ksztaltu warunkow. Fixture nie ma prawa
+    # zalezec od wlasnosci materialu, ktorej nie bada; od uzbrojenia jest `test_access_levels_uzbrojenie`.
     kompozycja_bez_wlasnego_warunku = """
         - name: zz_kompozycja
           title: "Composition without a condition of its own"
           combining_function: AND
           required_access_levels:
-            - corp_network
+            - eu_only
     """
 
     try:
@@ -2106,7 +2110,7 @@ def test_access_levels_ksztalt() -> None:
               combining_function: OR
               {reason}regions: [PL, DE]
               required_access_levels:
-                - corp_network
+                - eu_only
         """
         p = plan(or_bazowy.format(reason=""))
         check("access level: OR bez or_reason ODRZUCONY na planie",
@@ -2156,6 +2160,173 @@ def test_access_levels_ksztalt() -> None:
     # KONTROLA, że sprzątanie zadziałało — inaczej ten test cicho zatruwa wszystkie następne.
     p = sh(["terraform", f"-chdir={tf}", "plan", "-no-color", "-input=false", "-lock=false"])
     check("access level: po sprzatnieciu sondy plan repo jest znowu zielony", p.returncode == 0,
+          p.stdout[-300:] + p.stderr[-500:])
+
+
+# ------------------------------------------- access levels: uzbrojenie, atestacja i zakresy-atrapy
+def test_access_levels_uzbrojenie() -> None:
+    """Poziom, ktorego nikt nie spelnia, wyglada identycznie jak poziom dzialajacy.
+
+    To jest defekt TRESCI, nie ksztaltu: `describe` pokazuje komplet pol, plan jest zielony, obiekt
+    w ACM powstaje — a zakres z RFC 5737 nie nalezy do zadnego hosta na swiecie, wiec regula oparta
+    na tym poziomie nie autoryzuje NIKOGO. W realnym wdrozeniu ten sam ksztalt to nie placeholder, tylko
+    zakres VPN, ktory sie zmienil: nieodrozniamy od dzialajacego az do dnia, w ktorym zaczyna egzekwowac.
+
+    KAZDY NEGATYW MA TU PARE POZYTYWNA — bez niej „bramka odrzuca poziom z zakresem dokumentacyjnym"
+    znaczyloby tylko „bramka odrzuca access levele z IP", czyli zakaz calego prymitywu.
+    """
+    print("\n== access levels: uzbrojenie i atestacja zakresow ==")
+    if not have("terraform"):
+        check("terraform dostepny (uzbrojenie)", False, "brak terraform na PATH — pomijam")
+        return
+
+    tf = ROOT / "terraform"
+    probe = ROOT / "perimeter/access-levels/zz-selftest-uzbrojenie.yaml"
+    projekty = ROOT / "perimeter/projects.yaml"
+    projekty_oryginal = projekty.read_text()
+
+    def plan(poziom: str):
+        probe.write_text("schema_version: 1\naccess_levels:\n" + textwrap.indent(textwrap.dedent(poziom).strip(), "  ") + "\n")
+        return sh(["terraform", f"-chdir={tf}", "plan", "-no-color", "-input=false", "-lock=false"])
+
+    # Ten sam poziom w trzech wariantach — rozniacych sie WYLACZNIE trescia, nie ksztaltem.
+    ATRAPA = """
+        - name: zz_atrapa
+          title: "Corporate network with placeholder ranges"
+          ip_subnetworks:
+            - "203.0.113.0/24"
+            - "192.0.2.10/32"
+    """
+    ATRAPA_ZADEKLAROWANA = """
+        - name: zz_atrapa
+          title: "Corporate network with placeholder ranges"
+          armed: false
+          unarmed_reason: "zakresy sa placeholderami RFC 5737, uzbroimy po decyzji zespolu sieciowego"
+          ip_subnetworks:
+            - "203.0.113.0/24"
+            - "192.0.2.10/32"
+    """
+    # `203.0.114.0/24` jest o JEDEN OKTET obok TEST-NET-3 — sprawdza przy okazji, ze dopasowanie po
+    # prefiksie nie jest zbyt szerokie i nie lapie sasiedztwa zakresu dokumentacyjnego.
+    ATRAPA_UZBROJONA = """
+        - name: zz_atrapa
+          title: "Corporate network with placeholder ranges"
+          armed: true
+          source_of_truth: "firewall object CORP-VPN-EGRESS (CMDB CI-000123)"
+          reviewed: "2026-08-01"
+          ip_subnetworks:
+            - "203.0.114.0/24"
+    """
+
+    try:
+        # 1. NEGATYW: same zakresy dokumentacyjne, bez ani slowa o tym, ze to atrapa.
+        p = plan(ATRAPA)
+        check("uzbrojenie: poziom na samych zakresach dokumentacyjnych ODRZUCONY",
+              p.returncode != 0 and "zz_atrapa" in (p.stdout + p.stderr),
+              p.stdout[-300:] + p.stderr[-400:])
+
+        # 2. POZYTYW A (anty-tautologia): ten sam poziom, ten sam zakres — ale POWIEDZIANE wprost.
+        #    Bramka ma odrozniac swiadomy placeholder od niedokonczonej roboty, a nie zakazywac atrap.
+        p = plan(ATRAPA_ZADEKLAROWANA)
+        check("uzbrojenie: TEN SAM poziom z `armed: false` + powodem PRZECHODZI",
+              p.returncode == 0, p.stdout[-300:] + p.stderr[-500:])
+
+        # 3. POZYTYW B (anty-tautologia wlasciwa dla Issue): ten sam poziom z REALNYM zakresem
+        #    i atestacja przechodzi. Bez tego punktu bramka bylaby zakazem access leveli z IP.
+        p = plan(ATRAPA_UZBROJONA)
+        check("uzbrojenie: TEN SAM poziom z realnym zakresem i atestacja PRZECHODZI",
+              p.returncode == 0, p.stdout[-300:] + p.stderr[-500:])
+
+        # 4. `armed: false` bez powodu = nieodrozniamy od zapomnianego pliku.
+        p = plan("""
+            - name: zz_bez_powodu
+              title: "Unarmed without a reason"
+              armed: false
+              ip_subnetworks: ["203.0.113.0/24"]
+        """)
+        check("uzbrojenie: `armed: false` bez `unarmed_reason` ODRZUCONY",
+              p.returncode != 0 and "zz_bez_powodu" in (p.stdout + p.stderr),
+              p.stdout[-300:] + p.stderr[-300:])
+
+        # 5. Uzbrojony poziom z IP bez atestacji — „zakres jest aktualny" bez autora i bez daty.
+        p = plan("""
+            - name: zz_bez_atestacji
+              title: "Armed range with nobody vouching for it"
+              ip_subnetworks: ["203.0.114.0/24"]
+        """)
+        check("uzbrojenie: uzbrojony zakres bez `source_of_truth`/`reviewed` ODRZUCONY",
+              p.returncode != 0 and "zz_bez_atestacji" in (p.stdout + p.stderr),
+              p.stdout[-300:] + p.stderr[-300:])
+
+        # 6. NIEOSIAGALNOSC DZIEDZICZY SIE PRZEZ `AND` — to jest wariant, ktory umyka przegladowi
+        #    zakresow, bo kompozycja nie ma wlasnego `ip_subnetworks`.
+        p = plan("""
+            - name: zz_kompozycja_uzbrojona
+              title: "Composition claiming to be armed"
+              combining_function: AND
+              regions: [PL]
+              required_access_levels:
+                - corp_network
+        """)
+        check("uzbrojenie: kompozycja `armed: true` nad nieuzbrojonym skladnikiem ODRZUCONA",
+              p.returncode != 0 and "zz_kompozycja_uzbrojona" in (p.stdout + p.stderr),
+              p.stdout[-300:] + p.stderr[-300:])
+
+        # 7. ...i ta sama kompozycja z przyznanym sie do nieuzbrojenia PRZECHODZI (anty-tautologia).
+        p = plan("""
+            - name: zz_kompozycja_uzbrojona
+              title: "Composition claiming to be armed"
+              armed: false
+              unarmed_reason: "wymaga corp_network, ktory jest nieuzbrojony — AND dziedziczy nieosiagalnosc"
+              combining_function: AND
+              regions: [PL]
+              required_access_levels:
+                - corp_network
+        """)
+        check("uzbrojenie: TA SAMA kompozycja z `armed: false` PRZECHODZI",
+              p.returncode == 0, p.stdout[-300:] + p.stderr[-500:])
+
+        # 8. FAIL-CLOSED W KONFIGURACJI EGZEKWOWANEJ. Dry-run jest miejscem na konfiguracje niedokonczona
+        #    — dlatego punkty 1-7 mierzylismy przy czlonku w dry-run i `corp_network` (nieuzbrojony)
+        #    referowany z dry-run planu NIE wywracal. Tu ten sam material z czlonkiem promowanym.
+        probe.unlink(missing_ok=True)
+        projekty.write_text(projekty_oryginal.replace("stage: dry-run", "stage: enforced"))
+        p = sh(["terraform", f"-chdir={tf}", "plan", "-no-color", "-input=false", "-lock=false"])
+        check("uzbrojenie: nieuzbrojony poziom w konfiguracji EGZEKWOWANEJ ODRZUCONY",
+              p.returncode != 0 and "corp_network" in (p.stdout + p.stderr),
+              p.stdout[-400:] + p.stderr[-400:])
+
+        # 9. ...a swiadomy, WYGASAJACY zapis „ta regula dzis nie wpuszcza nikogo" przechodzi. Furtka musi
+        #    istniec (bywa poprawnym stanem etapu wdrozenia) i musi miec date — zapis bez daty zostaje
+        #    na zawsze i przestaje byc decyzja.
+        poziomy = ROOT / "perimeter/access-levels/corp.yaml"
+        tresc = poziomy.read_text()
+        z_data = tresc.replace(
+            'unarmed_reason: "zakresy sa placeholderami',
+            'unarmed_accepted_until: "2099-01-01"\n    unarmed_reason: "zakresy sa placeholderami',
+        ).replace(
+            'unarmed_reason: "kompozycja wymaga corp_network',
+            'unarmed_accepted_until: "2099-01-01"\n    unarmed_reason: "kompozycja wymaga corp_network',
+        )
+        poziomy.write_text(z_data)
+        p = sh(["terraform", f"-chdir={tf}", "plan", "-no-color", "-input=false", "-lock=false"])
+        check("uzbrojenie: ten sam poziom z `unarmed_accepted_until` w przyszlosci PRZECHODZI",
+              p.returncode == 0, p.stdout[-400:] + p.stderr[-500:])
+
+        # 10. ...a z data PRZESZLA znowu pada. Wygasanie ma dzialac, inaczej data jest ozdoba.
+        poziomy.write_text(z_data.replace('unarmed_accepted_until: "2099-01-01"',
+                                          'unarmed_accepted_until: "2020-01-01"'))
+        p = sh(["terraform", f"-chdir={tf}", "plan", "-no-color", "-input=false", "-lock=false"])
+        check("uzbrojenie: `unarmed_accepted_until` z data PRZESZLA znowu ODRZUCA",
+              p.returncode != 0, p.stdout[-300:] + p.stderr[-300:])
+        poziomy.write_text(tresc)
+    finally:
+        probe.unlink(missing_ok=True)
+        projekty.write_text(projekty_oryginal)
+
+    # KONTROLA sprzatania — ten test mutuje DWA pliki materialu, wiec kolejne testy sa na jego lasce.
+    p = sh(["terraform", f"-chdir={tf}", "plan", "-no-color", "-input=false", "-lock=false"])
+    check("uzbrojenie: po sprzatnieciu plan repo jest znowu zielony", p.returncode == 0,
           p.stdout[-300:] + p.stderr[-500:])
 
 
@@ -4104,7 +4275,7 @@ def test_boundary_probe() -> None:
         return
     kod_werdyktu = textwrap.dedent(kod.group(1))
 
-    def przelot(oczekiwanie: str, sondy: dict) -> tuple[int, str]:
+    def przelot(oczekiwanie: str, sondy: dict, kanarek: str = "brak") -> tuple[int, str]:
         kat = pathlib.Path(tempfile.mkdtemp(prefix="vpcsc-probe-"))
         (kat / "sondy").mkdir()
         for nazwa, (rc, out) in sondy.items():
@@ -4112,7 +4283,8 @@ def test_boundary_probe() -> None:
             (kat / "sondy" / f"{nazwa}.out").write_text(out)
         (kat / "werdykt.py").write_text(kod_werdyktu)
         p = sh([sys.executable, "werdykt.py"], cwd=kat,
-               env={**os.environ, "OCZEKIWANIE": oczekiwanie, "PROJEKT": "prj-example-vertex-dev"})
+               env={**os.environ, "OCZEKIWANIE": oczekiwanie, "PROJEKT": "prj-example-vertex-dev",
+                    "KANAREK": kanarek})
         return p.returncode, p.stdout + p.stderr
 
     ODMOWA_VPCSC = ('ERROR: (gcloud.logging.buckets.list) PERMISSION_DENIED: Request is prohibited by '
@@ -4180,6 +4352,68 @@ def test_boundary_probe() -> None:
     check("boundary-probe: odmowa ruchu DOZWOLONEGO regula lamie przelot",
           rc != 0, out[-600:])
 
+    # --- KANAREK ACCESS LEVELU: sciezka POZYTYWNA i jej kontrola anty-tautologiczna ---------------
+    # Cztery sondy wyzej dowodza wylacznie tego, ze granica ODMAWIA. Kanarek dokłada zdanie odwrotne:
+    # ze access level kogos WPUSZCZA. Pare tworza dwie sondy rozniace sie wylacznie poziomem wymaganym
+    # przez regule — dlatego werdykt musi rozrozniac trzy stany kanarka, a nie dwa.
+    CZWORKA_OK = {
+        "chroniona-z-regula": (0, "[]"),
+        "chroniona-bez-reguly": (1, ODMOWA_VPCSC),
+        "chroniona-inna-usluga": (1, ODMOWA_VPCSC),
+        "spoza-granicy": (0, "[]"),
+    }
+
+    # 7. UZBROJONY: poziom spelniony przepuszcza, niespelniony odmawia. To jest cala teza.
+    rc, out = przelot("blocked", {**CZWORKA_OK,
+                                  "kanarek-poziom-spelniony": (0, "[]"),
+                                  "kanarek-poziom-niespelniony": (1, ODMOWA_VPCSC)},
+                      kanarek="uzbrojony")
+    check("kanarek: uzbrojony, PRZESZLO + ODMOWA -> zgodne", rc == 0, out[-700:])
+
+    # 8. UZBROJONY, ale poziom spelniony TEZ odmawia — czyli zadna sciezka pozytywna nie istnieje.
+    #    To jest dokladnie stan sprzed tej poprawki i musi byc CZERWONY, a nie „no i co z tego".
+    rc, out = przelot("blocked", {**CZWORKA_OK,
+                                  "kanarek-poziom-spelniony": (1, ODMOWA_VPCSC),
+                                  "kanarek-poziom-niespelniony": (1, ODMOWA_VPCSC)},
+                      kanarek="uzbrojony")
+    check("kanarek: uzbrojony bez ani jednego przelotu -> lamie werdykt",
+          rc != 0 and "kanarek-poziom-spelniony" in out, out[-700:])
+
+    # 9. UZBROJONY, ale poziom NIESPELNIONY przepuszcza — roznica miedzy poziomami przestala cokolwiek
+    #    znaczyc (albo regula jest szersza, niz wyglada). Rowniez czerwone.
+    rc, out = przelot("blocked", {**CZWORKA_OK,
+                                  "kanarek-poziom-spelniony": (0, "[]"),
+                                  "kanarek-poziom-niespelniony": (0, "[]")},
+                      kanarek="uzbrojony")
+    check("kanarek: przelot sondy NIESPELNIONEJ lamie werdykt",
+          rc != 0 and "kanarek-poziom-niespelniony" in out, out[-700:])
+
+    # 10. ROZBROJONY: ta sama para, obie odmowy — i to jest ZIELONE. Bez tego stanu „para dziala" nie ma
+    #     kontroli: nie widzielismy nigdy, zeby ta sama sonda NIE dzialala. Kontrola anty-tautologiczna
+    #     musi byc osobnym, poprawnym przelotem, a nie czerwonym uruchomieniem z komentarzem.
+    rc, out = przelot("blocked", {**CZWORKA_OK,
+                                  "kanarek-poziom-spelniony": (1, ODMOWA_VPCSC),
+                                  "kanarek-poziom-niespelniony": (1, ODMOWA_VPCSC)},
+                      kanarek="rozbrojony")
+    check("kanarek: rozbrojony, obie odmowy -> zgodne (kontrola anty-tautologiczna)",
+          rc == 0, out[-700:])
+
+    # 11. ROZBROJONY, a poziom „spelniony" jednak przechodzi — czyli kanarek nie zostal rozbrojony
+    #     albo metoda przechodzi z zupelnie innego powodu. Kontrola, ktora nie umie zaplonac, jest gorsza
+    #     niz jej brak — wiec ten stan tez musi byc czerwony.
+    rc, out = przelot("blocked", {**CZWORKA_OK,
+                                  "kanarek-poziom-spelniony": (0, "[]"),
+                                  "kanarek-poziom-niespelniony": (1, ODMOWA_VPCSC)},
+                      kanarek="rozbrojony")
+    check("kanarek: rozbrojony z przelotem sondy SPELNIONEJ lamie werdykt", rc != 0, out[-700:])
+
+    # 12. BRAK: wdrozenie bez kanarka ma dzialac dokladnie jak przedtem — sondy kanarka nie istnieja
+    #     i nie sa oczekiwane. Domyslna wartosc `brak` jest tu wlasciwa: kanarek wymaga dwoch regul
+    #     baseline, wiec wlaczony domyslnie czerwienilby kazde wdrozenie, ktore ich nie ma.
+    rc, out = przelot("blocked", CZWORKA_OK, kanarek="brak")
+    check("kanarek: `brak` nie wymaga sond kanarka (zgodnosc wstecz)",
+          rc == 0 and "kanarek-poziom" not in out, out[-700:])
+
 
 def main() -> int:
     bootstrap()
@@ -4199,6 +4433,7 @@ def main() -> int:
     test_external_egress_and_guard()
     test_acm_naming()
     test_access_levels_ksztalt()
+    test_access_levels_uzbrojenie()
     test_lint_and_pinning()
     test_rego()
     test_control_plane_lista()
