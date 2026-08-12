@@ -47,15 +47,33 @@ jobs:
     name: re-apply open onboarding requests onto the new default branch
     runs-on: ubuntu-latest
     steps:
+      # THE APP TOKEN IS MINTED HERE, IT DOES NOT ARRIVE READY-MADE IN A SECRET — an installation token
+      # expires after ONE HOUR, so one pasted into `secrets.*` goes quiet the next morning with nothing in
+      # the code to explain it. The secret holds the App's PRIVATE KEY; the token is per run.
+      #
+      # The condition reads `vars.INTAKE_APP_ID` because the `secrets` context is not available in a
+      # step-level `if:`. Without that variable the step is SKIPPED and this workflow behaves exactly as it
+      # did before — see the note on the fallback below.
+      - name: mint the App installation token (when the App is configured)
+        id: app
+        if: vars.INTAKE_APP_ID != ''
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.INTAKE_APP_ID }}
+          private-key: ${{ secrets.INTAKE_APP_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
       # WHICH TOKEN PUSHES DECIDES WHETHER THE PULL REQUEST IS RE-CHECKED. A push made with `GITHUB_TOKEN`
       # starts no `pull_request` workflow, so the pull request would carry a new commit and the check results
       # of the old one — a boundary change reviewed against a base it no longer has. The App installation
-      # token (`secrets.INTAKE_PR_TOKEN`, the same secret intake.yml uses) re-runs `validate` and `plan` like
-      # a human push. The fallback is kept so the channel degrades loudly instead of silently.
+      # token minted above re-runs `validate` and `plan` like a human push. The fallback to `github.token`
+      # is kept so the channel degrades loudly instead of silently, and `||` tolerates the SKIPPED step:
+      # reading a property absent from the context yields an empty value, not an error.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
-          token: ${{ secrets.INTAKE_PR_TOKEN || github.token }}
+          token: ${{ steps.app.outputs.token || github.token }}
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
@@ -65,7 +83,7 @@ jobs:
 
       - name: re-apply
         env:
-          GH_TOKEN: ${{ secrets.INTAKE_PR_TOKEN || github.token }}
+          GH_TOKEN: ${{ steps.app.outputs.token || github.token }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           git config user.name "vpc-sc-intake"

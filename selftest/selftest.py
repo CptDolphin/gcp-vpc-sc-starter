@@ -1519,13 +1519,10 @@ def test_kanal_ticketowy() -> None:
                 check("intake fixture — polecenie z nazwy NIE zostalo wykonane",
                       not any(l.strip() == "WSTRZYKNIETE" for l in r.stdout.splitlines()), r.stdout[-200:])
 
-    # KTORY TOKEN OTWIERA PR, DECYDUJE CZY PR JEST SPRAWDZANY. Z `GITHUB_TOKEN` utworzenie PR-a jest
-    # odmawiane (`GitHub Actions is not permitted to create or approve pull requests`), a nawet po
-    # wlaczeniu tamtego ustawienia PR utworzony tym tokenem nie uruchamia workflowow `pull_request`.
+    # KTORY TOKEN OTWIERA PR, DECYDUJE CZY PR JEST SPRAWDZANY (DEC-22) — pelny zestaw asercji o
+    # poswiadczeniu kanalu stoi w test_poswiadczenie_kanalu(), bo dotyczy TRZECH workflowow, nie dwoch.
     for plik, tresc in ((".github/workflows/intake.yml", tekst),
                         (".github/workflows/external-intake.yml", ext)):
-        check(f"{plik}: PR-a otwiera token instalacji Appa, gdy jest (INTAKE_PR_TOKEN)",
-              "secrets.INTAKE_PR_TOKEN" in tresc)
         # Bez stanu posredniego: `create-pull-request` wypycha galaz ZANIM wola API PR-ow, wiec odmowa
         # zostawia galaz z plikiem czlonka i bez PR-a — niewidoczna na liscie PR-ow.
         check(f"{plik}: po odmowie PR-a kasuje galaz, ktora wypchnal",
@@ -1550,6 +1547,160 @@ def test_kanal_ticketowy() -> None:
     check("snow_verify.py bez konfiguracji SNOW: odmowa z komunikatem, nie traceback",
           p.returncode == 2 and "ODRZUCONE" in p.stderr and "Traceback" not in p.stderr,
           f"rc={p.returncode}: {p.stderr[-200:]}")
+
+
+# ------------------------------------------------------ poswiadczenie kanalu wejsciowego (DEC-22)
+# Trzy detektory czytajace TEKST workflowa. Osobno, bo kazdy odpowiada na inne pytanie, i kazdy jest
+# nizej karmiony probkami o znanym werdykcie — detektor, ktory zawsze mowi „dobrze", zazielenia komplet
+# asercji i nie chroni niczego.
+
+# Krok mintujacy: akcja przypieta 40-znakowym SHA-em. `@main`/`@v3` to referencja ruchoma, wiec kto
+# kontroluje tag, ten dostaje kod uruchamiany z kluczem prywatnym naszej aplikacji.
+MINT = re.compile(r"uses:\s*actions/create-github-app-token@[0-9a-f]{40}\b")
+
+# POZYCJA POSWIADCZENIA: miejsce, w ktorym workflow podaje token DALEJ — wejscie `token:` akcji albo
+# zmienna srodowiskowa czytana przez `gh`/`git`. Klucz prywatny (`private-key:`) pozycja NIE jest i ma
+# w sekrecie zostac: to on jest wazny do odwolania, a token z niego zyje godzine.
+POZYCJA = re.compile(r"^\s*(?:token|GH_TOKEN|GITHUB_TOKEN):\s*(\S.*?)\s*$", re.M)
+
+# Fallback, ktory znosi POMINIETY krok mintujacy: albo goly `github.token`, albo `steps.<id>.outputs.token`
+# z alternatywa. Odczyt pola nieobecnego w kontekscie daje w wyrazeniach GitHub Actions wartosc pusta,
+# nie blad — wiec `||` przeprowadza przebieg przez brak aplikacji.
+FALLBACK = re.compile(r"\$\{\{\s*steps\.[A-Za-z_][\w-]*\.outputs\.token\s*\|\|\s*github\.token\s*\}\}")
+
+# Gotowy token wniesiony w sekrecie. `secrets.GITHUB_TOKEN` to wbudowane poswiadczenie przebiegu,
+# nie wklejona wartosc, wiec jest wylaczone z tej definicji.
+SEKRET_JAKO_TOKEN = re.compile(r"secrets\.(?!GITHUB_TOKEN\b)[A-Za-z_][\w]*")
+
+
+def pozycje_poswiadczenia(tresc: str) -> list:
+    """Wartosci wszystkich pozycji poswiadczenia w workflowie, z pominieciem komentarzy."""
+    return POZYCJA.findall(bez_komentarzy(tresc))
+
+
+def gotowy_token_w_sekrecie(tresc: str) -> list:
+    """Pozycje poswiadczenia, ktore oczekuja GOTOWEGO tokenu w sekrecie repozytorium."""
+    return [w for w in pozycje_poswiadczenia(tresc) if SEKRET_JAKO_TOKEN.search(w)]
+
+
+def znosi_brak_appa(tresc: str) -> bool:
+    """Czy KAZDA pozycja poswiadczenia przezyje pominiety krok mintujacy."""
+    pozycje = pozycje_poswiadczenia(tresc)
+    return bool(pozycje) and all(
+        w == "${{ github.token }}" or w == "${{ secrets.GITHUB_TOKEN }}" or FALLBACK.fullmatch(w)
+        for w in pozycje)
+
+
+def test_poswiadczenie_kanalu() -> None:
+    """Czym kanal wejsciowy otwiera pull requesta — i co robi, zanim aplikacja w ogole powstanie.
+
+    DLACZEGO TO JEST ODDZIELNA GRUPA ASERCJI. Poprzedni ksztalt (`secrets.INTAKE_PR_TOKEN ||
+    github.token`) mowil „wklej tu token instalacji Appa". Token instalacji WYGASA PO GODZINIE, wiec
+    sekret dzialalby do konca dnia i milkl nazajutrz, bez zmiany w kodzie, ktora by to tlumaczyla.
+    Sekret ma trzymac KLUCZ PRYWATNY, a token ma powstawac na przebieg (DEC-22).
+    """
+    print("\n== poswiadczenie kanalu wejsciowego (DEC-22) ==")
+
+    # Trzy workflow, a nie dwa: `intake-rebase.yml` FORCE-PUSHUJE galezie kanalu, wiec decyduje o tym,
+    # czy pull request zostanie PONOWNIE sprawdzony po przepisaniu go na nowa baze. Zostawiony na
+    # `github.token` niesie nowy commit ze starymi wynikami bramek.
+    pliki = {nazwa: (ROOT / f".github/workflows/{nazwa}").read_text()
+             for nazwa in ("intake.yml", "external-intake.yml", "intake-rebase.yml")}
+
+    for nazwa, tresc in pliki.items():
+        wf = yaml.safe_load(tresc)
+        kroki_joba = list(wf["jobs"].values())[0]["steps"]
+        mint = [k for k in kroki_joba
+                if str(k.get("uses", "")).startswith("actions/create-github-app-token@")]
+
+        check(f"{nazwa}: token Appa MINTOWANY w przebiegu, akcja przypieta @SHA",
+              bool(MINT.search(tresc)) and len(mint) == 1,
+              f"trafien pinu: {len(MINT.findall(tresc))}, krokow mintujacych: {len(mint)}")
+
+        if not mint:
+            continue
+        krok = mint[0]
+
+        # Warunek MUSI stac na zmiennej, nie na sekrecie: kontekst `secrets` nie jest dostepny
+        # w `if:` kroku, wiec `if: secrets.X != ''` nie jest surowszym wariantem tego samego —
+        # jest warunkiem, ktorego GitHub nie umie obliczyc.
+        check(f"{nazwa}: krok mintujacy jest WARUNKOWY na jawnej zmiennej (secrets nie ma w if:)",
+              "vars.INTAKE_APP_ID" in str(krok.get("if", "")),
+              f"if: {krok.get('if')!r}")
+        check(f"{nazwa}: id aplikacji ze zmiennej, klucz prywatny z sekretu",
+              krok.get("with", {}).get("app-id") == "${{ vars.INTAKE_APP_ID }}"
+              and krok.get("with", {}).get("private-key") == "${{ secrets.INTAKE_APP_KEY }}",
+              str(krok.get("with")))
+        # Token zawezony do TEGO repozytorium — takze wtedy, gdy ktos zainstaluje aplikacje szerzej.
+        # Wartosci z kontekstu przebiegu, bo szablon nie moze nazwac organizacji ani repozytorium.
+        check(f"{nazwa}: token zawezony do tego repozytorium wartosciami z kontekstu przebiegu",
+              krok.get("with", {}).get("owner") == "${{ github.repository_owner }}"
+              and krok.get("with", {}).get("repositories") == "${{ github.event.repository.name }}",
+              str(krok.get("with")))
+
+        check(f"{nazwa}: kazda pozycja poswiadczenia znosi POMINIETY krok mintujacy",
+              znosi_brak_appa(tresc), str(pozycje_poswiadczenia(tresc)))
+
+        # Kolejnosc, nie sama obecnosc: krok mintujacy PO konsumencie daje wyrazenie, ktore zawsze
+        # spada na `github.token` — komplet asercji wyzej bylby zielony, a Appa nie uzylby nikt.
+        i_mint = kroki_joba.index(krok)
+        i_konsument = next((i for i, k in enumerate(kroki_joba)
+                            if "steps.app.outputs.token" in yaml.safe_dump(k)), None)
+        check(f"{nazwa}: krok mintujacy POPRZEDZA pierwszego konsumenta tokenu",
+              i_konsument is not None and i_mint < i_konsument,
+              f"mint={i_mint}, konsument={i_konsument}")
+
+    # NIGDZIE — nie tylko w trzech plikach wyzej. Sekret z gotowym tokenem, do ktorego wraca jeden
+    # workflow, wraca do calego trybu awarii: wartosc bez wlasciciela i bez daty waznosci, ktora
+    # w tym repozytorium znaczy `Contents: write` na granicy.
+    wszystkie = sorted((ROOT / ".github/workflows").glob("*.yml"))
+    z_sekretem = {p.name: gotowy_token_w_sekrecie(p.read_text()) for p in wszystkie}
+    z_sekretem = {k: v for k, v in z_sekretem.items() if v}
+    check("zaden workflow nie oczekuje GOTOWEGO tokenu w sekrecie repozytorium",
+          not z_sekretem, str(z_sekretem))
+    check("skan pozycji poswiadczenia oglada wszystkie workflow (nie jest pusta petla)",
+          len(wszystkie) >= 10 and sum(len(pozycje_poswiadczenia(p.read_text())) for p in wszystkie) >= 8,
+          f"plikow: {len(wszystkie)}")
+
+    # ---------------------------------------------------------------- ANTY-TAUTOLOGIA
+    # Kazdy z trzech detektorow dostaje probki o znanym werdykcie, w tym DOKLADNIE ten ksztalt kodu,
+    # ktory stal w tych workflowach przed DEC-22. Bez tego „zielono" znaczy tylko tyle, ze detektor
+    # niczego nie zglosil — a to samo powie detektor zepsuty.
+    ROZBROJONE = [
+        # (opis, fragment, mint?, znosi brak Appa?, gotowy token w sekrecie?)
+        ("stan sprzed DEC-22 (token wklejany do sekretu)",
+         "        with:\n          token: ${{ secrets.INTAKE_PR_TOKEN || github.token }}\n",
+         False, False, True),
+        ("stan po DEC-22",
+         "      - uses: actions/create-github-app-token@" + "0" * 40 + "\n"
+         "        with:\n          token: ${{ steps.app.outputs.token || github.token }}\n",
+         True, True, False),
+        ("akcja na ruchomej referencji (@v3 zamiast SHA)",
+         "      - uses: actions/create-github-app-token@v3\n"
+         "        with:\n          token: ${{ steps.app.outputs.token || github.token }}\n",
+         False, True, False),
+        ("token Appa BEZ fallbacku — brak zmiennej wywraca krok zamiast go degradowac",
+         "      - uses: actions/create-github-app-token@" + "0" * 40 + "\n"
+         "        with:\n          token: ${{ steps.app.outputs.token }}\n",
+         True, False, False),
+        ("wbudowane poswiadczenie przebiegu to NIE jest wklejony token",
+         "        env:\n          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}\n",
+         False, True, False),
+        ("PAT czlowieka w sekrecie, pod inna nazwa",
+         "        env:\n          GH_TOKEN: ${{ secrets.RELEASE_PAT }}\n",
+         False, False, True),
+        ("KOMENTARZ cytujacy stary ksztalt nie jest kodem",
+         "          # kiedys bylo: token: ${{ secrets.INTAKE_PR_TOKEN || github.token }}\n"
+         "          token: ${{ steps.app.outputs.token || github.token }}\n",
+         False, True, False),
+    ]
+    for opis, probka, ma_mint, ma_fallback, ma_sekret in ROZBROJONE:
+        check(f"anty-tautologia — mint: {opis}",
+              bool(MINT.search(probka)) == ma_mint, probka)
+        check(f"anty-tautologia — fallback: {opis}",
+              znosi_brak_appa(probka) == ma_fallback, str(pozycje_poswiadczenia(probka)))
+        check(f"anty-tautologia — gotowy token w sekrecie: {opis}",
+              bool(gotowy_token_w_sekrecie(probka)) == ma_sekret, str(gotowy_token_w_sekrecie(probka)))
 
 
 # --------------------------------------------------------------------- monitoring
@@ -4610,6 +4761,7 @@ def main() -> int:
     test_przyklad_repo_dywizji()
     test_kanal_dywizji()
     test_kanal_ticketowy()
+    test_poswiadczenie_kanalu()
     test_monitoring()
     test_alerty()
     test_brownfield()

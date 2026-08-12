@@ -1393,6 +1393,102 @@ dywizji to trzydzieści kopii walidatora, z których każda starzeje się osobno
 
 ---
 
+## DEC-22 — Kanał wejściowy MINTUJE token Appa w przebiegu; sekret trzyma KLUCZ, nie token
+
+**Decyzja.** Trzy workflow, które w repozytorium perimetru dotykają gałęzi i pull requestów kanału
+wejściowego — `intake.yml`, `external-intake.yml`, `intake-rebase.yml` — wołają
+`actions/create-github-app-token` i biorą poświadczenie z jego outputu:
+
+```yaml
+- name: token instalacji Appa (gdy App jest skonfigurowany)
+  id: app
+  if: vars.INTAKE_APP_ID != ''
+  uses: actions/create-github-app-token@<40-znakowy SHA>
+  with:
+    app-id: ${{ vars.INTAKE_APP_ID }}
+    private-key: ${{ secrets.INTAKE_APP_KEY }}
+    owner: ${{ github.repository_owner }}
+    repositories: ${{ github.event.repository.name }}
+# …
+    token: ${{ steps.app.outputs.token || github.token }}
+```
+
+Zakres aplikacji: `Contents: Read and write` + `Pull requests: Read and write`, instalacja **wyłącznie**
+na repozytorium perimetru. Sekret `INTAKE_PR_TOKEN` — miejsce na gotowy token — **znika**.
+
+**Powód 1: token instalacji żyje GODZINĘ.** Poprzedni kształt (`secrets.INTAKE_PR_TOKEN || github.token`)
+mówił „wklej tu token instalacji Appa". Taki sekret działa do końca dnia i milknie nazajutrz, bez żadnej
+zmiany w kodzie ani w konfiguracji, która by to tłumaczyła. W kanale odpalanym rzadko oznacza to awarię
+odkrywaną przy zgłoszeniu, którego akurat nikt nie chce debugować. Do sekretu nadaje się **klucz
+prywatny** aplikacji — ważny do odwołania. Token ma powstawać na przebieg.
+
+**Powód 2: przełącznik repozytorium NIE jest alternatywą — i to jest zmierzone, nie wywnioskowane.**
+Nasuwająca się „naprawa" brzmi: włącz *Allow GitHub Actions to create and approve pull requests*
+(`can_approve_pull_request_reviews`) i zostaw `GITHUB_TOKEN`. Pomiar (2026-08-11, #1977, przełącznik
+włączony na kilka minut za zgodą właściciela repozytorium): PR **powstaje**, przebiegi `pull_request`
+też powstają — po jednym na `validate` i `plan` — ale każdy jest `completed` / `action_required` /
+`jobs: []`. Na PR-ze `check-runs.total_count` = **0**, status zbiorczy `pending` z zerem wpisów,
+`gh pr checks` → „no checks reported", a PR mimo to **MERGEABLE**. Kontrola wiążąca to z TOKENEM, a nie
+ze ścieżkami triggera: `action_required` wystąpiło na dokładnie tych dwóch przebiegach ze stu ostatnich,
+przy ludzkich PR-ach tego samego dnia z zielonymi `validate`+`plan`.
+
+Przełącznik zamienia więc kanał **niedziałający** na kanał **omijający wszystkie bramki** — schema, OPA,
+budżet i `plan` wiszą na `pull_request`. Naiwna naprawa jest gorsza od usterki, więc
+`can_approve_pull_request_reviews` zostaje `false`, a poświadczenie zmienia się zamiast ustawienia.
+
+**Powód 3: fallback jest częścią decyzji, nie niedoróbką.** Krok mintujący jest warunkowy, bo bez tego
+repozytorium bez aplikacji wywracałoby się na `Set up job` zamiast paść tam, gdzie pada dziś — na kroku
+otwarcia PR-a, głośno, ze sprzątnięciem wypchniętej gałęzi. Warunek stoi na **zmiennej**, nie na sekrecie,
+bo kontekst `secrets` nie jest dostępny w `if:` kroku. Wyrażenie `steps.app.outputs.token || github.token`
+znosi krok pominięty: odczyt pola nieobecnego w kontekście daje w wyrażeniach GitHub Actions wartość
+pustą, a nie błąd.
+
+**Kontrola, bez której ten fallback jest deklaracją** i którą wykonuje się na wdrożeniu **przed**
+założeniem aplikacji: przelot kanału ma dać **ten sam** wynik co przed zmianą — kroki walidacyjne
+zielone, stop dokładnie na kroku otwarcia PR-a z komunikatem
+`GitHub Actions is not permitted to create or approve pull requests`, gałąź sprzątnięta. Inny wynik —
+w szczególności padnięcie na `Set up job` albo na kroku mintującym — znaczy, że warunek albo wyrażenie
+tokenu nie znoszą braku aplikacji. Zapis pomiaru należy do dokumentacji wdrożenia, nie do szablonu.
+
+**Powód 4: dwie ścieżki uwierzytelnienia to dwa tryby awarii.** Rozważone i **odrzucone**: zostawić
+`secrets.INTAKE_PR_TOKEN` jako drugą drogę (`steps.app.outputs.token || secrets.INTAKE_PR_TOKEN ||
+github.token`). Kosztuje jedną linijkę i dokłada pytanie „którym poświadczeniem poszedł ten przebieg"
+do **każdej** diagnozy kanału — przy czym odpowiedzi nie widać w logu, bo obie wartości są maskowane.
+Sekret bez właściciela i bez daty ważności żyje w ustawieniach repozytorium latami; ten akurat trzymałby
+`Contents: write` na granicy. Jedna droga, jeden tryb awarii.
+
+### Alternatywy odrzucone
+
+**1. Personal Access Token człowieka w sekrecie.** Działa od ręki i nie wymaga zakładania aplikacji.
+Odrzucone: wiąże zmianę granicy z **kontem osoby** (odejście z zespołu = cichy zanik kanału), ma zakres
+konta, a nie repozytorium, i wygasa w terminie, o którym nie wie nikt poza jego właścicielem. PR-y
+kanału podpisywałaby wtedy osoba, która ich nie widziała.
+
+**2. Jedna aplikacja do wszystkiego (ta sama, co w kanale dywizji).** Odrzucone i to jest granica
+bezpieczeństwa, nie porządek: aplikacja dywizji ma klucz **w repozytorium dywizji**. Dołożenie jej
+`Contents: write` na repo perimetru dałoby dywizji prawo zapisu do kodu granicy, obok bramek wiszących
+na `pull_request` — dokładnie ta ścieżka, którą zamknęło zawężenie kanału do `workflow_dispatch`.
+Dwa różne zakresy mieszkają w dwóch różnych miejscach; rozdzielenie kluczy jest tu całą różnicą.
+
+**3. `Pull requests: Write` bez `Contents: Write`.** Odrzucone po przeczytaniu tego, co robi krok:
+`create-pull-request` najpierw **wypycha gałąź**, a dopiero potem woła API pull requestów, a
+`intake-rebase.yml` dodatkowo force-pushuje gałęzie kanału. Bez `Contents: write` kanał padałby o krok
+wcześniej niż dziś. `Pull requests` zostaje `Read and write` — token może PR-a otworzyć, a **nie może go
+zatwierdzić ani zmergować**: bot proponuje, bramki oceniają, człowiek merguje.
+
+### Konsekwencje
+
+* Wdrożenie ma dwie pozycje „wymaga człowieka" zamiast jednej: aplikacji nie da się utworzyć przez API.
+  Do czasu, aż powstanie, kanał **jest niedziałający i wygląda na niedziałający** — to stan świadomy.
+* Zmienna `INTAKE_APP_ID` jest jawna z premedytacją. To identyfikator, nie poświadczenie, a warunek na
+  czymś jawnym jest jedyną drogą do warunkowego kroku (`secrets` nie ma w `if:`).
+* `owner`/`repositories` czytane z kontekstu przebiegu zawężają token do jednego repozytorium także
+  wtedy, gdy ktoś zainstaluje aplikację szerzej — konfiguracja instalacji nie jest wtedy jedyną obroną.
+* Selftest pilnuje trzech własności naraz: każdy z trzech workflowów mintuje token, każdy ma warunkowy
+  krok i wyrażenie z fallbackiem, i **żaden** workflow nie czyta gotowego tokenu z własnego sekretu.
+
+---
+
 ## DEC-23 — Pre-flight jest bramką na OBU torach, pyta tożsamością `plan` i tylko o WCHODZĄCYCH
 
 **Decyzja.** `tools/preflight_check.sh` przestaje być narzędziem bez wyzwalacza. Uruchamia go
