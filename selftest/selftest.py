@@ -14,6 +14,7 @@ Uruchomienie:  python3 selftest/selftest.py
 """
 import datetime
 import hashlib
+import importlib.util
 import json
 import os
 import pathlib
@@ -3302,6 +3303,95 @@ def test_kompletnosc_decyzji() -> None:
     if krok_fail:
         check("czerwien starter-drift zalezy TAKZE od brakujacych decyzji, nie tylko od wskaznika",
               "decyzje.outputs.brakujace" in str(krok_fail[0].get("if", "")), str(krok_fail[0].get("if")))
+
+    # --- 7. REJESTR MOWI O SOBIE PRAWDE: zakres, licznik, JEDEN naglowek --------------------------
+    # Trzeci tryb awarii, dla obu sprawdzen wyzej NIEWIDOCZNY: sekcje sa na miejscu, cytowania tez,
+    # a zdanie o rozmiarze zbioru klamie. Zmierzone TRZY RAZY na tym samym naglowku (zakres szedl
+    # ...18 -> ...19 -> ...23, za kazdym razem mniejszy od realnego), a za czwartym dwie rownolegle
+    # galezie „naprawily" go przeciwnie — jedna podbila liczbe, druga ja wykreslila — i scalenie
+    # zostawilo w pliku DWA naglowki H1 przy obu bramkach na zielono.
+    numery = sorted(int(n) for n in re.findall(r"^## DEC-([0-9]+)", oryginal, re.M))
+    check("premisa: rejestr ma sekcje, wiec jest z czym porownywac deklaracje", len(numery) >= 2)
+
+    def z_naglowkiem(sufiks: str) -> str:
+        linie = oryginal.splitlines()
+        linie[0] = linie[0] + sufiks
+        return "\n".join(linie) + "\n"
+
+    # 7a. Zakres w naglowku rejestru. NIEPRAWDZIWY koniec musi byc odrzucony...
+    decyzje.write_text(z_naglowkiem(f" (DEC-{numery[0]}…DEC-{numery[-1] + 7})"))
+    p = uruchom()
+    check("zakres deklarowany w naglowku, niezgodny ze zbiorem sekcji, jest ODRZUCANY",
+          p.returncode != 0 and str(numery[-1] + 7) in p.stdout, p.stdout + p.stderr)
+    # ...a PRAWDZIWY przechodzi. Bez tej pary bramka moglaby po prostu odrzucac kazda liczbe, czyli
+    # mierzyc styl zamiast zgodnosci — i „naprawialoby" sie ja kasowaniem bramki, nie liczby.
+    decyzje.write_text(z_naglowkiem(f" (DEC-{numery[0]}…DEC-{numery[-1]})"))
+    check("ANTY-TAUTOLOGIA: zakres ZGODNY ze zbiorem sekcji PRZECHODZI", uruchom().returncode == 0)
+
+    # 7b. Licznik w preambule, takze SLOWNIE — bo w tej wlasnie formie gnil („Osiemnascie
+    #     rozstrzygniec"). Slowa bierzemy z mapy samego narzedzia: wpisana tutaj druga kopia mapy
+    #     rozjechalaby sie z pierwsza dokladnie tak, jak rozjechal sie naglowek.
+    spec = importlib.util.spec_from_file_location("decisions_check", ROOT / "tools/decisions_check.py")
+    modul = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(modul)
+    slowo_prawda = next((w for w, v in modul.LICZEBNIKI.items() if v == len(numery)), None)
+    slowo_falsz = next((w for w, v in modul.LICZEBNIKI.items() if v == len(numery) + 1), None)
+    check("premisa: narzedzie zna liczebnik slowny dla rozmiaru tego rejestru",
+          slowo_prawda is not None and slowo_falsz is not None, f"{len(numery)} sekcji")
+    if slowo_prawda and slowo_falsz:
+        def z_licznikiem(slowo: str) -> str:
+            linie = oryginal.splitlines()
+            linie.insert(2, f"{slowo.capitalize()} rozstrzygniec, ktore okreslaja ksztalt repozytorium.")
+            return "\n".join(linie) + "\n"
+
+        decyzje.write_text(z_licznikiem(slowo_falsz))
+        p = uruchom()
+        check("licznik SLOWNY w preambule, niezgodny z liczba sekcji, jest ODRZUCANY",
+              p.returncode != 0 and slowo_falsz.split()[0] in p.stdout.lower(), p.stdout + p.stderr)
+        decyzje.write_text(z_licznikiem(slowo_prawda))
+        check("ANTY-TAUTOLOGIA: licznik slowny ZGODNY z liczba sekcji PRZECHODZI",
+              uruchom().returncode == 0)
+        decyzje.write_text(z_licznikiem(str(len(numery) + 1)))
+        check("licznik CYFRAMI tez jest sprawdzany", uruchom().returncode != 0)
+
+    # 7c. Dwa naglowki H1 — dokladnie to, co zostawil rozwiazany na oslep konflikt merge'a.
+    decyzje.write_text("# Decyzje, na ktorych stoi ten starter\n\n---\n\n" + oryginal)
+    p = uruchom()
+    check("DRUGI naglowek H1 w rejestrze jest ODRZUCANY (artefakt konfliktu merge'a)",
+          p.returncode != 0, p.stdout + p.stderr)
+
+    # 7d. FALSZYWY POZYTYW, ktory ta bramka miala tuz obok siebie: rejestr cytuje wyjscie `terraform
+    #     plan` z komentarzami shellowymi, a te zaczynaja sie od `#` na poczatku linii. Bramka liczaca
+    #     je jako naglowki byla by czerwona na tresci poprawnej — czyli uczylaby kasowania przykladow.
+    decyzje.write_text(oryginal + "\n```\n# to jest komentarz w bloku kodu, nie naglowek\n```\n")
+    check("`#` w bloku kodu NIE jest naglowkiem H1 (bramka nie wywraca sie o wlasne przyklady)",
+          uruchom().returncode == 0, "")
+    decyzje.write_text(oryginal)
+    check("ANTY-TAUTOLOGIA: nietkniety rejestr nadal PRZECHODZI", uruchom().returncode == 0)
+
+    # 7e. Deklaracja POZA rejestrem. Najbardziej nieaktualne zdanie o zbiorze decyzji stalo nie
+    #     w rejestrze, tylko w `AGENTS.md` — bramka patrzaca wylacznie na rejestr nie zobaczylaby go
+    #     nigdy. Separator jest tu PAUZA, a nie wielokropkiem: wersja wzorca na sam `…` przepuscilaby
+    #     dokladnie ten wariant, ktory ktos napisze nastepnym razem.
+    agents = ROOT / "AGENTS.md"
+    oryginal_agents = agents.read_text()
+    agents.write_text(oryginal_agents + f"\n\nRejestr obejmuje DEC-{numery[0]} — DEC-{numery[-1] - 1}.\n")
+    p = uruchom()
+    check("nieaktualny zakres w PLIKU POZA rejestrem (AGENTS.md) jest ODRZUCANY",
+          p.returncode != 0 and "AGENTS.md" in p.stdout, p.stdout + p.stderr)
+    agents.write_text(oryginal_agents)
+    check("ANTY-TAUTOLOGIA: po cofnieciu zmiany w AGENTS.md ta sama komenda PRZECHODZI",
+          uruchom().returncode == 0)
+
+    # 7f. Swiadomy WYJATEK: para MALEJACA nie jest zakresem. Tak wyglada tytul sekcji cytujacy decyzje
+    #     wczesniejsza („## DEC-<nowa> — DEC-<starsza> rozszerzona o…"), a bramka czerwona na poprawnym
+    #     tytule wymuszalaby przepisywanie tytulow pod bramke. Test stoi tu, zeby ten wyjatek byl
+    #     decyzja udokumentowana, a nie luka, ktora ktos „naprawi" przy nastepnej lekturze wzorca.
+    decyzje.write_text(
+        oryginal + f"\n\n## DEC-{numery[-1] + 1} — DEC-{numery[0]} rozszerzona o pomiar\n\ntresc\n")
+    check("para MALEJACA (tytul cytujacy wczesniejsza decyzje) NIE jest czytana jako zakres",
+          uruchom().returncode == 0, "")
+    decyzje.write_text(oryginal)
 
 
 # --------------------------------------------------------------------- narzedzia

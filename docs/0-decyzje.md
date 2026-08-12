@@ -1,9 +1,3 @@
-# Decyzje, na których stoi ten starter (DEC-1…DEC-23)
-
-Dwadzieścia trzy rozstrzygnięcia, które określają kształt repozytorium. Kod odsyła tutaj skrótem `DEC-1`…`DEC-23` — jeśli komentarz
-
----
-
 # Decyzje, na których stoi ten starter
 
 Rozstrzygnięcia, które określają kształt repozytorium. Kod odsyła tutaj skrótem `DEC-<numer>` — jeśli komentarz
@@ -11,6 +5,8 @@ w pliku mówi „(DEC-4)", to znaczy: „powód tej linijki jest opisany w DEC-4
 Liczby w nagłówku świadomie nie ma: przez pół roku stała tu wartość mniejsza od realnej i nikt tego nie zauważył,
 bo nic jej nie mierzyło. Kompletności rejestru pilnują dwie bramki — `tools/decisions_check.py` (każda **cytowana**
 decyzja ma sekcję) i `starter-drift` w trybie `--wzgledem` (zbiór decyzji pokrywa zbiór startera, DEC-20).
+Ta sama bramka pilnuje też, żeby żadne zdanie w repozytorium nie deklarowało zakresu ani liczby decyzji
+innej niż realna — wpisać ją wolno, ale przestaje być zielona w dniu, w którym przestaje być prawdziwa.
 
 Każda pozycja ma tę samą strukturę: **decyzja** · **dlaczego** · **co odrzucono i dlaczego**. Odrzucone warianty są
 tu celowo — bez nich decyzja wygląda na jedyną możliwą, a była wyborem. Jeśli któryś z nich wróci jako propozycja,
@@ -1324,6 +1320,31 @@ dokładnie wtedy, gdy jej wejście przestało działać — czyli powtórzyłaby
 przeniesiona jako sam nagłówek przechodzi. Świadomie: alternatywą jest porównanie treści, czyli bramka
 zawsze czerwona. Bramka mówi „przeniesiono kadłub, nie przeniesiono nic" — i tyle ma mówić.
 
+**Trzecie sprawdzenie: czy repozytorium mówi o swoim rejestrze prawdę.** Oba sprawdzenia wyżej pytają,
+czy sekcja ISTNIEJE. Żadne nie pyta, czy zdanie „`DEC-1`…`DEC-N`" albo „N rozstrzygnięć" opisuje zbiór,
+który naprawdę tu leży — a to jest osobny, powtarzalny tryb awarii. **Zmierzone: ten sam nagłówek rozjechał
+się TRZY RAZY** (zakres szedł `…18` → `…19` → `…23`, za każdym razem mniejszy od realnego), bo utrzymywała
+go wyłącznie czyjaś uwaga przy dopisywaniu decyzji. Za czwartym razem kosztowało to więcej niż rozjazd:
+dwie równoległe gałęzie rozwiązały problem przeciwnie — jedna podbiła liczbę, druga wykreśliła ją
+z uzasadnieniem — a scalenie zostawiło w rejestrze DWA nagłówki H1, stary nad nowym, z akapitem urwanym
+w pół zdania. Obie bramki wyżej były przy tym zielone i słusznie: sekcje były na miejscu, cytowania też.
+
+Dlatego `tools/decisions_check.py` pyta dodatkowo o trzy rzeczy, wszystkie w trybie domyślnym (oba tory):
+deklaracja zakresu `DEC-a`…`DEC-b` **gdziekolwiek w repozytorium** zgadza się z KOŃCAMI zbioru sekcji ·
+licznik w preambule rejestru zgadza się z LICZBĄ sekcji · rejestr ma **dokładnie jeden** nagłówek H1.
+
+Zakres i licznik są sprawdzane osobno, bo pytają o co innego: przy legalnej dziurze w numeracji końce
+zbioru i jego liczność są RÓŻNE i tylko jedno z tych zdań jest wtedy błędne. Ciągłości nadal nie wymagamy
+(patrz odrzucone niżej). Licznika szukamy **tylko w preambule** — dalej ten sam wzorzec trafiałby w prozę
+o czymś innym, np. w zdanie wyżej o rejestrze, który „nie zawierał dwóch całych decyzji". Bramka czerwona
+na własnym uzasadnieniu uczy kasowania uzasadnień.
+
+**Najtańszą naprawą jest wykreślenie liczby**, nie jej podbicie — i to jest zalecenie, nie zakaz. Liczba
+w prozie nie ma właściciela: nikt nie dostaje zgłoszenia, gdy przestaje być prawdziwa. Bramka nie zabrania
+jej wpisać (zakaz musiałby rozpoznać sto sposobów napisania tego samego zdania); sprawia tylko, że wpisana
+przestaje być zielona dokładnie w dniu, w którym przestaje być prawdziwa — czyli w PR-ze, który dopisuje
+następną decyzję, a nie pół roku później.
+
 **Odrzucone.**
 - *Porównanie całego drzewa z wyjściem `install.sh`.* DEC-9 wprost: czerwone zawsze i legalnie, bo
   wartości środowiska są dokładnie tym, co repozytorium wdrożone ma mieć.
@@ -1337,6 +1358,18 @@ zawsze czerwona. Bramka mówi „przeniesiono kadłub, nie przeniesiono nic" —
   reprezentację drzewa.
 - *Zgłoszenie zamiast czerwieni.* To już mamy przy wskaźniku i to działa: zgłoszenie jest artefaktem
   do przeczytania przed promocją, ale nikt go nie przypisuje. Czerwony przebieg widać na stronie repo.
+- *Kolejna ręczna poprawka nagłówka, bez bramki.* Wypróbowane DWA RAZY i dwa razy zgniło w tym samym
+  miejscu w ciągu tygodni. Trzecia poprawka różniłaby się od poprzednich wyłącznie datą.
+- *Skrypt podbijający liczbę w nagłówku przy każdej decyzji.* Zamienia dokumentację w plik generowany:
+  ktoś musi go uruchomić, a między uruchomieniami nagłówek kłamie tak samo jak dziś. Do tego generator
+  trzeba wołać z bramki, więc i tak kończy się na bramce — tylko takiej, która dodatkowo MUTUJE repo.
+- *Zakaz liczby w rejestrze (odrzucaj każdą).* Kuszące, bo krótsze, ale nie do wyegzekwowania: rozmiar
+  zbioru da się napisać na sto sposobów („kilkanaście", „ponad dwadzieścia"), a zakaz w tej samej chwili
+  trafiłby w zdania opisujące incydenty („nie zawierał dwóch całych decyzji"). Bramka pyta o ZGODNOŚĆ,
+  nie o styl — zgodności da się dowieść, stylu nie.
+- *`markdownlint` albo inny lint dokumentacji.* Widzi formę (długość linii, poziomy nagłówków), nie
+  widzi treści. Dwa nagłówki H1 wykryłby, ale zakres niezgodny ze zbiorem sekcji — nie, bo to pytanie
+  o dane w tym samym pliku, a nie o składnię.
 
 ## DEC-21 — Akcja dywizji mieszka w PUBLICZNYM starterze, bo `uses:` rozwiązuje się bez tokenu
 
