@@ -15,6 +15,16 @@ sink_project_id = "prj-example-adm"
 # Dostaje `logging.viewAccessor` WYŁĄCZNIE na widoku tego kubełka.
 report_service_account = "sa-vpcsc-plan@prj-example-adm.iam.gserviceaccount.com"
 
+# Konto, którym `watch.yml` LICZY metryki odmów i zmian konfiguracji (krok `measure` — czyli to samo
+# `PLAN_SERVICE_ACCOUNT`). Dostaje `logging.viewAccessor` na widoku zmian konfiguracji; grant na widoku
+# naruszeń nie jest tu duplikowany, gdy to TA SAMA wartość co `report_service_account`.
+#
+# PUSTE = obserwator nie czyta logów, więc metryki `violations_enforced` i `config_changed_outside_pipeline`
+# nie powstają, a wraz z nimi NIE POWSTAJĄ dwie polityki alertu (patrz `violations_source` w alerting.yaml).
+# To jest degradacja jawna, nie cicha — ale jest degradacją: granica zostaje wtedy bez sygnału „ktoś jest
+# blokowany TERAZ".
+watch_reader_service_account = "sa-vpcsc-plan@prj-example-adm.iam.gserviceaccount.com"
+
 # Domyślne — zmieniaj tylko świadomie:
 #
 # bucket_location: sprawdź `constraints/gcp.resourceLocations` PRZED apply. W organizacji z ograniczeniem

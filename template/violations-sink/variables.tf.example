@@ -65,6 +65,19 @@ variable "report_service_account" {
   }
 }
 
+variable "watch_reader_service_account" {
+  description = "Konto, którym `watch.yml` LICZY metryki naruszeń i zmian konfiguracji (krok `measure`, czyli `PLAN_SERVICE_ACCOUNT`). Dostaje `logging.viewAccessor` na obu widokach tego kubełka. PUSTE = obserwator nie czyta logów i alerty „ruch odrzucony” oraz „konfiguracja zmieniona poza pipeline'em” zostają bez producenta — degradacja bezpieczna i JAWNA (martwy-człowiek na brak punktu strzela), a nie cicha."
+  type        = string
+  default     = ""
+
+  validation {
+    condition = var.watch_reader_service_account == "" || can(
+      regex("^[^@]+@[^@]+\\.iam\\.gserviceaccount\\.com$", var.watch_reader_service_account)
+    )
+    error_message = "watch_reader_service_account to sam e-mail konta serwisowego, bez prefiksu `serviceAccount:` (albo puste)."
+  }
+}
+
 variable "violations_reader_principals" {
   description = "Kto POZA pipeline'em raportu może czytać surowy strumień odmów (`user:`/`group:`). Świadomie WĘŻSZE niż krąg czytelników raportu: raport mówi „ten członek ma N naruszeń”, a kubełek pokazuje całej organizacji, kto próbuje sięgać gdzie. Pusta lista jest poprawnym ustawieniem."
   type        = list(string)

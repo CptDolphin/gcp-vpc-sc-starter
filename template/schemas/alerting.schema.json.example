@@ -95,6 +95,52 @@
       "type": "string",
       "pattern": "^https://[^ ]+[^/ ]$",
       "description": "Baza URL dokumentacji BEZ ukośnika na końcu — polityki doklejają `/7-alerty.md#kotwica`. Ukośnik na końcu dałby `//7-alerty.md`, czyli 404 z alertu o 3:00."
+    },
+    "violations_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Widoki kubełka sinka, z których liczą się metryki odmów i zmian konfiguracji granicy. OPCJONALNE, ale brak tej sekcji NIE tworzy dwóch polityk alertu (odmowa egzekwowana, zmiana poza pipeline'em) — bo nie miałby ich kto zasilać. DLACZEGO widok, a nie metryka log-based: metryka log-based liczy wyłącznie wpisy przyjęte przez Log Router własnego projektu, a te wpisy powstają w projekcie członka (naruszenia) albo w logu organizacji (ACM) i docierają sinkiem do MAGAZYNU, nie na wejście — zmierzone parą kontrolną w #2000. Wartości biorą się z wyjść stacku `violations-sink/`.",
+      "required": [
+        "project_id",
+        "bucket",
+        "location",
+        "view",
+        "config_view"
+      ],
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{4,28}[a-z0-9]$",
+          "description": "Projekt administracyjny z kubełkiem sinka. MUSI leżeć POZA perimetrem — kubełek wewnątrz granicy odcinałby obserwatora od dowodu dokładnie po pierwszej promocji."
+        },
+        "bucket": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9._-]{2,99}$",
+          "description": "Nazwa kubełka logów (`bucket_id` ze stacku `violations-sink/`)."
+        },
+        "location": {
+          "type": "string",
+          "minLength": 2,
+          "description": "Lokalizacja kubełka. Musi zgadzać się ze stackiem sinka — zła lokalizacja daje 404 na odczycie, czyli brak punktu, czyli martwego-człowieka zamiast liczby."
+        },
+        "view": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9._-]{2,99}$",
+          "description": "Widok naruszeń (`LOG_ID(\"cloudaudit.googleapis.com/policy\")`) — ten sam, który czyta raport naruszeń."
+        },
+        "config_view": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9._-]{2,99}$",
+          "description": "Widok zmian konfiguracji granicy (`LOG_ID(\"cloudaudit.googleapis.com/activity\")`). ROZŁĄCZNY z widokiem naruszeń — dzięki temu rozszerzenie filtra sinka o ACM nie wpuszcza historii zmian polityki dostępu do danych raportu naruszeń."
+        },
+        "window_seconds": {
+          "type": "integer",
+          "minimum": 600,
+          "maximum": 86400,
+          "default": 5400,
+          "description": "Okno liczenia. MUSI przekraczać kadencję `watch.yml`, inaczej między przebiegami powstaje szczelina, w której odmowa nie zostanie policzona przez żaden przebieg. Nakładanie się okien jest pożądane: próg alertu to `> 0`, więc podwójne policzenie nie zmienia decyzji, a przeoczenie zmienia."
+        }
+      }
     }
   },
   "$defs": {
