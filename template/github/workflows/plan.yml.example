@@ -95,17 +95,21 @@ jobs:
           terraform -chdir=terraform plan -input=false -lock-timeout=5m -out=tfplan.binary
           terraform -chdir=terraform show -json tfplan.binary > terraform/plan.json
 
-      - name: install conftest
-        run: |
-          curl -sSfL -o /tmp/conftest.tar.gz \
-            https://github.com/open-policy-agent/conftest/releases/download/v0.56.0/conftest_0.56.0_Linux_x86_64.tar.gz
-          tar -xzf /tmp/conftest.tar.gz -C /tmp conftest
-          sudo mv /tmp/conftest /usr/local/bin/
+      # Patrz naglowek `.github/actions/narzedzia/action.yml` i DEC-26. Bez `pakiety_python`: ten job
+      # nie potrzebuje pipa, a dokladanie mu PyPI byloby powiekszeniem powierzchni awarii, nie porzadkiem.
+      - uses: ./.github/actions/narzedzia
 
       # --data feeds policy.yaml into the rules: the wildcard gate needs to know which services the API
       # publishes no methods for. Without it the set is empty and every "*" is denied — fail-closed on purpose.
+      # WERDYKT, NIE SAM KOD WYJSCIA. Czerwien tego kroku ma znaczyc „odrzucone przez regule" i ma to
+      # znaczyc SAMA — bez czytania logu i bez mylenia z czerwienia, ktora zostawia po sobie awaria
+      # dostarczenia narzedzi (DEC-26). `trap … ERR` zamiast `||`, zeby wywolanie `conftest` zostalo
+      # bajt w bajt takie samo, jak w drugim workflowie: rownosc tych dwoch linii jest asercja selftestu
+      # i jedynym dowodem, ze „te same bramki" na pull requescie i na granicy sa te same.
       - name: policy gates on the plan
-        run: conftest test --policy policy --data perimeter/policy.yaml --namespace vpcsc.perimeter terraform/plan.json
+        run: |
+          trap 'echo "::error title=WNIOSEK ODRZUCONY PRZEZ BRAMKE TRESCI (reguly na planie)::Bramki wykonaly sie i regula odrzucila TRESC tej zmiany. Powtorzenie przebiegu niczego nie zmieni."; echo "## ❌ WERDYKT: ODRZUCONY — reguły na planie" >> "$GITHUB_STEP_SUMMARY"' ERR
+          conftest test --policy policy --data perimeter/policy.yaml --namespace vpcsc.perimeter terraform/plan.json
 
       # Bramki żywe — jedyne w pipelinie, które rozmawiają z API. Definicja stoi w jednym miejscu, bo woła
       # je także job bramek w `apply.yml`: pull request i mutator mają dostawać DOKŁADNIE ten sam zestaw,

@@ -42,14 +42,16 @@ runs:
       with:
         python-version: "3.12"
 
-    - name: install tooling
-      shell: bash
-      run: |
-        pip install --quiet pyyaml check-jsonschema
-        curl -sSfL -o /tmp/conftest.tar.gz \
-          https://github.com/open-policy-agent/conftest/releases/download/v0.56.0/conftest_0.56.0_Linux_x86_64.tar.gz
-        tar -xzf /tmp/conftest.tar.gz -C /tmp conftest
-        sudo mv /tmp/conftest /usr/local/bin/
+    # NARZĘDZIA STOJĄ OSOBNO OD BRAMEK, I TO JEST SEDNO, NIE PORZĄDKI.
+    #
+    # Zmierzone: ten krok padł na pobraniu `conftest` (`curl: (60) SSL certificate problem`), wszystkie
+    # bramki poniżej dostały `outcome=skipped`, a check w interfejsie wyglądał identycznie jak odrzucenie
+    # wniosku przez regułę. Dopóki dostarczanie narzędzi i orzekanie o treści są jednym krokiem, ich
+    # porażki są jednym sygnałem — i „bramka odrzuciła" jest nieodróżnialne od „bramki nie wystartowały".
+    # Rozdzielenie daje dwa różne komunikaty; klasyfikację i odrzucone warianty opisuje DEC-26.
+    - uses: ./.github/actions/narzedzia
+      with:
+        pakiety_python: pyyaml check-jsonschema
 
     # JSON Schema first: it rejects the boring failures (missing owner, missing review date, a project
     # number that is not a number) with a message a human can act on, before OPA sees the file.
@@ -286,6 +288,17 @@ runs:
           exit 1
         fi
 
+    # `continue-on-error` ZAMIENIA PORAŻKĘ W „SUCCESS" W REST API — zmierzone, nie teoretyczne.
+    #
+    # Krok z tą flagą raportuje `steps[].conclusion: "success"` mimo `##[error]` w logu, bo per-krokowego
+    # `outcome` API nie wystawia w ogóle. To druga strona tej samej monety, co werdykt niżej: tam czerwony
+    # przebieg nie znaczył „odrzucone", tu zielony krok nie znaczy „udało się". Guard żąda więc zapisanego
+    # POWODU obok flagi i wypisania `outcome` do podsumowania — a na powierzchni bramek
+    # (`.github/actions/**`) zabrania jej wprost, bo tam porażka nie zostawia w API żadnego śladu.
+    - name: guard - continue-on-error ma powod i widoczny wynik
+      shell: bash
+      run: python3 tools/continue_on_error_check.py
+
     # DOWÓD DLA BRAMKI PROMOCJI. `promotion_gate` odrzuca członka `enforced`, dla którego nie ma wpisu
     # w `violations_last_window` — „brak danych" nie jest tym samym co „zero naruszeń". Dowód powstaje
     # w `violations-report.yml`: workflow z tożsamością WIF czyta audit-log organizacji i każdego projektu
@@ -414,3 +427,67 @@ runs:
     - name: attribute budget
       shell: bash
       run: python3 tools/attribute_budget.py --input declarations.json --format markdown | tee -a "$GITHUB_STEP_SUMMARY"
+
+    # ZNACZNIK „WSZYSTKIE BRAMKI TREŚCI SIĘ WYKONAŁY". Musi stać jako OSTATNI krok orzekający — na nim
+    # i na znaczniku narzędzi stoi cała klasyfikacja werdyktu niżej. Nie da się go postawić „mniej więcej
+    # na końcu": bramka, po której go przestawiono, przestaje wpływać na werdykt, choć nadal czerwieni job.
+    - name: znacznik - komplet bramek tresci wykonany
+      shell: bash
+      run: ': > "${RUNNER_TEMP}/vpcsc-bramki-tresci-ok"'
+
+    # ============================================================================================
+    # WERDYKT — jedyny krok tej akcji, który NIE jest bramką, i jedyny z `if: always()`
+    # ============================================================================================
+    # Odpowiada na pytanie, na które kolor checku nie odpowiada: czy ten wniosek został ODRZUCONY, czy
+    # w ogóle NIE ZOSTAŁ SPRAWDZONY. Rozstrzyga to dwoma znacznikami zapisywanymi przez kroki, które
+    # naprawdę się wykonały — nie własnym przekonaniem o tym, co powinno było się wykonać:
+    #
+    #   brak znacznika narzędzi                     → NIEROZSTRZYGNIĘTE (awaria środowiska)
+    #   znacznik narzędzi, brak znacznika kompletu  → ODRZUCONE przez bramkę treści
+    #   oba znaczniki                               → ZALICZONE
+    #
+    # DLACZEGO ZNACZNIKI, A NIE `job.status`. Kontekst `job` nie jest dostępny wewnątrz akcji złożonej,
+    # a `steps.<id>.outcome` wymagałby `continue-on-error` na każdej bramce — czyli rozbrojenia wszystkich
+    # bramek po to, żeby dowiedzieć się, czy któraś zadziałała. Znacznik pisze KROK, więc jego brak jest
+    # faktem o wykonaniu, nie interpretacją.
+    #
+    # DLACZEGO `exit 1` TYLKO PRZY BRAKU ZNACZNIKA NARZĘDZI. Stan „nie wiem, czy bramki się wykonały" ma
+    # kończyć się czerwono także wtedy, gdy krok narzędzi przestanie propagować własny kod wyjścia —
+    # nieznane nigdy nie może być traktowane jak przejście. W pozostałych przypadkach job jest już
+    # czerwony (albo zielony) z powodu samych bramek i ten krok niczego nie nadpisuje.
+    - name: werdykt bramek tresci
+      if: always()
+      shell: bash
+      run: |
+        set -u
+        if [ ! -f "${RUNNER_TEMP}/vpcsc-narzedzia-ok" ]; then
+          # Adnotacja z kroku narzędzi już poszła — tu powtarzamy werdykt w miejscu, w którym czytelnik
+          # szuka wyniku bramek, żeby „brak wyniku" nie wyglądał na przeoczenie.
+          echo "::error title=WERDYKT NIEROZSTRZYGNIETY (bramki nie wystartowaly)::Narzedzia bramek nie powstaly, wiec zadna bramka tresci sie nie wykonala. To NIE jest odrzucenie wniosku."
+          {
+            echo "## ⛔ WERDYKT: NIEROZSTRZYGNIĘTY — bramki treści nie wystartowały"
+            echo
+            echo "Ten przebieg jest czerwony z powodu **awarii środowiska CI**, nie z powodu treści wniosku."
+            echo "Nie zamykaj wniosku jako odrzuconego — powtórz przebieg."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 1
+        fi
+        if [ ! -f "${RUNNER_TEMP}/vpcsc-bramki-tresci-ok" ]; then
+          echo "::error title=WNIOSEK ODRZUCONY PRZEZ BRAMKE TRESCI::Narzedzia powstaly, bramki sie wykonaly i ktoras odrzucila TRESC tego wniosku. Powod stoi w logu kroku, ktory jest czerwony."
+          {
+            echo "## ❌ WERDYKT: ODRZUCONY — treść wniosku nie przeszła bramki"
+            echo
+            echo "Bramki treści **wykonały się** i któraś z nich odrzuciła tę zmianę. Powtórzenie przebiegu"
+            echo "niczego nie zmieni — poprawka jest po stronie treści wniosku."
+          } >> "$GITHUB_STEP_SUMMARY"
+          # `exit 1`, choć job jest już czerwony od bramki, która odrzuciła. Powód nie jest kosmetyczny:
+          # w tym repozytorium KAŻDE `::error::` stoi obok niezerowego kodu wyjścia (rozpisane w nagłówku
+          # `komunikat_rozjazdu` w `tools/perimeter_watch.py`), bo nie mamy pomiaru mówiącego, czy sama
+          # adnotacja poziomu error zmienia status joba. Wyjątek od tej zasady kosztowałby dokładnie tyle,
+          # ile pierwszy raz, gdy ktoś się na nią powoła — a tutaj nic nie kosztuje: brak znacznika kompletu
+          # znaczy, że któryś wcześniejszy krok padł, więc job i tak jest czerwony.
+          exit 1
+        fi
+        {
+          echo "## ✅ WERDYKT: ZALICZONY — komplet bramek treści wykonał się i nic nie odrzucił"
+        } >> "$GITHUB_STEP_SUMMARY"

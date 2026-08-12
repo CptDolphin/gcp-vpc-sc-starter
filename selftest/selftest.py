@@ -136,7 +136,7 @@ def bootstrap() -> None:
         "tools/sonda_egress_wewnetrzna.py", "tools/sonda_egress_startup.sh",
         "tools/perimeter_watch.py", "terraform/alerts.tf",
         "perimeter/alerting.yaml", "schemas/alerting.schema.json",
-        # Czy alert CRITICAL ma kanal, ktorego DORECZENIE potwierdza maszyna (DEC-26). Poprzednia
+        # Czy alert CRITICAL ma kanal, ktorego DORECZENIE potwierdza maszyna (DEC-27). Poprzednia
         # kontrola pytala o `verificationStatus` — pole, ktorego API nie zwraca.
         "tools/kanaly_check.py",
         ".github/workflows/watch.yml",
@@ -147,6 +147,9 @@ def bootstrap() -> None:
         ".github/actions/bramka-promocji/action.yml", "tools/promotion_hold.py",
         # Bramka pre-flightu: prerekwizyty CUDZEGO projektu, na obu torach, tozsamoscia `plan` (DEC-24).
         ".github/actions/bramka-preflightu/action.yml", "tools/preflight_gate.py",
+        # Narzedzia bramek w JEDNYM miejscu (pin + suma + ponawianie + werdykt „bramki NIE wykonaly sie").
+        # Wczesniej ten sam `curl` stal w szesciu plikach, w zadnym z weryfikacja pobrania (DEC-27).
+        ".github/actions/narzedzia/action.yml", "tools/continue_on_error_check.py",
         ".tflint.hcl", ".github/dependabot.yml", "tests/README.md",
         "tests/snow-approved.json", "tests/snow-not-approved.json", "tests/snow-self-approved.json",
         "tests/snow-wrong-project.json", "tests/dispatch-example.json",
@@ -1789,7 +1792,7 @@ def test_kanaly_check() -> None:
     dla ktorego to narzedzie powstalo. Dlatego mierzymy WSZYSTKIE piec odpowiedzi API, i osobno to,
     ze dwa rozne `404` nie sklejaja sie w jeden werdykt.
 
-    Odpowiedzi sa ZMIERZONE na zywym API (DEC-26), nie wymyslone; siec jest tu zaslepiona, bo mierzymy
+    Odpowiedzi sa ZMIERZONE na zywym API (DEC-27), nie wymyslone; siec jest tu zaslepiona, bo mierzymy
     logike werdyktu, a nie API Google.
     """
     print("\n== kanaly_check ==")
@@ -4527,7 +4530,7 @@ sys.exit(0)
 '''
 
 
-def akcja_lokalna(uses: str):
+def akcja_lokalna(uses: str, glebokosc: int = 8):
     """Kroki AKCJI ZLOZONEJ wolanej przez `uses: ./sciezka` — albo None, gdy to nie jest akcja lokalna.
 
     DLACZEGO TO JEST TU, A NIE W KAZDYM TESCIE Z OSOBNA. Odkad bramki tresci mieszkaja w jednym miejscu
@@ -4535,6 +4538,13 @@ def akcja_lokalna(uses: str):
     `uses:` zamiast dwunastu `run:`. Test czytajacy same `jobs[*].steps` przestalby wiec widziec bramki
     — i zielenilby sie na pliku, z ktorego wszystkie usunieto. To ta sama klasa bledu, ktora ten selftest
     tropi gdzie indziej: asercja o KSZTALCIE pliku zamiast o wlasnosci, ktora ma byc prawdziwa.
+
+    ROZWIJAMY REKURENCYJNIE, i to nie jest ozdoba. Odkad dostarczanie narzedzi ma wlasna akcje zlozona
+    (`.github/actions/narzedzia`, DEC-27), bramki tresci wolaja akcje z wnetrza akcji. Rozwijanie jednego
+    poziomu odtworzyloby tu DOKLADNIE ten sam blad, dla ktorego ta funkcja powstala: krok przeniesiony
+    o poziom glebiej przestaje byc widziany przez asercje, a te robia sie zielone z powodu, o ktorym nikt
+    sie nie dowie. Limit glebokosci chroni przed cyklem (`A` wola `B`, `B` wola `A`) — bez niego pomylka
+    w szablonie konczy sie zawieszeniem selftestu zamiast czerwonym testem.
     """
     if not isinstance(uses, str) or not uses.startswith("./"):
         return None
@@ -4543,7 +4553,14 @@ def akcja_lokalna(uses: str):
                 baza if baza.is_file() else None)
     if plik is None:
         return None
-    return (yaml.safe_load(plik.read_text()).get("runs") or {}).get("steps") or []
+    kroki = (yaml.safe_load(plik.read_text()).get("runs") or {}).get("steps") or []
+    if glebokosc <= 0:
+        return kroki
+    plaskie = []
+    for krok in kroki:
+        plaskie += akcja_lokalna(str(krok.get("uses", "")), glebokosc - 1) or []
+        plaskie.append(krok)
+    return plaskie
 
 
 def kroki_workflow(wf: dict, rozwijaj: bool = True):
@@ -4581,12 +4598,21 @@ def tekst_wykonywany(nazwa_workflow: str) -> str:
     zlozonej — i nadal czerwieni je, gdy krok zniknie naprawde.
     """
     sciezka = ROOT / ".github/workflows" / nazwa_workflow
-    tekst = sciezka.read_text()
-    czesci = [tekst]
-    for uses in re.findall(r"^\s*-?\s*uses:\s*(\./\S+)", tekst, re.M):
-        plik = ROOT / uses[2:] / "action.yml"
-        if plik.exists():
-            czesci.append(plik.read_text())
+    czesci: list[str] = []
+    widziane: set[pathlib.Path] = set()
+
+    def dolacz(plik: pathlib.Path) -> None:
+        # Rekurencyjnie z tego samego powodu, co w `akcja_lokalna`: bramki tresci wolaja `narzedzia`,
+        # wiec jeden poziom zostawilby tresc akcji zagniezdzonej poza zasiegiem asercji tekstowych.
+        if plik in widziane or not plik.exists():
+            return
+        widziane.add(plik)
+        tekst = plik.read_text()
+        czesci.append(tekst)
+        for uses in re.findall(r"^\s*-?\s*uses:\s*(\./\S+)", tekst, re.M):
+            dolacz(ROOT / uses[2:] / "action.yml")
+
+    dolacz(sciezka)
     return "\n".join(czesci)
 
 
@@ -5421,6 +5447,168 @@ def test_boundary_probe() -> None:
           rc == 0 and "kanarek-poziom" not in out, out[-700:])
 
 
+# ------------------------------------------------------- werdykt bramek i dostarczanie narzedzi (DEC-27)
+def test_werdykt_i_narzedzia() -> None:
+    """Czy da sie ODROZNIC „bramki nie wykonaly sie" od „wniosek odrzucony" — i czy narzedzia sa sprawdzane.
+
+    Badany tryb awarii jest ZMIERZONY: krok instalujacy `conftest` padl na pobraniu, wszystkie bramki
+    ponizej dostaly `outcome=skipped`, a check w interfejsie wygladal identycznie jak odrzucenie wniosku
+    przez regule. Ten test pyta wiec o WLASNOSC („czy oba stany daja rozny sygnal"), a nie o ksztalt pliku.
+    """
+    print("\n== werdykt bramek i dostarczanie narzedzi (DEC-27) ==")
+    akcja = ROOT / ".github/actions/narzedzia/action.yml"
+    check("akcja `narzedzia` istnieje", akcja.exists())
+    if not akcja.exists():
+        return
+    tresc_akcji = akcja.read_text()
+
+    # --- 1. JEDNO ZRODLO NARZEDZI. Kazda kopia `curl`-a poza ta akcja to kopia, ktora rozjedzie sie przy
+    # pierwszej poprawce — a poprawka jest tu suma kontrolna i komunikat werdyktu, czyli akurat te rzeczy,
+    # ktorych brak jest niewidoczny do dnia awarii. Liczymy po CALYM `.github`, nie po liscie plikow:
+    # lista przepisana do testu przestaje widziec siodmy plik w dniu, w ktorym ktos go doda.
+    kopie = sorted(p.relative_to(ROOT) for p in (ROOT / ".github").rglob("*.yml")
+                   if "conftest" in p.read_text() and "releases/download" in p.read_text())
+    check("pobranie conftest stoi WYLACZNIE w akcji `narzedzia` (zero kopii `curl`-a)",
+          kopie == [pathlib.Path(".github/actions/narzedzia/action.yml")], f"kopie={kopie}")
+
+    # --- 2. POBRANIE JEST WERYFIKOWANE, I TO PRZED INSTALACJA. Suma sprawdzona po `mv` bylaby audytem
+    # pliku, ktory juz lezy na PATH i juz moze orzekac o wniosku.
+    ma_sume = re.search(r"CONFTEST_SHA256:\s*\"([0-9a-f]{64})\"", tresc_akcji)
+    check("akcja `narzedzia` nosi sume SHA-256 pobieranego pliku", bool(ma_sume))
+    check("suma kontrolna sprawdzana PRZED instalacja binarki na PATH",
+          "sha256sum -c" in tresc_akcji
+          and tresc_akcji.index("sha256sum -c") < tresc_akcji.index("sudo mv /tmp/conftest"))
+    check("pobranie ponawiane `--retry-all-errors` (zmierzony tryb awarii to blad 60, ktorego samo "
+          "`--retry` nie ponawia)", "--retry-all-errors" in tresc_akcji)
+    check("wersja conftest jest STALA akcji, nie wejsciem workflowa",
+          "CONFTEST_WERSJA" in tresc_akcji
+          and "conftest" not in yaml.safe_dump(yaml.safe_load(tresc_akcji).get("inputs") or {}))
+
+    # --- 3. ANTY-TAUTOLOGIA WYKONYWANA: krok werdyktu uruchomiony w TRZECH stanach swiata ma dac TRZY
+    # rozne sygnaly. To jest jedyna asercja tego pliku, ktora realnie odpowiada na pytanie z Issue —
+    # reszta pyta o ksztalt. Uruchamiamy dokladnie ten `run`, ktory stoi w akcji, na podstawionym
+    # RUNNER_TEMP; nie da sie jej zdac, pisząc o werdykcie w komentarzu.
+    kroki_bramek = (yaml.safe_load((ROOT / ".github/actions/bramki-tresci/action.yml").read_text())
+                    ["runs"]["steps"])
+    # Selektor po POCZATKU nazwy, nie po zawieraniu: krok guarda `continue-on-error` ma slowo
+    # "wynik" w nazwie z powodu, a wczesniejsza wersja tego testu zlapala JEGO i przez to mierzyla
+    # zupelnie co innego, wygladajac przy tym na dzialajaca. Ta sama klasa bledu, ktora ten plik tropi.
+    zaczyna = lambda k, s: str(k.get("name", "")).startswith(s)  # noqa: E731
+    krok_werdykt = next((k for k in kroki_bramek if zaczyna(k, "werdykt")), None)
+    check("bramki tresci maja krok werdyktu", krok_werdykt is not None)
+    check("krok werdyktu ma `if: always()` (inaczej nie odezwie sie przy porazce, czyli nigdy wtedy, "
+          "kiedy jest potrzebny)", str((krok_werdykt or {}).get("if", "")).strip() == "always()")
+
+    # Znacznik kompletu MUSI stac za ostatnia bramka — przestawiony wyzej sprawia, ze bramki po nim
+    # nadal czerwienia job, ale przestaja wplywac na werdykt, czyli werdykt zaczyna klamac po cichu.
+    nazwy = [str(k.get("name", "")) for k in kroki_bramek]
+    i_znacznik = next((i for i, n in enumerate(nazwy) if n.startswith("znacznik")), None)
+    i_werdykt = next((i for i, n in enumerate(nazwy) if n.startswith("werdykt")), None)
+    i_ostatnia_bramka = max((i for i, k in enumerate(kroki_bramek)
+                             if "conftest" in str(k.get("run", "")) or "guard" in str(k.get("name", ""))
+                             or "attribute_budget" in str(k.get("run", ""))), default=-1)
+    check("znacznik kompletu bramek stoi ZA ostatnia bramka i PRZED werdyktem",
+          i_znacznik is not None and i_werdykt is not None
+          and i_ostatnia_bramka < i_znacznik < i_werdykt,
+          f"ostatnia_bramka={i_ostatnia_bramka} znacznik={i_znacznik} werdykt={i_werdykt}")
+
+    if krok_werdykt is not None:
+        def przelot(narzedzia_ok: bool, bramki_ok: bool):
+            tmp = pathlib.Path(tempfile.mkdtemp(prefix="vpcsc-werdykt-"))
+            if narzedzia_ok:
+                (tmp / "vpcsc-narzedzia-ok").touch()
+            if bramki_ok:
+                (tmp / "vpcsc-bramki-tresci-ok").touch()
+            podsum = tmp / "summary.md"
+            podsum.touch()
+            p = subprocess.run(["bash", "-e", "-c", krok_werdykt["run"]], capture_output=True, text=True,
+                               env=dict(os.environ, RUNNER_TEMP=str(tmp),
+                                        GITHUB_STEP_SUMMARY=str(podsum)))
+            return p.returncode, p.stdout, podsum.read_text()
+
+        rc_awaria, out_awaria, sum_awaria = przelot(False, False)
+        rc_odrzut, out_odrzut, sum_odrzut = przelot(True, False)
+        rc_ok, out_ok, sum_ok = przelot(True, True)
+
+        check("AWARIA NARZEDZI: werdykt mowi wprost, ze to NIE jest odrzucenie wniosku, i konczy czerwono",
+              rc_awaria != 0 and "NIEROZSTRZYGNIETY" in out_awaria
+              and "NIE jest odrzucenie wniosku" in out_awaria
+              and "nie zamykaj wniosku jako odrzuconego" in sum_awaria.lower(),
+              f"rc={rc_awaria} {out_awaria[:300]}")
+        # `rc != 0` takze tutaj: w tym repozytorium kazde `::error::` stoi obok niezerowego kodu wyjscia,
+        # bo nie ma pomiaru mowiacego, czy sama adnotacja zmienia status joba (patrz naglowek
+        # `komunikat_rozjazdu` w `tools/perimeter_watch.py`). Asercja utrwala te zasade.
+        check("ODRZUCENIE TRESCI: werdykt mowi, ze bramki SIE WYKONALY i odrzucily tresc",
+              rc_odrzut != 0 and "ODRZUCONY PRZEZ BRAMKE TRESCI" in out_odrzut
+              and "ODRZUCONY" in sum_odrzut, f"rc={rc_odrzut} {out_odrzut[:300]}")
+        check("PRZEJSCIE: werdykt zalicza i nie zostawia zadnej adnotacji bledu",
+              rc_ok == 0 and "::error" not in out_ok and "ZALICZONY" in sum_ok,
+              f"rc={rc_ok} {out_ok[:300]}")
+        # SEDNO CALEGO ISSUE: te dwa stany maja dawac ROZNY sygnal. Porownanie jest tu wprost, bo
+        # asercje wyzej przeszlyby takze wtedy, gdyby oba komunikaty brzmialy tak samo z dwoch roznych
+        # powodow — a wlasnie ich nieodroznialnosc byla defektem.
+        tytul = lambda s: re.findall(r"::error title=([^:]+)::", s)  # noqa: E731
+        check("awaria narzedzi i odrzucenie tresci daja ROZNE tytuly adnotacji",
+              tytul(out_awaria) and tytul(out_odrzut) and tytul(out_awaria) != tytul(out_odrzut),
+              f"{tytul(out_awaria)} vs {tytul(out_odrzut)}")
+
+    # --- 4. GUARD `continue-on-error`. Uruchamiany, nie ogladany: para pozytyw/negatyw na kopii repo.
+    p = sh(["python3", "tools/continue_on_error_check.py"], cwd=ROOT)
+    check("continue_on_error_check na czystym repo: zielono", p.returncode == 0, p.stdout + p.stderr)
+
+    wf = ROOT / ".github/workflows/drift.yml"
+    kopia_wf = wf.read_text()
+    akcja_bramek = ROOT / ".github/actions/bramki-tresci/action.yml"
+    kopia_akcji = akcja_bramek.read_text()
+    try:
+        # (a) flaga w workflow bez powodu obok
+        wf.write_text(kopia_wf.replace("    steps:\n",
+                                       "    steps:\n      - name: proba\n        continue-on-error: true\n"
+                                       "        run: 'true'\n", 1))
+        p = sh(["python3", "tools/continue_on_error_check.py"], cwd=ROOT)
+        check("continue_on_error_check: flaga bez zapisanego powodu -> czerwono",
+              p.returncode != 0 and "bez powodu obok" in p.stdout, p.stdout[-400:])
+
+        # (b) powod jest, ale `outcome` kroku nigdzie nie widac — czyli dokladnie zmierzony defekt:
+        #     REST API pokaze `conclusion: success` mimo `##[error]`.
+        wf.write_text(kopia_wf.replace(
+            "    steps:\n",
+            "    steps:\n      - name: proba\n        id: proba\n"
+            "        # POWOD (continue-on-error): sonda diagnostyczna, porazka jest wynikiem\n"
+            "        continue-on-error: true\n        run: 'true'\n", 1))
+        p = sh(["python3", "tools/continue_on_error_check.py"], cwd=ROOT)
+        check("continue_on_error_check: powod jest, ale `outcome` nigdzie nie wypisany -> czerwono",
+              p.returncode != 0 and "GITHUB_STEP_SUMMARY" in p.stdout, p.stdout[-400:])
+
+        # (c) powod + `outcome` w podsumowaniu -> zielono. Bez tego przypadku guard moglby po prostu
+        #     odrzucac wszystko, co jest tanszym sposobem na zdanie (a) i (b).
+        wf.write_text(kopia_wf.replace(
+            "    steps:\n",
+            "    steps:\n      - name: proba\n        id: proba\n"
+            "        # POWOD (continue-on-error): sonda diagnostyczna, porazka jest wynikiem\n"
+            "        continue-on-error: true\n        run: 'true'\n"
+            "      - name: werdykt sondy\n"
+            "        run: echo \"proba=${{ steps.proba.outcome }}\" >> \"$GITHUB_STEP_SUMMARY\"\n", 1))
+        p = sh(["python3", "tools/continue_on_error_check.py"], cwd=ROOT)
+        check("continue_on_error_check: powod + `outcome` w podsumowaniu -> zielono",
+              p.returncode == 0, p.stdout[-400:])
+
+        # (d) na POWIERZCHNI BRAMEK flaga jest zakazana bez wyjatkow — tam porazka nie zostawia w API
+        #     zadnego sladu, bo krokow wewnatrz akcji zlozonej API nie wystawia w ogole.
+        wf.write_text(kopia_wf)
+        akcja_bramek.write_text(kopia_akcji.replace(
+            "  steps:\n",
+            "  steps:\n    - name: proba\n      id: proba\n"
+            "      # POWOD (continue-on-error): powod jest, a i tak ma byc czerwono\n"
+            "      continue-on-error: true\n      shell: bash\n      run: 'true'\n", 1))
+        p = sh(["python3", "tools/continue_on_error_check.py"], cwd=ROOT)
+        check("continue_on_error_check: flaga w akcji bramek -> czerwono MIMO powodu i `id`",
+              p.returncode != 0 and "ZAKAZANE" in p.stdout, p.stdout[-400:])
+    finally:
+        wf.write_text(kopia_wf)
+        akcja_bramek.write_text(kopia_akcji)
+
+
 def main() -> int:
     bootstrap()
     test_samodzielnosc()
@@ -5454,6 +5642,7 @@ def main() -> int:
     test_workflows()
     test_workflowy_wykonywalne()
     test_bramki_na_sciezce_apply()
+    test_werdykt_i_narzedzia()
     test_bramka_promocji()
     test_boundary_probe()
     test_schemas()

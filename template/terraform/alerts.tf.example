@@ -170,7 +170,7 @@ locals {
 # tak samo: odbiorca uczy się ignorować całą kategorię, bo dziewięć na dziesięć wiadomości nie wymaga
 # reakcji — i przegapia dziesiątą.
 #
-# `verification_status` JEST W STANIE TERRAFORMA I NIE JEST DOWODEM NA NIC (DEC-26). Pole przychodzi puste,
+# `verification_status` JEST W STANIE TERRAFORMA I NIE JEST DOWODEM NA NIC (DEC-27). Pole przychodzi puste,
 # bo API go NIE ZWRACA: `verificationStatus` to enum proto3, a jego wartość domyślna
 # `VERIFICATION_STATUS_UNSPECIFIED` nie serializuje się do odpowiedzi. Google opisuje tę wartość jako „stan
 # nieznany, pominięty ALBO NIEADEKWATNY (kanały, które weryfikacji ani nie wspierają, ani nie wymagają)" —
