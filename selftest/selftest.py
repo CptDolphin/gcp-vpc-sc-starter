@@ -1527,34 +1527,60 @@ def test_monitoring() -> None:
     print("\n== monitoring ==")
     body = (ROOT / "terraform/monitoring.tf").read_text()
 
-    # Dwie metryki muszą być ROZŁĄCZNE: enforced page'uje, dry-run informuje. Wspólna metryka oznacza alert
-    # odpalający przy normalnej pracy okna obserwacji — czyli alert, który po tygodniu jest ignorowany.
-    # NEGACJA, nie `dryRun="false"`. Wpis o odmowie EGZEKWOWANEJ nie ma pola `dryRun` w ogóle — pojawia się
-    # ono wyłącznie przy naruszeniach dry-run, z wartością `true` (zmierzone na żywej organizacji przy
-    # pierwszej realnej odmowie). Poprzednia asercja pilnowała więc, żeby filtr pozostał taki, przy którym
-    # metryka „ktoś jest blokowany TERAZ" nie policzy nigdy niczego — test strzegł defektu.
-    check("metryka enforced filtruje NEGACJA dryRun=true (pola nie ma przy enforced)",
-          'NOT protoPayload.metadata.dryRun=\\"true\\"' in body and 'dryRun=\\"false\\"' not in body)
-    check("metryka dry-run filtruje dryRun=true", 'dryRun=\\"true\\"' in body)
+    # ANI JEDNEJ METRYKI LOG-BASED W TYM PLIKU — i to jest asercja na DEFEKT, nie na styl (#2000).
+    # Metryka log-based liczy WYŁĄCZNIE wpisy przyjęte przez Log Router własnego projektu. Naruszenia VPC-SC
+    # powstają w logu projektu-CZŁONKA, a zmiany ACM w logu ORGANIZACJI; do projektu monitoringu docierają
+    # SINKIEM, czyli do magazynu, a nie na wejście. Zmierzone parą kontrolną: 5 wpisów zapisanych wprost do
+    # projektu -> metryka policzyła 5; realna odmowa egzekwowana dostarczona sinkiem do kubełka W TYM SAMYM
+    # projekcie -> 0. Taka metryka tworzy się bez błędu, przechodzi `validate` i NIE LICZY NIGDY — czyli jest
+    # gorsza od swojego braku, bo pustą metrykę bierze się za spokój. Ta asercja pilnuje, żeby nie wróciła.
+    # Szukamy DEKLARACJI ZASOBU, nie samego napisu — w nagłówku tego pliku stoi akapit OSTRZEGAJĄCY przed
+    # metryką log-based i wymieniający jej typ z nazwy. Guard na goły napis kazałby usunąć dokładnie tę
+    # wiedzę, dla której powstał (ta sama lekcja co przy guardzie `dryRun="false"` niżej).
+    check("monitoring.tf nie zawiera ANI JEDNEJ metryki log-based (nie policzylaby nigdy niczego)",
+          'resource "google_logging_metric"' not in body,
+          "wrocila metryka log-based — patrz naglowek monitoring.tf")
+
+    # Oba sygnały mają jechać torem, o którym wiadomo, że ma dane: producentem jest obserwator.
+    check("alert enforced stoi na metryce custom (producent = watch.yml), nie na log-based",
+          "local.metryka.naruszenia_enforced" in body
+          and "logging.googleapis.com/user" not in body)
 
     # Alert bez runbooka to zgadywanie o 3:00 (zasada repo: każdy critical niesie procedurę).
     critical = body[body.find('display_name = "VPC-SC: ruch odrzucony'):]
     check("alert enforced ma severity CRITICAL", 'severity     = "CRITICAL"' in critical[:600])
     check("alert enforced ma dokumentacje z procedura",
           "documentation {" in critical and "break-glass" in critical)
-    check("alert enforced grupuje po tozsamosci (nie zalewa organizacji)",
-          'group_by_fields      = ["metric.label.principal"]' in critical)
+
+    # MARTWY-CZŁOWIEK NA WŁASNYM PRODUCENCIE. Metryka liczona z widoku sinka może zamilknąć w pojedynkę
+    # (własny grant `logging.viewAccessor`, własny widok), więc watchdog oparty o `apply_pending_seconds`
+    # jej NIE pokrywa: tamten publikuje się dalej z API GitHuba. Bez tego warunku cisza po odebraniu
+    # jednego grantu wygląda dokładnie jak „nikt nie jest blokowany".
+    check("alert enforced ma wlasnego martwego-czlowieka (condition_absent)",
+          "condition_absent" in critical)
 
     # Alert o zmianach poza pipeline'em musi wykluczać WŁASNE konto apply — inaczej odpala przy każdym apply
-    # i uczy ignorowania.
-    check("alert out-of-band wyklucza konto apply",
-          "principalEmail!=" in body and "apply_service_account" in body)
+    # i uczy ignorowania. Od #2000 wyklucza je PRODUCENT (`perimeter_watch.py`), a nie filtr metryki: widok
+    # sinka jest strukturą i nie ma się zmieniać przy rotacji konta serwisowego, a tożsamość konta jest
+    # wartością środowiska. Asercja przeniosła się więc razem z odpowiedzialnością.
+    watch_src = (ROOT / "tools/perimeter_watch.py").read_text()
+    check("producent wyklucza konto apply przy liczeniu zmian ACM",
+          "konto_apply" in watch_src and "apply_service_account" in watch_src,
+          "bez tego metryka rosnie po KAZDYM apply i alert uczy ignorowania")
 
     # Metryki i alerty są opcjonalne (count), ale przykładowa policy MA je włączać — starter pokazuje
     # kompletne wdrożenie, nie minimalne.
     check("monitoring jest opcjonalny (count), ale wlaczony w przykladzie",
-          "local.monitoring_enabled ? 1 : 0" in body
+          "local.naruszenia_count" in body
           and "monitoring:" in (ROOT / "perimeter/policy.yaml").read_text())
+
+    # ŹRÓDŁO MUSI ISTNIEĆ, INACZEJ POLITYKI NIE POWSTAJĄ. `naruszenia_count` zeruje się przy braku sekcji
+    # `violations_source` — świadomie, bo alert bez producenta chodzi wiecznie na martwym-człowieku i uczy
+    # dyżurnego klikać „potwierdź" na kategorii, w której siedzi jedyny alert „ktoś jest blokowany TERAZ".
+    # Starter pokazuje wdrożenie KOMPLETNE, więc przykład tę sekcję ma.
+    alerting_txt = (ROOT / "perimeter/alerting.yaml").read_text()
+    check("przykladowy alerting.yaml ma zrodlo odmow (violations_source)",
+          "violations_source:" in alerting_txt and "config_view:" in alerting_txt)
 
 
 # --------------------------------------------------------------------- alerty granicy
@@ -1577,8 +1603,22 @@ def test_alerty() -> None:
     typy_py = set(re.findall(r'"(custom\.googleapis\.com/vpcsc/[a-z_]+)"', watch_py))
     check("nazwy metryk zgodne miedzy alerts.tf a perimeter_watch.py", typy_tf == typy_py,
           f"tylko w tf={sorted(typy_tf - typy_py)} tylko w py={sorted(typy_py - typy_tf)}")
-    check("pieć metryk obserwatora (apply/budzet%/budzet-dni/dryf/wygasli)", len(typy_tf) == 5,
-          str(sorted(typy_tf)))
+    check("osiem metryk obserwatora (apply/budzet%/budzet-dni/dryf/wygasli + 3 z widokow sinka)",
+          len(typy_tf) == 8, str(sorted(typy_tf)))
+
+    # PRODUCENT MUSI ROZRÓŻNIAĆ ODMOWĘ EGZEKWOWANĄ PO **BRAKU** POLA `dryRun`. To jest ta sama pułapka,
+    # która wcześniej siedziała w filtrze metryki log-based (#1941) i wróciłaby tu, gdyby ktoś „uprościł"
+    # licznik do `meta.get("dryRun") is False`. Pole istnieje WYŁĄCZNIE przy dry-run i ma wtedy `true`,
+    # więc każdy predykat porównujący je z fałszem nie dopasuje NIGDY NICZEGO.
+    check("producent rozroznia enforced po BRAKU pola dryRun, nie po jego wartosci",
+          '"dryRun" not in meta' in watch_py,
+          "licznik naruszen musi patrzec na OBECNOSC pola, nie na wartosc")
+
+    # Metryka odmów nie może mieć etykiet: seria ma istnieć także wtedy, gdy odmów NIE BYŁO (wartość 0),
+    # bo tylko wtedy `condition_absent` znaczy „producent padł", a nie „dziś nikt nie był blokowany".
+    check("metryka odmow publikuje sie BEZ etykiet (zero tez jest punktem)",
+          'METRYKI["naruszenia_enforced"], naruszenia["enforced"], None' in watch_py,
+          "etykieta sprawilaby, ze zdrowa cisza znika z wykresu i budzi martwego-czlowieka")
 
     # 2. KAŻDY ALERT MA RUNBOOK NA ISTNIEJĄCĄ KOTWICĘ. Kotwica, której nie ma, ląduje na początku
     # dokumentu — czyli o 3:00 daje spis treści zamiast procedury. Sprawdzamy OBA pliki z alertami.
@@ -1685,12 +1725,19 @@ def test_alerty() -> None:
         tresc = f.read_text(errors="ignore").replace('\\"', '"')
         if zly in tresc:
             trafienia.append(str(f.relative_to(ROOT)))
-        if 'NOT protoPayload.metadata.dryRun="true"' in tresc:
+        if 'NOT protoPayload.metadata.dryRun="true"' in tresc or '"dryRun" not in meta' in tresc:
             poprawny_filtr = True
     check("nigdzie w repo nie ma filtru dryRun=false (nie lapie NIGDY niczego)", not trafienia,
           str(trafienia))
-    # ANTY-TAUTOLOGIA: powyższe przeszłoby także wtedy, gdyby w repo nie było ŻADNEGO filtru na naruszenia.
-    check("poprawna postac filtru (NEGACJA dryRun=true) jest obecna", poprawny_filtr)
+    # ANTY-TAUTOLOGIA: powyższe przeszłoby także wtedy, gdyby w repo nie było ŻADNEGO rozróżnienia
+    # enforced/dry-run. Od #2000 poprawna postać ma DWA legalne warianty i oba są tu akceptowane:
+    #   * filtr LogQL `NOT protoPayload.metadata.dryRun="true"` — używany tam, gdzie pytamy Logging API
+    #     (runbook, `violations-report.yml`, wyjścia stacku sinka);
+    #   * predykat `"dryRun" not in meta` w Pythonie — bo licznik obserwatora dostaje wpisy już odczytane
+    #     i rozróżnia je po OBECNOŚCI pola.
+    # Obie postacie mówią to samo: odmowa EGZEKWOWANA to wpis BEZ tego pola. Czego tu nie ma i mieć nie
+    # może, to jakiegokolwiek porównania `dryRun` z fałszem.
+    check("poprawna postac rozroznienia enforced/dry-run jest obecna", poprawny_filtr)
 
     # 8. CZYSTE FUNKCJE PRODUCENTA — liczby, nie kształt pliku. To jest jedyne miejsce, w którym sprawdzamy,
     # że dyskryminator „dryf vs opóźnienie propagacji" i sentynela prognozy realnie działają.
@@ -4353,6 +4400,20 @@ def test_boundary_probe() -> None:
     kod_workflow = [w for w in tresc.splitlines() if not w.lstrip().startswith("#")]
     check("boundary-probe: filtr nie uzywa dryRun rownego false",
           not any('dryRun="false"' in w for w in kod_workflow))
+
+    # KORELACJA PO IDENTYFIKATORZE (#1999, druga polowa). Ponawianie samo w sobie nie wystarczylo:
+    # przelot zaliczyl sie w 0 s na TRZECH odmowach z POPRZEDNIEGO przebiegu, ktorych identyfikatory nie
+    # mialy ani jednego wspolnego z dwoma z tego przebiegu. Krok dowodzil wiec „byly jakies odmowy
+    # w godzinie", a nie „TE wywolania zostaly odmowione" — i przeszedlby przy wylaczonej granicy.
+    check("boundary-probe: krok audytowy koreluje po vpcServiceControlsUniqueId",
+          "oczekiwane-id.txt" in audyt
+          and "vpcServiceControlsUniqueIdentifier" in audyt
+          and "vpcServiceControlsUniqueId" in audyt)
+
+    # Pusty zbior oczekiwanych identyfikatorow NIE moze znaczyc „zaliczone" — inaczej brak odmowy
+    # w odpowiedziach (czyli granica, ktora nie zadzialala) dawalby zielony krok przez brak danych.
+    check("boundary-probe: brak identyfikatorow w odpowiedziach konczy krok bledem",
+          "zadna sonda nie zwrocila identyfikatora VPC-SC" in audyt)
 
     # Wyciagamy kod werdyktu z pliku i uruchamiamy go na wejsciach, ktorych nigdy nie widzial.
     # `[-1]` — bierzemy OSTATNI heredok python3 tego pliku (werdykt), nie pierwszy (odczyt stanu granicy).

@@ -404,11 +404,21 @@ run "monitoring_alerty_maja_procedure" {
     error_message = "Przykładowa policy.yaml nie ma sekcji monitoring — starter ma pokazywać monitoring, nie go pomijać."
   }
 
-  # Filtr metryki enforced MUSI zawężać się do dryRun=false. Bez tego alert page'uje przy każdym naruszeniu
-  # dry-run, czyli przy normalnej pracy okna obserwacji — i po tygodniu nikt go nie czyta.
+  # DWIE POLITYKI GRANICY MUSZĄ POWSTAĆ W PRZYKŁADZIE. Wcześniej stała tu asercja o kształcie filtra
+  # metryki log-based — i mierzyła konstrukcję, która NIE MOGŁA LICZYĆ (#2000): metryka log-based widzi
+  # wyłącznie wpisy przyjęte przez Log Router własnego projektu, a naruszenia powstają w logu członka,
+  # zmiany ACM zaś w logu organizacji. Test pilnował więc poprawności czegoś strukturalnie martwego.
+  # Dziś oba sygnały jadą z widoku sinka, a warunkiem ich istnienia jest sekcja `violations_source`.
   assert {
-    condition     = strcontains(local.vpcsc_audit_filter, "violationReason")
-    error_message = "Filtr audytowy nie zawęża się do wpisów z violationReason — metryka liczyłaby wszystko."
+    condition     = local.naruszenia_count == 1
+    error_message = "Przykładowy alerting.yaml nie ma sekcji violations_source — bez niej NIE POWSTAJĄ alerty o odmowie egzekwowanej i o zmianie konfiguracji poza pipelinem, czyli granica zostaje bez sygnału mówiącego, że ktoś jest blokowany TERAZ."
+  }
+
+  # Producent i konsument muszą mówić o tej samej metryce. Rozjazd = alert patrzący na metrykę, do której
+  # nikt nie pisze, czyli cisza nie do odróżnienia od spokoju.
+  assert {
+    condition     = startswith(local.metryka.naruszenia_enforced, "custom.googleapis.com/vpcsc/")
+    error_message = "Metryka odmów wróciła na tor log-based (`logging.googleapis.com/user/…`) — ta konstrukcja nie policzy NIGDY niczego, patrz nagłówek monitoring.tf."
   }
 }
 

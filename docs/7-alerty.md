@@ -4,18 +4,38 @@ Alert bez procedury budzi człowieka i zostawia go z pytaniem, co teraz. Każda 
 repozytorium niesie `documentation.links` z URL-em na **konkretną kotwicę w tym pliku** — jeśli dopisujesz
 alert, dopisz sekcję tutaj w tym samym pull requeście. Kotwice są stałe i pilnuje ich selftest.
 
-**Skąd te alerty biorą dane.** Dwa niezależne źródła i to jest celowe:
+**Skąd te alerty biorą dane — i który z nich został ZMIERZONY, a nie zadeklarowany.**
 
-| źródło | co widzi | co się z nim dzieje, gdy pipeline padnie |
+Do 2026-08-12 stała tu tabela mówiąca, że alerty na naruszenia biorą dane z audit-logów Google i dlatego
+„działają dalej, bo logi powstają po stronie Google". **To było nieprawdą i kosztowało nas dwa ślepe
+alerty przez cały czas istnienia tego pliku** (#2000). Poniższa tabela mówi, czym każdy sygnał jedzie
+DZIŚ i czy widziano go, jak strzela.
+
+| alert | producent metryki | zmierzone? |
 |---|---|---|
-| audit-logi Google (`monitoring.tf`) | ruch przez granicę, zmiany konfiguracji | **działa dalej** — logi powstają po stronie Google |
-| `watch.yml` → metryki (`alerts.tf`) | czy nasza maszyneria żyje | **milknie**, dlatego alert `apply` ma warunek na BRAK danych |
-| `watch.yml` → heartbeat poza GCP ([niżej](#dms-zewnetrzny)) | czy cokolwiek z powyższego jeszcze istnieje | **milknie — i o to chodzi**: obserwator siedzi poza tą organizacją i alarmuje sam |
+| [odmowa w trybie egzekwowanym](#odmowa-w-trybie-egzekwowanym) | `watch.yml` ← **widok sinka** | tak — na realnej odmowie |
+| [zmiana poza pipeline'em](#dryf-granicy) | `watch.yml` ← **widok sinka** (ACM) | tak — na realnej zmianie ACM |
+| [apply nie doszedł](#apply-nie-doszedl) | `watch.yml` ← API GitHuba | tak |
+| [budżet atrybutów](#budzet-atrybutow) | `watch.yml` ← żywa granica (ACM) | tak |
+| [dryf granicy](#dryf-granicy) | `watch.yml` ← `terraform plan` | tak |
+| [członek po terminie](#czlonek-po-terminie) | `watch.yml` ← `projects.yaml` | tak |
+| [heartbeat poza GCP](#dms-zewnetrzny) | `watch.yml` → dostawca spoza GCP | tak |
 
-Trzeci wiersz jest odpowiedzią na pytanie „a kto pilnuje pilnującego". Dwa pierwsze źródła i wszystkie
-cztery polityki alertów leżą w **jednym projekcie GCP**. Skasowanie go albo wyłączenie mu billingu nie
-odpala niczego, bo nie ma czego ewaluować — również warunku o braku danych, który też potrzebuje żywego
-silnika. Dlatego ostatnia warstwa nie jest w GCP w ogóle.
+**Wszystkie siedem jedzie jednym producentem — i to jest świadome, nie przypadkowe.** Poprzedni układ
+miał dwa tory i to on był defektem: tor „audit-log → metryka log-based" **nie może działać z zasady**.
+Metryka log-based liczy wyłącznie wpisy PRZYJĘTE przez Log Router swojego projektu, a naruszenia VPC-SC
+powstają w logu projektu-CZŁONKA, zmiany ACM zaś w logu ORGANIZACJI; do projektu administracyjnego oba
+docierają **sinkiem**, czyli do magazynu, a nie na wejście. Zmierzone parą kontrolną: pięć wpisów
+zapisanych wprost do projektu → metryka policzyła pięć; realna odmowa egzekwowana dostarczona sinkiem do
+kubełka w **tym samym** projekcie → metryka policzyła zero.
+
+Cena jednego producenta jest realna i nazywamy ją wprost: **wykrycie odmowy trwa do jednego cyklu
+`watch.yml`** (godzina) zamiast ~minuty. Alternatywą nie był szybszy alert, tylko brak alertu.
+
+Konsekwencja dla ciszy: skoro producent jest jeden, jego awaria gasi wszystko naraz. Dlatego
+**każdy z dwóch alertów granicy ma WŁASNY `condition_absent`** (nie polega na watchdogu `apply`), a nad
+całością stoi heartbeat poza GCP. Warunek „brak danych" też potrzebuje żywego silnika Monitoringu, więc
+ostatnia warstwa nie jest w GCP w ogóle.
 
 **Kanały.** Dwa, celowo rozdzielone (`perimeter/alerting.yaml`):
 
@@ -339,7 +359,26 @@ AND NOT protoPayload.metadata.dryRun="true"
 ```
 
 Druga: wpis leży w logu **projektu członkowskiego**, nie organizacji — `--organization` na tym samym
-filtrze zwraca 0.
+filtrze zwraca 0. **Po promocji ten log sam leży za granicą**, więc odczyt z laptopa bywa odrzucany przez
+VPC-SC. Czytaj z **widoku sinka** w projekcie administracyjnym (poza perimetrem) — to jest to samo źródło,
+z którego liczy się metryka:
+
+```
+gcloud logging read 'protoPayload.metadata."@type"="type.googleapis.com/google.cloud.audit.VpcServiceControlAuditMetadata"' \
+  --project=<PROJEKT_ADM> --bucket=<KUBELEK> --location=<LOKALIZACJA> --view=<WIDOK> \
+  --freshness=1h --format='table(timestamp, protoPayload.authenticationInfo.principalEmail,
+                                 protoPayload.methodName, resource.labels.project_id)'
+```
+
+**Czego ten alert NIE powie, a poprzedni obiecywał:** kogo dotyczy. Metryka jest celowo bez etykiety
+`principal`, bo seria z etykietą znika, gdy dana tożsamość przestaje generować ruch — a wtedy zdrowa cisza
+byłaby nieodróżnialna od awarii obserwatora i `condition_absent` strzelałby bez przerwy. „Kto" odzyskuje
+się powyższym odczytem; wiarygodności ciszy nie odzyskuje się niczym.
+
+**Drugi warunek tej samej polityki — „obserwator przestał publikować liczbę odmów".** To nie jest odmowa,
+tylko UTRATA WZROKU: producent nie zdołał odczytać widoku (najczęściej odebrany `logging.viewAccessor`
+konta planu albo skasowany widok). Dopóki ten warunek jest otwarty, „brak odmów" nie jest zdaniem
+o świecie. Sprawdź ostatni przebieg `watch.yml` i grant na widoku.
 
 ---
 
