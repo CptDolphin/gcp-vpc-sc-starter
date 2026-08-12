@@ -2165,6 +2165,85 @@ def test_external_egress_and_guard() -> None:
           "perimeters dry-run enforce" in runbook and "trzydzieści dywizji" in runbook)
 
 
+# ------------------------------------------------- spojnosc komentarza wersji z pinem
+# Pin przypiety SHA-em, ale opisany komentarzem `# vX.Y.Z`, ma DWIE tresci — i tylko jedna z nich jest
+# czytana przez czlowieka. Nikt nie rozwija 40-znakowego SHA-a w glowie, wiec o wersji orzeka sie
+# z komentarza: on jest interfejsem tego pinu, takze dla przegladu bezpieczenstwa i dla pytania „czy
+# jestesmy na wersji z tym CVE". Komentarz, ktory klamie, jest gorszy niz jego brak: goly SHA zmusza do
+# sprawdzenia, a falszywy komentarz zwalnia ze sprawdzenia i myli sie za czytelnika.
+#
+# ZMIERZONE 2026-08-12, dwa niezalezne przypadki w tym repo:
+#   * `# v3.2.0` opisywalo dwa rozne SHA-e `actions/create-github-app-token` — `bcd2ba49` (naprawde
+#     v3.2.0) i `d72941d7`, ktory jest tagowany **v1.12.0**, czyli dwie wersje glowne wstecz;
+#   * `# v2.1.9` opisywalo dwa rozne SHA-e `google-github-actions/auth` — `c200f369` (naprawde v2.1.13)
+#     i `7c6bc770` (naprawde **v3.0.0**), czyli pomylke o cala wersje glowna. Realny v2.1.9
+#     (`7b53cdc2`) nie wystepowal w repo ani razu.
+#
+# CZEGO TA BRAMKA NIE ROBI I DLACZEGO. Nie pyta GitHuba, jaki tag ma wskazany SHA. Tamto sprawdzenie
+# rozstrzyga w 100%, ale wymaga sieci, a ta pakieta jest swiadomie hermetyczna — `curl` bywa w niej
+# ZASLEPKA (patrz `test_deny_check`), bo mierzymy logike, nie cudze API. Siec dalaby albo bramke flaky
+# w 560 asercjach, albo SKIP przy jej braku, czyli bramke tylko z nazwy. Porownujemy wiec repo SAMO ZE
+# SOBA: jeden numer wersji = jeden SHA, jeden SHA = jeden numer wersji. To lapie klase „ten sam numer
+# opisuje dwa rozne kody", na ktorej polegly OBA przypadki wyzej — drugi z nich wyszedl dopiero z tej
+# asercji, nie z przegladu.
+#
+# POWIERZCHNIA TO CALE REPO, NIE SAME WORKFLOWY — i to jest istota sprawy. Wadliwe piny stały
+# w `examples/division-repo/` i w BLOKU KODU w `.github/actions/contrib/README.md`. Dokladnie te miejsca
+# sa poza zasiegiem Dependabota (widzi `.github/workflows/*.yml` i pliki `action.yml`), a ten przepisuje
+# SHA *razem z komentarzem*. Tam, gdzie go nie ma, komentarz podbija czlowiek albo nikt — wiec bramka
+# zawezona do workflowow ominelaby wszystkie trzy wystapienia, ktore realnie sklamaly.
+PIN_Z_KOMENTARZEM = re.compile(
+    r"uses:\s*(?P<akcja>[A-Za-z0-9][\w.-]*/[\w./-]+)@(?P<sha>[0-9a-f]{40})"
+    # Numer wersji, nie dowolny komentarz: `# v3.2.0`, `# 3.2.0`, takze z dopiskiem po spacji.
+    # `# przypiete recznie` NIE jest deklaracja wersji i nie ma czym sklamac — taki pin liczy sie
+    # jak goly SHA. Zawezenie jest tu celowe: gdyby kazde slowo po `#` bylo „wersja", dwa rozne piny
+    # opisane tym samym slowem („# stary") zglaszalyby sie jako rozjazd i bramka umarlaby na szumie.
+    r"(?:[^\S\r\n]*#[^\S\r\n]*(?P<tag>v?\d[\w.+-]*))?")
+
+
+def rozjazdy_pinow(zrodla: dict) -> list:
+    """Piny, w ktorych komentarz wersji nie moze byc prawdziwy — bo przeczy innemu pinowi tej akcji.
+
+    Klucz to (AKCJA, wersja), nie sama wersja: `# v2.1.9` przy dwoch roznych akcjach to normalka,
+    a nie rozjazd. Goly SHA bez komentarza jest pomijany — nie sklada zadnej deklaracji o wersji.
+    """
+    po_tagu, po_sha, gdzie = {}, {}, {}
+    for nazwa, tresc in sorted(zrodla.items()):
+        for m in PIN_Z_KOMENTARZEM.finditer(tresc):
+            akcja, sha, tag = m.group("akcja"), m.group("sha"), m.group("tag")
+            if not tag:
+                continue
+            po_tagu.setdefault((akcja, tag), set()).add(sha)
+            po_sha.setdefault((akcja, sha), set()).add(tag)
+            gdzie.setdefault((akcja, sha), set()).add(nazwa)
+
+    rozjazdy = []
+    for (akcja, tag), shy in sorted(po_tagu.items()):
+        if len(shy) > 1:
+            opis = "; ".join(f"{s[:8]} w {sorted(gdzie[(akcja, s)])}" for s in sorted(shy))
+            rozjazdy.append(f"{akcja} # {tag} opisuje {len(shy)} roznych SHA-ow: {opis}")
+    for (akcja, sha), tagi in sorted(po_sha.items()):
+        if len(tagi) > 1:
+            rozjazdy.append(f"{akcja}@{sha[:8]} nosi {len(tagi)} numerow wersji: "
+                            f"{sorted(tagi)} w {sorted(gdzie[(akcja, sha)])}")
+    return rozjazdy
+
+
+def zrodla_z_pinami() -> dict:
+    """Kazdy plik tekstowy startera, w ktorym stoi przypieta akcja — z markdownem i `examples/`."""
+    out = {}
+    for p in sorted(STARTER.rglob("*")):
+        if ".git" in p.parts or not p.is_file():
+            continue
+        try:
+            tresc = p.read_text()
+        except (UnicodeDecodeError, OSError):
+            continue
+        if PIN_Z_KOMENTARZEM.search(tresc):
+            out[str(p.relative_to(STARTER))] = tresc
+    return out
+
+
 def test_lint_and_pinning() -> None:
     """tflint (jeśli jest) + guardy na to, czego brak nie widać w zielonym przebiegu.
 
@@ -2216,6 +2295,59 @@ def test_lint_and_pinning() -> None:
     check("guard na pinowanie jest w CI", "actions pinned to a SHA" in tekst_wykonywany("validate.yml"))
     check("jest dependabot (pin bez aktualizacji to martwy pin)",
           (ROOT / ".github/dependabot.yml").exists())
+
+    # --- komentarz wersji nie moze klamac o SHA-u (naglowek `PIN_Z_KOMENTARZEM` ma pomiar i powody) ---
+    zrodla = zrodla_z_pinami()
+    check("zaden numer wersji nie opisuje dwoch SHA-ow (i zaden SHA — dwoch numerow wersji)",
+          not rozjazdy_pinow(zrodla), " | ".join(rozjazdy_pinow(zrodla)))
+
+    # Bramka, ktora oglada za waski zbior plikow, jest zielona z tego samego powodu, co bramka zepsuta.
+    # Te trzy asercje pilnuja POWIERZCHNI, bo wlasnie jej zawezenie przepuscilo oba zmierzone rozjazdy:
+    # wersja pilnujaca `.github/workflows/*.yml` nie zobaczylaby ANI JEDNEGO z trzech klamiacych pinow.
+    md = [n for n in zrodla if n.endswith(".md")]
+    przyklady = [n for n in zrodla if n.startswith("examples/")]
+    check("skan pinow oglada tez markdown (blok kodu w README tez jest kopiowany do cudzego repo)",
+          bool(md), f"plikow .md z pinem: {md}")
+    check("skan pinow oglada tez `examples/` (poza zasiegiem Dependabota)",
+          bool(przyklady), f"plikow w examples/ z pinem: {przyklady}")
+    check("skan pinow nie jest pusta petla",
+          len(zrodla) >= 15 and len({m.group("akcja") for t in zrodla.values()
+                                     for m in PIN_Z_KOMENTARZEM.finditer(t)}) >= 6,
+          f"plikow z pinem: {len(zrodla)}")
+
+    # ---------------------------------------------------------------- ANTY-TAUTOLOGIA
+    # SHA-e sa tu syntetyczne i sklejane w locie, a nie wpisane literalnie — inaczej `zrodla_z_pinami()`
+    # znalazloby WLASNE probki tego testu jako realne piny startera i zglosilo je jako rozjazd.
+    A, B = "a" * 40, "b" * 40
+    ROZBROJONE = [
+        # (opis, {plik: tresc}, czy rozjazd?)
+        ("dwa SHA-e pod jednym numerem wersji (ksztalt obu zmierzonych przypadkow)",
+         {"w.yml": f"      - uses: actions/create-github-app-token@{A} # v3.2.0\n",
+          "README.md": f"      - uses: actions/create-github-app-token@{B} # v3.2.0\n"}, True),
+        ("jeden SHA pod dwoma numerami wersji",
+         {"w.yml": f"      - uses: actions/checkout@{A} # v4.4.0\n"
+                   f"      - uses: actions/checkout@{A} # v7.0.1\n"}, True),
+        # Ponizej: ksztalty, ktore WYGLADAJA na rozjazd, a nim nie sa. Bramka karzaca za nie
+        # zmuszalaby do usuwania komentarzy albo do ujednolicania wersji na sile.
+        ("dwie ROZNE wersje tej samej akcji, kazda ze swoim SHA-em (tak jest dzis w `checkout`)",
+         {"a.yml": f"      - uses: actions/checkout@{A} # v4.4.0\n",
+          "b.yml": f"      - uses: actions/checkout@{B} # v7.0.1\n"}, False),
+        ("ten sam pin powtorzony w wielu plikach",
+         {"a.yml": f"      - uses: actions/checkout@{A} # v4.4.0\n",
+          "b.yml": f"      - uses: actions/checkout@{A} # v4.4.0\n"}, False),
+        ("ten sam numer wersji przy ROZNYCH akcjach (klucz to akcja+wersja, nie sama wersja)",
+         {"a.yml": f"      - uses: google-github-actions/auth@{A} # v2.1.9\n"
+                   f"      - uses: google-github-actions/setup-gcloud@{B} # v2.1.9\n"}, False),
+        ("goly SHA obok pinu z komentarzem — nie sklada deklaracji o wersji, wiec nie moze sklamac",
+         {"a.yml": f"      - uses: actions/checkout@{A}\n"
+                   f"      - uses: actions/checkout@{B} # v7.0.1\n"}, False),
+        ("komentarz nie-wersyjny nie jest deklaracja wersji",
+         {"a.yml": f"      - uses: actions/checkout@{A} # przypiete recznie\n"
+                   f"      - uses: actions/checkout@{B} # przypiete recznie\n"}, False),
+    ]
+    for opis, probka, oczekiwany in ROZBROJONE:
+        check(f"anty-tautologia — rozjazd pinow: {opis}",
+              bool(rozjazdy_pinow(probka)) == oczekiwany, str(rozjazdy_pinow(probka)))
 
     # `have()` nie wystarcza: `tflint` bywa shimem menedżera wersji, który istnieje na PATH i pada przy
     # uruchomieniu (brak przypiętej wersji). Wtedy FAIL mówiłby o konfiguracji tflinta, nie o kodzie startera.
