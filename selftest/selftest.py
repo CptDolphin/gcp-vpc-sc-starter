@@ -128,6 +128,11 @@ def bootstrap() -> None:
         # Kompletnosc rejestru decyzji — druga bramka rozjazdu ze starterem, obok wskaznika (DEC-20).
         "tools/decisions_check.py",
         "tools/perimeter_to_policy.py", "tools/brownfield_import.sh",
+        # Sonda EGRESS uruchamiana WEWNATRZ perimetru — jedyny tor mierzacy kierunek wyjscia.
+        # `boundary-probe.yml` wola z runnera CI i mierzy WYLACZNIE ingress; "wewnatrz" jest wlasnoscia
+        # SIECI, nie tozsamosci, wiec egressu nie da sie zmierzyc bez maszyny w projekcie czlonkowskim
+        # (DEC-25). Oba pliki jada razem: skrypt startowy sciaga sonde z metadanych instancji.
+        "tools/sonda_egress_wewnetrzna.py", "tools/sonda_egress_startup.sh",
         "tools/perimeter_watch.py", "terraform/alerts.tf",
         "perimeter/alerting.yaml", "schemas/alerting.schema.json",
         ".github/workflows/watch.yml",

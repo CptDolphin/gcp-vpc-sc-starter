@@ -11,6 +11,38 @@
 # ingress nie wymienia. Runner GitHuba jest spoza granicy z definicji, więc jest do tego właściwym miejscem.
 #
 # ============================================================================================
+# CZEGO TEN WORKFLOW NIE MIERZY I NIE MOŻE ZMIERZYĆ: KIERUNKU EGRESS
+# ============================================================================================
+# Zdanie powyżej jest prawdziwe WYŁĄCZNIE dla ingressu i nie wolno go czytać jako zasady ogólnej — bo
+# przeczytane tak gwarantuje, że kierunek, dla którego kupuje się VPC-SC (powstrzymanie WYPŁYWU), nie
+# zostanie zmierzony nigdy.
+#
+# Reguła egress ocenia wywołanie, którego ŹRÓDŁO jest WEWNĄTRZ granicy, a „wewnątrz" jest własnością SIECI,
+# nie tożsamości. ZMIERZONE (2026-08-12, żywy ACM): konto serwisowe utworzone W projekcie członkowskim,
+# impersonowane z zewnątrz i wołające chronioną usługę na TYM SAMYM projekcie, dostaje
+#
+#     violationReason: NO_MATCHING_ACCESS_LEVEL   ingressViolations: [...]   egressViolations: null
+#     callerIp: "private"   callerNetwork: BRAK
+#
+# czyli jest liczone jako ruch OBCY. Runner CI nie ma jak stać się źródłem wewnętrznym — żadną tożsamością.
+#
+# Drugi wynik z tego samego pomiaru, ważny przy czytaniu `describe`: PUSTA lista reguł egress
+# (`status.egressPolicies: []`) znaczy „ODMAWIAJ KAŻDEGO WYJŚCIA", a nie „egress nieegzekwowany". Reguła
+# egress jest WYJĄTKIEM od domyślnej odmowy, nie włącznikiem egzekwowania.
+#
+# Pomiar egressu robi się osobnym torem: `tools/sonda_egress_wewnetrzna.py` uruchomiona na maszynie
+# w sieci VPC projektu członkowskiego, z dowodem czytanym z portu szeregowego (`compute` nie należy do
+# `restricted_services`, więc serial czyta się z zewnątrz nawet przy w pełni egzekwowanej granicy).
+# Koszt: rząd eurocentów. Procedura i macierz sond: docs/3-runbook-promocja-i-break-glass.md.
+#
+# UWAGA NA PROJEKT ROZLICZENIOWY (dotyczy TAKŻE sond niżej). Wywołanie wykonane z domyślnym
+# `billing/quota_project` operatora dotyka DWÓCH zasobów: sondowanego projektu i projektu rozliczeniowego.
+# Gdy ten drugi leży poza perimetrem, granica odrzuca wywołanie z `RESOURCES_NOT_IN_SAME_SERVICE_PERIMETER`
+# i księguje je jako naruszenie EGRESS — czyli sonda dostaje „odmowę VPC-SC", NIE MIERZĄC access levelu.
+# Tożsamość WIF w tym workflow nie ma quota project, więc problem tu nie występuje; przy ręcznym
+# powtarzaniu sond ustaw `CLOUDSDK_BILLING_QUOTA_PROJECT` na sondowany projekt.
+#
+# ============================================================================================
 # PUŁAPKA, PRZEZ KTÓRĄ TEN TEST POTRAFI UDOWODNIĆ NIEPRAWDĘ — i dlatego werdykt NIE idzie z kodu błędu
 # ============================================================================================
 # Chroniona usługa z WYŁĄCZONYM API zwraca `PERMISSION_DENIED`. Brak roli IAM zwraca `PERMISSION_DENIED`.
