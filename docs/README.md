@@ -4,7 +4,7 @@ Osiem dokumentów, osiem różnych momentów:
 
 | Dokument | Kiedy go czytasz |
 |---|---|
-| [0 — Decyzje (DEC-1…DEC-22)](0-decyzje.md) | pytasz „dlaczego akurat tak"; przed każdą zmianą kształtu repo |
+| [0 — Decyzje](0-decyzje.md) | pytasz „dlaczego akurat tak"; przed każdą zmianą kształtu repo |
 | [1 — Wdrożenie](1-wdrozenie.md) | stawiasz repo od zera; kolejność etapów i placeholdery |
 | [2 — Uprawnienia i WIF](2-uprawnienia-i-wif.md) | zamawiasz dostępy u architekta; rola po roli z uzasadnieniem i gotową listą do ticketu |
 | [3 — Runbook: promocja i break-glass](3-runbook-promocja-i-break-glass.md) | promujesz członka do enforced albo perimetr właśnie zablokował produkcję |
@@ -13,9 +13,10 @@ Osiem dokumentów, osiem różnych momentów:
 | [6 — Układ repozytoriów](6-uklad-repozytoriow.md) | architekt pyta o skalę: plik na projekt czy jeden `projects.yml` przy 100–200 projektach |
 | [7 — Alerty granicy](7-alerty.md) | któryś alert właśnie odpalił — procedura per objaw; albo dokładasz alert i szukasz, gdzie dopisać kotwicę |
 
-Decyzje, na których stoi całość — z odrzuconymi wariantami — są w [`0-decyzje.md`](0-decyzje.md)
-(`DEC-1`…`DEC-22`). Kod odsyła do nich tym skrótem; numeracja `DEC-` jest rozłączna z `D1`…`D5`,
-którymi oznaczone są diagramy.
+Decyzje, na których stoi całość — z odrzuconymi wariantami — są w [`0-decyzje.md`](0-decyzje.md).
+Kod odsyła do nich skrótem `DEC-<numer>`; numeracja `DEC-` jest rozłączna z `D1`…`D5`, którymi
+oznaczone są diagramy. Zakresu numerów świadomie tu nie wypisujemy — wypisany rozjeżdżał się przy
+każdej nowej decyzji, bo utrzymywała go tylko czyjaś uwaga (DEC-20; dziś pilnuje tego bramka).
 
 ## Diagramy
 
