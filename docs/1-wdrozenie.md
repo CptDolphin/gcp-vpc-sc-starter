@@ -155,6 +155,24 @@ miesięczny batch albo kwartalny audyt złamią się dopiero po promocji.
 Na końcu, gdy przepływ jest przetestowany: `drift.yml`, `expiry-sweep.yml`, `break-glass.yml` i auto-merge
 dla ścieżki niskiego ryzyka (dodanie do dry-run, przypisanie istniejącego profilu, offboarding).
 
+## Etap 8 — obserwator poza tą organizacją
+
+Wszystko, co postawiłeś do tej pory, obserwuje samo siebie **z wnętrza jednego projektu GCP**. Ostatni krok
+wyprowadza jeden sygnał na zewnątrz, żeby skasowanie tego projektu nie było zdarzeniem bez świadków:
+
+```bash
+# Check u dostawcy dead-man's-switch: period 1h, grace 2h (= `watchdog_absent_seconds`), Z KANAŁEM
+# POWIADOMIEŃ. Potem URL pingu jako sekret repozytorium — wartością z pliku, nie z argumentu.
+gh secret set DMS_PING_URL --repo <owner>/<repo> < /sciezka/do/pliku-z-url
+gh workflow run watch.yml --repo <owner>/<repo>
+```
+
+Przebieg ma zameldować w podsumowaniu `ping wyslany`. Procedura, triage i test negatywny:
+[`7-alerty.md#dms-zewnetrzny`](7-alerty.md#dms-zewnetrzny).
+
+**Etap jest opcjonalny w sensie technicznym i obowiązkowy w sensie operacyjnym.** Bez sekretu `watch`
+chodzi dalej i głośno melduje, że warstwa jest nieuzbrojona — nie ma cichego wariantu „prawie zrobione".
+
 ## FAQ: czy perimetr może wisieć na folderze?
 
 Nie. Rodzicem *access policy* jest zawsze organizacja (`parent = organizations/<ORG_ID>`), a członkami
