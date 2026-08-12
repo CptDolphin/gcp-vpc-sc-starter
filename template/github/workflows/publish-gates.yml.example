@@ -37,12 +37,9 @@ jobs:
 
       # Sanity: nie wypuszczamy paczki, która nie przechodzi własnych testów. Bramki wysłane zespołom z
       # zepsutą regułą oznaczają, że każdy z nich zobaczy u siebie fałszywe „zielono" albo fałszywy błąd.
-      - name: install conftest
-        run: |
-          curl -sSfL -o /tmp/conftest.tar.gz \
-            https://github.com/open-policy-agent/conftest/releases/download/v0.56.0/conftest_0.56.0_Linux_x86_64.tar.gz
-          tar -xzf /tmp/conftest.tar.gz -C /tmp conftest
-          sudo mv /tmp/conftest /usr/local/bin/
+      # Patrz naglowek `.github/actions/narzedzia/action.yml` i DEC-26. Bez `pakiety_python`: ten job
+      # nie potrzebuje pipa, a dokladanie mu PyPI byloby powiekszeniem powierzchni awarii, nie porzadkiem.
+      - uses: ./.github/actions/narzedzia
 
       - name: rego unit tests
         run: conftest verify --policy policy
