@@ -404,6 +404,69 @@ deny contains msg if {
 	)
 }
 
+# --- ZAKRES, W KTÓRYM OKNO OBSERWACJI W OGÓLE MOGŁO COŚ ZOBACZYĆ (DEC-27) -----------------------------
+#
+# Reguła wyżej czyta „0 naruszeń" jako dowód, że nic się nie zepsuje. To zdanie jest prawdziwe TYLKO wobec
+# ruchu, który konfiguracja dry-run w ogóle OCENIA jako naruszenie — a jest ruch, którego ocenić nie może,
+# i jego brak w raporcie nie jest informacją o świecie.
+#
+# ZMIERZONE NA ŻYWEJ GRANICY 2026-08-12 (#2005), dwie maszyny, ta sama sonda, ten sam cel:
+#
+#   maszyna w członku WYŁĄCZNIE dry-run  → zasób w innym członku WYŁĄCZNIE dry-run  = PRZESZŁO, 0 wpisów
+#   maszyna w członku EGZEKWOWANYM       → ten sam zasób                            = ODMOWA (egress)
+#
+# Powód nie jest usterką logowania, tylko definicją: konfiguracja dry-run zawiera WSZYSTKICH członków, więc
+# widzi ruch między dwoma członkami w dry-run jako ruch WEWNĄTRZ perimetru — nie ma czego zalogować. Promocja
+# przenosi natomiast JEDNEGO. W chwili, w której członek wchodzi do konfiguracji egzekwowanej, jego rówieśnicy
+# zostają na zewnątrz i ten sam przepływ staje się naruszeniem egress. Okno nie było ślepe przez przypadek —
+# było ślepe z konstrukcji, i to dokładnie na przepływach, które promocja zrywa.
+#
+# DLACZEGO LICZBA, A NIE FLAGA — dokładnie z tego samego powodu, co `accept_violations_up_to` wyżej: zgoda na
+# trzech rówieśników nie jest zgodą na czwartego. Gdy do dry-run wejdzie kolejna dywizja, liczba przestaje się
+# zgadzać i promocja staje ponownie, zamiast jechać na zgodzie wydanej dla innego zbioru.
+#
+# DLACZEGO NIE TWARDA BLOKADA przy niepustym zbiorze: zbiór jest pusty wyłącznie wtedy, gdy promowani są
+# wszyscy naraz. W organizacji z dwudziestoma dywizjami i kilkudziesięcioma projektami miesięcznie oznaczałoby
+# to bramkę, której
+# nie da się przejść nigdy — czyli bramkę, którą się wyłącza. Tu nie chodzi o zakazanie promocji, tylko o to,
+# żeby „czysto" nie dało się napisać bez powiedzenia, WOBEC CZEGO było czysto.
+#
+# DLACZEGO NIE `promotion_waivers`: tamten wyjątek jest rzadki i należy do Security (policy.yaml). Ten warunek
+# dotyczy KAŻDEJ promocji, a przy ~50 wnioskach miesięcznie stały udział Security kończy się recenzją
+# stemplowaną — to samo rozstrzygnięcie i z tego samego powodu, co w §CODEOWNERS.
+niemierzalni_rowiesnicy(name) := [p |
+	some p, mp in input.members
+	p != name
+	mp.stage != "enforced"
+]
+
+deny contains msg if {
+	some name, m in input.members
+	m.stage == "enforced"
+	not granica_juz_wlaczona(name)
+	n := count(niemierzalni_rowiesnicy(name))
+	n > 0
+	object.get(m, "unmeasured_peers_ack", -1) != n
+	msg := sprintf(
+		"projects.yaml[%s]: po tej promocji %d członków zostaje w dry-run (%v) — przepływy między nimi a tym członkiem NIE MOGŁY dać ani jednego wpisu w oknie, a po promocji staną się naruszeniem egress. Potwierdź, że je przeszedłeś: unmeasured_peers_ack: %d (jest: %v)",
+		[name, n, niemierzalni_rowiesnicy(name), n, object.get(m, "unmeasured_peers_ack", "brak")],
+	)
+}
+
+# Potwierdzenie, które przestało cokolwiek potwierdzać. Zostawione po promocji wygląda w pliku jak żywa
+# deklaracja, a opisuje zbiór sprzed zmiany — ten sam tryb awarii, co wyjątek-widmo niżej.
+deny contains msg if {
+	some name, m in input.members
+	m.stage == "enforced"
+	not granica_juz_wlaczona(name)
+	count(niemierzalni_rowiesnicy(name)) == 0
+	object.get(m, "unmeasured_peers_ack", 0) != 0
+	msg := sprintf(
+		"projects.yaml[%s]: unmeasured_peers_ack: %v, a żaden członek nie zostaje w dry-run — potwierdzenie jest nieaktualne, usuń pole",
+		[name, m.unmeasured_peers_ack],
+	)
+}
+
 # Wyjątek dla członka, którego nie ma — zwykle literówka w nazwie pliku. Cichy no-op wyglądałby jak
 # działający wyjątek do czasu, aż ktoś zdziwi się, czemu promocja stoi. Fail-loud, nie fail-silent.
 deny contains msg if {

@@ -538,7 +538,7 @@ Google definiuje tę wartość jako „stan nieznany, pominięty **albo nieadekw
 znaczy „niezweryfikowany" — znaczy „nie wiesz". Zmierzone: jawna maska `?fields=…,verificationStatus`
 też go nie zwraca, a po `:sendVerificationCode` (HTTP 200) pole **nadal nie istnieje**, choć
 `UNVERIFIED` jest wartością niedomyślną i musiałaby się wtedy pojawić. Kontrola pozytywna metody:
-`type`, `displayName` i `enabled` z tego samego odczytu przychodzą poprawnie (DEC-27).
+`type`, `displayName` i `enabled` z tego samego odczytu przychodzą poprawnie (DEC-28).
 
 Zamiast tego:
 

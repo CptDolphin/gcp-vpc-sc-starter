@@ -43,7 +43,7 @@ schema_version: 1
 # pojawic, gdyby kanal weryfikacji wymagal. Kontrola pozytywna metody: `type`, `displayName` i `enabled`
 # z tego samego odczytu przychodza poprawnie.
 #
-# CO SPRAWDZAC ZAMIAST TEGO (DEC-27): `python3 tools/kanaly_check.py --project <projekt>`. Narzedzie
+# CO SPRAWDZAC ZAMIAST TEGO (DEC-28): `python3 tools/kanaly_check.py --project <projekt>`. Narzedzie
 # pyta o to, co da sie rozstrzygnac — czy kazda polityka `CRITICAL` ma kanal, ktorego DORECZENIE
 # potwierdza maszyna — i nie udaje, ze wie cokolwiek o skrzynkach pocztowych. Doreczenie na `email`
 # potwierdza WYLACZNIE czlowiek, po tescie negatywnym z `docs/7-alerty.md`.

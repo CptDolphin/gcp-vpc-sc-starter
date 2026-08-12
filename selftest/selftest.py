@@ -136,7 +136,7 @@ def bootstrap() -> None:
         "tools/sonda_egress_wewnetrzna.py", "tools/sonda_egress_startup.sh",
         "tools/perimeter_watch.py", "terraform/alerts.tf",
         "perimeter/alerting.yaml", "schemas/alerting.schema.json",
-        # Czy alert CRITICAL ma kanal, ktorego DORECZENIE potwierdza maszyna (DEC-27). Poprzednia
+        # Czy alert CRITICAL ma kanal, ktorego DORECZENIE potwierdza maszyna (DEC-28). Poprzednia
         # kontrola pytala o `verificationStatus` — pole, ktorego API nie zwraca.
         "tools/kanaly_check.py",
         ".github/workflows/watch.yml",
@@ -148,7 +148,7 @@ def bootstrap() -> None:
         # Bramka pre-flightu: prerekwizyty CUDZEGO projektu, na obu torach, tozsamoscia `plan` (DEC-24).
         ".github/actions/bramka-preflightu/action.yml", "tools/preflight_gate.py",
         # Narzedzia bramek w JEDNYM miejscu (pin + suma + ponawianie + werdykt „bramki NIE wykonaly sie").
-        # Wczesniej ten sam `curl` stal w szesciu plikach, w zadnym z weryfikacja pobrania (DEC-27).
+        # Wczesniej ten sam `curl` stal w szesciu plikach, w zadnym z weryfikacja pobrania (DEC-28).
         ".github/actions/narzedzia/action.yml", "tools/continue_on_error_check.py",
         ".tflint.hcl", ".github/dependabot.yml", "tests/README.md",
         "tests/snow-approved.json", "tests/snow-not-approved.json", "tests/snow-self-approved.json",
@@ -1792,7 +1792,7 @@ def test_kanaly_check() -> None:
     dla ktorego to narzedzie powstalo. Dlatego mierzymy WSZYSTKIE piec odpowiedzi API, i osobno to,
     ze dwa rozne `404` nie sklejaja sie w jeden werdykt.
 
-    Odpowiedzi sa ZMIERZONE na zywym API (DEC-27), nie wymyslone; siec jest tu zaslepiona, bo mierzymy
+    Odpowiedzi sa ZMIERZONE na zywym API (DEC-28), nie wymyslone; siec jest tu zaslepiona, bo mierzymy
     logike werdyktu, a nie API Google.
     """
     print("\n== kanaly_check ==")
@@ -4540,7 +4540,7 @@ def akcja_lokalna(uses: str, glebokosc: int = 8):
     tropi gdzie indziej: asercja o KSZTALCIE pliku zamiast o wlasnosci, ktora ma byc prawdziwa.
 
     ROZWIJAMY REKURENCYJNIE, i to nie jest ozdoba. Odkad dostarczanie narzedzi ma wlasna akcje zlozona
-    (`.github/actions/narzedzia`, DEC-27), bramki tresci wolaja akcje z wnetrza akcji. Rozwijanie jednego
+    (`.github/actions/narzedzia`, DEC-28), bramki tresci wolaja akcje z wnetrza akcji. Rozwijanie jednego
     poziomu odtworzyloby tu DOKLADNIE ten sam blad, dla ktorego ta funkcja powstala: krok przeniesiony
     o poziom glebiej przestaje byc widziany przez asercje, a te robia sie zielone z powodu, o ktorym nikt
     sie nie dowie. Limit glebokosci chroni przed cyklem (`A` wola `B`, `B` wola `A`) — bez niego pomylka
@@ -5447,7 +5447,7 @@ def test_boundary_probe() -> None:
           rc == 0 and "kanarek-poziom" not in out, out[-700:])
 
 
-# ------------------------------------------------------- werdykt bramek i dostarczanie narzedzi (DEC-27)
+# ------------------------------------------------------- werdykt bramek i dostarczanie narzedzi (DEC-28)
 def test_werdykt_i_narzedzia() -> None:
     """Czy da sie ODROZNIC „bramki nie wykonaly sie" od „wniosek odrzucony" — i czy narzedzia sa sprawdzane.
 
@@ -5455,7 +5455,7 @@ def test_werdykt_i_narzedzia() -> None:
     ponizej dostaly `outcome=skipped`, a check w interfejsie wygladal identycznie jak odrzucenie wniosku
     przez regule. Ten test pyta wiec o WLASNOSC („czy oba stany daja rozny sygnal"), a nie o ksztalt pliku.
     """
-    print("\n== werdykt bramek i dostarczanie narzedzi (DEC-27) ==")
+    print("\n== werdykt bramek i dostarczanie narzedzi (DEC-28) ==")
     akcja = ROOT / ".github/actions/narzedzia/action.yml"
     check("akcja `narzedzia` istnieje", akcja.exists())
     if not akcja.exists():
@@ -5551,6 +5551,21 @@ def test_werdykt_i_narzedzia() -> None:
         check("awaria narzedzi i odrzucenie tresci daja ROZNE tytuly adnotacji",
               tytul(out_awaria) and tytul(out_odrzut) and tytul(out_awaria) != tytul(out_odrzut),
               f"{tytul(out_awaria)} vs {tytul(out_odrzut)}")
+
+    # TYTUL ADNOTACJI MUSI PRZEZYC PARSER GITHUBA — zmierzone na zywym przebiegu, nie wywnioskowane.
+    # Tytul „BRAMKI NIE WYKONALY SIE (awaria narzedzi, NIE odrzucenie wniosku)" dojechal do API jako
+    # „BRAMKI NIE WYKONALY SIE (awaria narzedzi": PRZECINEK rozdziela WLASCIWOSCI polecenia
+    # (`title=…,file=…,line=…`), wiec reszta tytulu zostala zjedzona jako nieznana wlasciwosc — i ucieta
+    # dokladnie przed slowami, dla ktorych ten tytul istnieje. Asercja idzie po CALEJ powierzchni
+    # wykonywalnej, nie po jednym pliku: to jest wlasnosc skladni, wiec dotyczy kazdej adnotacji.
+    zle = []
+    for plik in sorted([*(ROOT / ".github/workflows").glob("*.yml"),
+                        *(ROOT / ".github/actions").glob("*/action.yml")]):
+        for tyt in re.findall(r"::error title=([^:]*)::", plik.read_text()):
+            if "," in tyt or "%" in tyt:
+                zle.append(f"{plik.relative_to(ROOT)}: {tyt!r}")
+    check("zaden tytul adnotacji nie ma przecinka ani `%` (parser GitHuba ucialby tytul)",
+          not zle, "; ".join(zle))
 
     # --- 4. GUARD `continue-on-error`. Uruchamiany, nie ogladany: para pozytyw/negatyw na kopii repo.
     p = sh(["python3", "tools/continue_on_error_check.py"], cwd=ROOT)
