@@ -54,6 +54,12 @@ on:
         default: "open"
         type: choice
         options: ["open", "blocked"]
+      kanarek:
+        description: "kanarek access levelu: brak = nie sonduj | uzbrojony = para ma dać PRZESZLO+ODMOWA | rozbrojony = oba mają dać ODMOWA (kontrola anty-tautologiczna)"
+        required: false
+        default: "brak"
+        type: choice
+        options: ["brak", "uzbrojony", "rozbrojony"]
 
 permissions:
   contents: read
@@ -107,6 +113,7 @@ jobs:
         env:
           PROJEKT: ${{ github.event.inputs.project }}
           OCZEKIWANIE: ${{ github.event.inputs.expect }}
+          KANAREK: ${{ github.event.inputs.kanarek }}
         run: |
           mkdir -p sondy
           # Każda sonda zapisuje stdout+stderr do pliku i kod wyjścia obok. Sklejamy strumienie celowo:
@@ -129,12 +136,31 @@ jobs:
           sonda spoza-granicy \
             gcloud asset search-all-resources --scope="projects/$PROJEKT" --limit=1 --format=json
 
+          # KANAREK ACCESS LEVELU — jedyna para sond, która mierzy ŚCIEŻKĘ POZYTYWNĄ.
+          #
+          # Cztery sondy wyżej dowodzą, że granica ODMAWIA. Żadna nie dowodzi, że access level KOGOKOLWIEK
+          # WPUSZCZA — a to jest połowa tej kontroli i połowa, której awaria (zakres przestał pasować) odcina
+          # ludzi zamiast wpuścić obcych. Zmierzyć ją można tylko przychodząc z miejsca, które poziom spełnia.
+          #
+          # Te dwie sondy różnią się DOKŁADNIE JEDNĄ rzeczą: access levelem, którego wymaga reguła baseline
+          # przepuszczająca daną metodę. Ta sama tożsamość, ten sam projekt, ta sama usługa, ten sam runner,
+          # ta sama chwila. Dlatego każda WSPÓLNA przyczyna — brak roli IAM, wyłączone API, zepsuty projekt,
+          # nieobecna reguła — dałaby ten sam wynik w obu i nie potrafi wyprodukować rozjazdu. Rozjazd może
+          # pochodzić już tylko z access levelu. Wymaga włączonej pary reguł `canary-*` w policy.yaml.
+          if [ "${KANAREK:-brak}" != "brak" ]; then
+            sonda kanarek-poziom-spelniony \
+              gcloud logging metrics list --project="$PROJEKT" --format=json
+            sonda kanarek-poziom-niespelniony \
+              gcloud logging sinks list --project="$PROJEKT" --format=json
+          fi
+
       # Werdykt liczony w Pythonie, nie w `grep`: różnica między „odmowa VPC-SC", „brak roli" i „wyłączone
       # API" musi być wypowiedziana jako trzy różne stany, a nie zwinięta do „padło".
       - name: werdykt
         env:
           OCZEKIWANIE: ${{ github.event.inputs.expect }}
           PROJEKT: ${{ github.event.inputs.project }}
+          KANAREK: ${{ github.event.inputs.kanarek }}
         run: |
           python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
           import os, pathlib, sys
@@ -161,6 +187,29 @@ jobs:
           oczekiwanie = os.environ["OCZEKIWANIE"]
           if oczekiwanie not in ("open", "blocked"):
               sys.exit(f"nieznane oczekiwanie: {oczekiwanie}")
+
+          # KANAREK — para sond mierzaca SCIEZKE POZYTYWNA access levelu.
+          #
+          # `uzbrojony`  : poziom `canary-match` wymienia tozsamosc sondy -> jej wywolanie ma PRZEJSC,
+          #                a wywolanie na regule z poziomem `canary-mismatch` ma dostac ODMOWE VPC-SC.
+          # `rozbrojony` : ta sama para PRZED uzbrojeniem (albo po wyjeciu tozsamosci z poziomu) — OBA
+          #                wywolania maja dostac ODMOWE. To jest KONTROLA ANTY-TAUTOLOGICZNA i dlatego
+          #                jest osobnym, ZIELONYM przelotem, a nie czerwonym: „para dziala" znaczy cos
+          #                dopiero wtedy, gdy widzielismy ja rowniez NIE dzialajaca, w tej samej sondzie.
+          #
+          # Sonda `niespelniony` ma paść ZAWSZE (przy kazdym stanie kanarka) — to ona pilnuje, ze regula
+          # istnieje, ale jej access level NIE jest spelniony. Gdyby zaczela przechodzic, roznica miedzy
+          # poziomami przestalaby cokolwiek znaczyc.
+          kanarek = os.environ.get("KANAREK") or "brak"
+          if kanarek not in ("brak", "uzbrojony", "rozbrojony"):
+              sys.exit(f"nieznany stan kanarka: {kanarek}")
+          if kanarek != "brak":
+              PLAN["kanarek-poziom-spelniony"] = (
+                  True, kanarek == "uzbrojony",
+                  "KANAREK/POZYTYW: regula z access levelem, ktory ta tozsamosc SPELNIA")
+              PLAN["kanarek-poziom-niespelniony"] = (
+                  True, False,
+                  "KANAREK/NEGATYW: ta sama tozsamosc, regula z access levelem, ktorego NIE spelnia")
 
           def klasyfikuj(tresc: str, rc: int) -> str:
               if rc == 0:
@@ -196,6 +245,15 @@ jobs:
           if oczekiwanie == "open":
               print("> Przelot `open` jest WARUNKIEM KONIECZNYM przelotu `blocked`. Bez niego odmowa po "
                     "promocji moze pochodzic z braku roli albo z wylaczonego API, a nie z granicy.")
+          if kanarek == "uzbrojony":
+              print("> KANAREK UZBROJONY: para `kanarek-*` rozni sie WYLACZNIE access levelem wymaganym przez "
+                    "regule. `PRZESZLO` + `ODMOWA VPC-SC` w jednym przelocie = zmierzona sciezka POZYTYWNA "
+                    "i NEGATYWNA access levelu. Kontrola anty-tautologiczna: ten sam przelot z "
+                    "`kanarek=rozbrojony` na konfiguracji bez uzbrojonego poziomu.")
+          if kanarek == "rozbrojony":
+              print("> KANAREK ROZBROJONY: obie sondy `kanarek-*` maja dostac ODMOWE. Ten przelot jest "
+                    "KONTROLA ANTY-TAUTOLOGICZNA dla przelotu `uzbrojony` — bez niego „poziom wpuszcza\" "
+                    "moglo by znaczyc „ta metoda i tak zawsze przechodzi\".")
           if bledy:
               print("\n**NIEZGODNOSCI:**")
               for b in bledy:
@@ -234,13 +292,40 @@ jobs:
           PROJEKT: ${{ github.event.inputs.project }}
         run: |
           set -o pipefail
-          gcloud logging read \
-            'protoPayload.metadata."@type"="type.googleapis.com/google.cloud.audit.VpcServiceControlAuditMetadata"
-             AND NOT protoPayload.metadata.dryRun="true"' \
-            --project="$PROJEKT" --freshness=1h --limit=20 --format=json > odmowy.json || {
+          # PONAWIAMY, ZAMIAST ORZEKAC OD RAZU. Wpis audytowy pojawia sie w `logging read` po ~14 s od
+          # wywolania (do sinka 22-24 s), a ten krok biegnie sekundy po sondach. Zmierzone 2026-08-12
+          # (#1999) na pierwszym przelocie `expect=blocked` po trwalej promocji: odmowy nastapily
+          # o 06:30:17-18, krok zapytal natychmiast, dostal zero i uznal ZGODNE dowody za rozjazd —
+          # wywalajac przebieg, w ktorym granica zadzialala wzorowo. Komentarz obok mowil „przy pustym
+          # wyniku powtorz krok", ale byla to instrukcja DLA CZLOWIEKA, a maszyna konczyla `exit 1`.
+          # Bramka padajaca przy POPRAWNYM zachowaniu systemu jest szumem, a szum sie wylacza — wtedy
+          # sonda zostaje z jednym zrodlem dowodu, czyli z tym, przed czym miala chronic.
+          #
+          # Czekamy do 2 min: gorna granica jest swiadomie wyzsza od zmierzonych 14 s, bo indeksowanie
+          # logu nie ma gwarancji czasowej. Rozroznienie „nie udalo sie przeczytac" od „jeszcze nie ma"
+          # zostaje ostre: pierwsze konczy krok NATYCHMIAST, drugie tylko przedluza czekanie.
+          PROBY=8
+          ODSTEP=15
+          CZEKANO=0
+          for PROBA in $(seq 1 "$PROBY"); do
+            if ! gcloud logging read \
+                 'protoPayload.metadata."@type"="type.googleapis.com/google.cloud.audit.VpcServiceControlAuditMetadata"
+                  AND NOT protoPayload.metadata.dryRun="true"' \
+                 --project="$PROJEKT" --freshness=1h --limit=20 --format=json > odmowy.json; then
               echo "::error::nie udalo sie przeczytac audit-logu — brak drugiego dowodu"
               exit 1
-            }
+            fi
+            if [ "$(python3 -c 'import json,pathlib;print(len(json.loads(pathlib.Path("odmowy.json").read_text() or "[]")))')" -gt 0 ]; then
+              break
+            fi
+            if [ "$PROBA" -lt "$PROBY" ]; then
+              sleep "$ODSTEP"
+              CZEKANO=$((CZEKANO + ODSTEP))
+            fi
+          done
+          # Czas oczekiwania to POMIAR, nie szum diagnostyczny: rosnaca wartosc miedzy przelotami mowi
+          # o opoznieniu indeksowania logu, zanim zacznie ono wywracac krok.
+          echo "czekano na wpis: ${CZEKANO}s" | tee -a "$GITHUB_STEP_SUMMARY"
           python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
           import json, pathlib, sys
           w = json.loads(pathlib.Path("odmowy.json").read_text() or "[]")
