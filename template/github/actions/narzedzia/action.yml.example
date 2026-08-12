@@ -81,9 +81,15 @@ runs:
         set -uo pipefail
 
         nie_wykonaly_sie() {
-          # `%0A` — adnotacje GitHuba są jednoliniowe; dosłowny znak nowej linii ucina komunikat.
-          # W tytule NIE MA `::` ani `%` — parser adnotacji rozcina tytuł na pierwszym `::`.
-          echo "::error title=BRAMKI NIE WYKONALY SIE (awaria narzedzi, NIE odrzucenie wniosku)::$1%0AZaden test tresci nie zostal uruchomiony. Werdykt o tym wniosku NIE ZAPADL. Powtorz przebieg."
+          # SKŁADNIA ADNOTACJI JEST WĄSKA, I TO JEST ZMIERZONE, NIE PRZECZUCIE.
+          #   * `%0A` — adnotacje są jednoliniowe; dosłowny znak nowej linii ucina komunikat;
+          #   * w tytule NIE MA `::` — parser rozcina tytuł na pierwszym wystąpieniu;
+          #   * w tytule NIE MA PRZECINKA. Zmierzone na żywym przebiegu: tytuł
+          #     „BRAMKI NIE WYKONALY SIE (awaria narzedzi, NIE odrzucenie wniosku)" dojechał do API
+          #     jako „BRAMKI NIE WYKONALY SIE (awaria narzedzi" — przecinek rozdziela WŁAŚCIWOŚCI
+          #     polecenia (`title=…,file=…,line=…`), więc reszta tytułu została zjedzona jako nieznana
+          #     właściwość. Ucięcie wypadło dokładnie PRZED słowami, dla których ten tytuł istnieje.
+          echo "::error title=BRAMKI NIE WYKONALY SIE - to NIE jest odrzucenie wniosku::$1%0AZaden test tresci nie zostal uruchomiony. Werdykt o tym wniosku NIE ZAPADL. Powtorz przebieg."
           {
             echo "## ⛔ BRAMKI NIE WYKONAŁY SIĘ — to **nie jest** odrzucenie wniosku"
             echo
