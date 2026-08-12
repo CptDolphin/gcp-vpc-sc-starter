@@ -292,13 +292,40 @@ jobs:
           PROJEKT: ${{ github.event.inputs.project }}
         run: |
           set -o pipefail
-          gcloud logging read \
-            'protoPayload.metadata."@type"="type.googleapis.com/google.cloud.audit.VpcServiceControlAuditMetadata"
-             AND NOT protoPayload.metadata.dryRun="true"' \
-            --project="$PROJEKT" --freshness=1h --limit=20 --format=json > odmowy.json || {
+          # PONAWIAMY, ZAMIAST ORZEKAC OD RAZU. Wpis audytowy pojawia sie w `logging read` po ~14 s od
+          # wywolania (do sinka 22-24 s), a ten krok biegnie sekundy po sondach. Zmierzone 2026-08-12
+          # (#1999) na pierwszym przelocie `expect=blocked` po trwalej promocji: odmowy nastapily
+          # o 06:30:17-18, krok zapytal natychmiast, dostal zero i uznal ZGODNE dowody za rozjazd —
+          # wywalajac przebieg, w ktorym granica zadzialala wzorowo. Komentarz obok mowil „przy pustym
+          # wyniku powtorz krok", ale byla to instrukcja DLA CZLOWIEKA, a maszyna konczyla `exit 1`.
+          # Bramka padajaca przy POPRAWNYM zachowaniu systemu jest szumem, a szum sie wylacza — wtedy
+          # sonda zostaje z jednym zrodlem dowodu, czyli z tym, przed czym miala chronic.
+          #
+          # Czekamy do 2 min: gorna granica jest swiadomie wyzsza od zmierzonych 14 s, bo indeksowanie
+          # logu nie ma gwarancji czasowej. Rozroznienie „nie udalo sie przeczytac" od „jeszcze nie ma"
+          # zostaje ostre: pierwsze konczy krok NATYCHMIAST, drugie tylko przedluza czekanie.
+          PROBY=8
+          ODSTEP=15
+          CZEKANO=0
+          for PROBA in $(seq 1 "$PROBY"); do
+            if ! gcloud logging read \
+                 'protoPayload.metadata."@type"="type.googleapis.com/google.cloud.audit.VpcServiceControlAuditMetadata"
+                  AND NOT protoPayload.metadata.dryRun="true"' \
+                 --project="$PROJEKT" --freshness=1h --limit=20 --format=json > odmowy.json; then
               echo "::error::nie udalo sie przeczytac audit-logu — brak drugiego dowodu"
               exit 1
-            }
+            fi
+            if [ "$(python3 -c 'import json,pathlib;print(len(json.loads(pathlib.Path("odmowy.json").read_text() or "[]")))')" -gt 0 ]; then
+              break
+            fi
+            if [ "$PROBA" -lt "$PROBY" ]; then
+              sleep "$ODSTEP"
+              CZEKANO=$((CZEKANO + ODSTEP))
+            fi
+          done
+          # Czas oczekiwania to POMIAR, nie szum diagnostyczny: rosnaca wartosc miedzy przelotami mowi
+          # o opoznieniu indeksowania logu, zanim zacznie ono wywracac krok.
+          echo "czekano na wpis: ${CZEKANO}s" | tee -a "$GITHUB_STEP_SUMMARY"
           python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
           import json, pathlib, sys
           w = json.loads(pathlib.Path("odmowy.json").read_text() or "[]")
