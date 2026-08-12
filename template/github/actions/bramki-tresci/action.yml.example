@@ -253,12 +253,17 @@ runs:
     - name: guard - actions pinned to a SHA
       shell: bash
       run: |
-        # Tylko wykonywalne YAML-e. `-r contrib` łapało przykład workflowa w contrib/README.md, czyli
-        # dokumentację — a guard, który wywraca się o własny przykład, uczy usuwania przykładów.
+        # Tylko wykonywalne YAML-e. `-r contrib` łapało przykład workflowa w dokumentacji, czyli tekst —
+        # a guard, który wywraca się o własny przykład, uczy usuwania przykładów.
         # `.github/actions/*/action.yml` JEST na tej liście, bo akcje złożone też wołają akcje obce —
         # ten plik sam pobiera `setup-python`. Bramka, która nie widzi pliku, w którym stoi, jest bramką
         # tylko z nazwy.
-        bad=$(grep -hnE '^\s*(- )?uses:' .github/workflows/*.yml .github/actions/*/action.yml contrib/action.yml 2>/dev/null \
+        #
+        # `contrib/action.yml` ZDJĘTE z listy: akcja dywizji mieszka teraz w starterze, bo `uses:`
+        # rozwiązuje się bez tokenu (DEC-21). Ścieżka do pliku, którego tu nie ma, to nie ostrożność —
+        # `2>/dev/null` zamieniłoby ją w cichy brak pokrycia, czyli dokładnie w to, przed czym ostrzega
+        # akapit wyżej. Pinowania w tamtym pliku pilnuje selftest startera, po jego stronie.
+        bad=$(grep -hnE '^\s*(- )?uses:' .github/workflows/*.yml .github/actions/*/action.yml 2>/dev/null \
               | grep -vE 'uses:\s*\./' \
               | grep -vE 'uses:\s*[^@]+@[0-9a-f]{40}([[:space:]]|$)' || true)
         if [ -n "$bad" ]; then
