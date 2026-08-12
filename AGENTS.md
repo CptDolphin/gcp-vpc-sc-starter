@@ -135,11 +135,13 @@ python3 selftest/selftest.py          # rozpakowuje starter do katalogu tymczaso
 ```
 
 Wymaga na PATH: `terraform` (1.15.5), `conftest`, `tflint`, `python3` z `pyyaml`; opcjonalnie `actionlint`
-i `check-jsonschema` (ich brak daje SKIP z nazwą, nigdy ciche zielone). Oczekiwany wynik: **531/531**.
+i `check-jsonschema` (ich brak daje SKIP z nazwą, nigdy ciche zielone). Oczekiwany wynik: **542/542** (zmierzone na CI, gdzie na PATH jest KOMPLET narzedzi).
 
-Bez `tflint` na PATH przebieg kończy się na **528/528** i wypisuje SKIP z nazwą — trzy asercje
-(`--init` plus lint obu stacków) po prostu się nie wykonują. Liczba niższa niż 531 nie jest błędem
-startera, tylko informacją, czego w tym środowisku nie sprawdzono.
+Bez `tflint` na PATH przebieg kończy się na **539/539** i wypisuje SKIP z nazwą — trzy asercje
+(`--init` plus lint obu stacków) po prostu się nie wykonują. Liczba niższa niż 542 nie jest błędem
+startera, tylko informacją, czego w tym środowisku nie sprawdzono — bez `actionlint`
+przebieg zejdzie o kolejnych jedenaście asercji. Liczbę do tego akapitu bierz z CI, nie
+z laptopa: lokalny przebieg prawie nigdy nie ma kompletu narzędzi opcjonalnych.
 
 Sam skan samodzielności (bez terraforma i conftesta, sam Python) da się uruchomić na dowolnej ścieżce —
 przydaje się tam, gdzie materiał jest publikowany razem z innymi katalogami:
