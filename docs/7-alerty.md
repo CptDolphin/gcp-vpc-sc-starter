@@ -10,6 +10,12 @@ alert, dopisz sekcję tutaj w tym samym pull requeście. Kotwice są stałe i pi
 |---|---|---|
 | audit-logi Google (`monitoring.tf`) | ruch przez granicę, zmiany konfiguracji | **działa dalej** — logi powstają po stronie Google |
 | `watch.yml` → metryki (`alerts.tf`) | czy nasza maszyneria żyje | **milknie**, dlatego alert `apply` ma warunek na BRAK danych |
+| `watch.yml` → heartbeat poza GCP ([niżej](#dms-zewnetrzny)) | czy cokolwiek z powyższego jeszcze istnieje | **milknie — i o to chodzi**: obserwator siedzi poza tą organizacją i alarmuje sam |
+
+Trzeci wiersz jest odpowiedzią na pytanie „a kto pilnuje pilnującego". Dwa pierwsze źródła i wszystkie
+cztery polityki alertów leżą w **jednym projekcie GCP**. Skasowanie go albo wyłączenie mu billingu nie
+odpala niczego, bo nie ma czego ewaluować — również warunku o braku danych, który też potrzebuje żywego
+silnika. Dlatego ostatnia warstwa nie jest w GCP w ogóle.
 
 **Kanały.** Dwa, celowo rozdzielone (`perimeter/alerting.yaml`):
 
@@ -77,6 +83,10 @@ blokady stanu z trwającym apply jest **normalna i tolerowana** (jeden brakując
 konfiguracji egzekwowanej** i zapis z GitHuba jest odrzucany przez samą granicę. Trzeci przypadek poznasz
 po `VPC_SERVICE_CONTROLS` w logu joba `publish` — i wtedy jest to prawdziwy sygnał, nie fałszywy alarm:
 w tym samym momencie apply też nie działa, bo stan Terraform leży w tym samym projekcie.
+
+**Czwarta przyczyna nie da o sobie znać TĄ drogą:** projektu monitoringu już nie ma (skasowany albo bez
+billingu). Wtedy nie odpala się nic, bo nie ma czego ewaluować — także tego warunku. Od tego jest
+[obserwator poza tą organizacją](#dms-zewnetrzny), i to on odezwie się jako jedyny.
 
 ---
 
@@ -248,6 +258,116 @@ AND NOT protoPayload.metadata.dryRun="true"
 
 Druga: wpis leży w logu **projektu członkowskiego**, nie organizacji — `--organization` na tym samym
 filtrze zwraca 0.
+
+---
+
+<a id="dms-zewnetrzny"></a>
+
+## Obserwator poza tą organizacją — dead-man's-switch
+
+**To nie jest polityka alertu w GCP i celowo nie może nią być.** Cztery alerty powyżej stoją w projekcie
+monitoringu — tym samym, w którym leży stan Terraform, pula WIF i buckety kontraktów. Ta warstwa odpowiada
+na jedyne pytanie, którego tamte cztery nie potrafią zadać: **czy ten projekt w ogóle jeszcze istnieje.**
+
+**Jak działa.** Ostatni krok joba `publish` w `watch.yml` wysyła po udanej publikacji metryk jeden `GET`
+na URL checka u zewnętrznego dostawcy dead-man's-switcha. Dostawca liczy czas od ostatniego pingu i gdy
+przekroczy okno — alarmuje **własnym kanałem**, którego nasza organizacja GCP nie dotyka.
+
+**Co pokrywa, czego nie.** Ping idzie na końcu łańcucha, więc jego brak znaczy, że pękło którekolwiek
+ogniwo:
+
+| tryb awarii | czy widzą go alerty w GCP | czy widzi go ta warstwa |
+|---|---|---|
+| `apply` padł / wisi / nie odpalił się | tak (`vpcsc_apply_stale`) | tak, ale wolniej — nie po to tu jest |
+| `watch.yml` nie chodzi (Actions wyłączone, brak minut) | tak, warunkiem o braku danych | tak |
+| konto `watch` straciło `timeSeries.create` | tak, warunkiem o braku danych | tak |
+| projekt monitoringu wewnątrz konfiguracji egzekwowanej | tak (`condition_absent`) | tak |
+| **projekt monitoringu SKASOWANY / billing wyłączony** | **NIE — nie ma czego ewaluować** | **tak** |
+| repozytorium skasowane, organizacja GitHuba zawieszona | nie | tak |
+| padł sam dostawca DMS | — | fałszywy alarm; degradacja w bezpieczną stronę |
+
+Ostatni wiersz jest ceną tej warstwy i jest tania: fałszywy alarm kosztuje jedno sprawdzenie, cisza po
+skasowanym projekcie kosztuje granicę bezpieczeństwa, o której nikt nie wie, że przestała być pilnowana.
+
+**Gdzie leży poświadczenie i dlaczego akurat tam.** URL pingu to **GitHub Actions secret `DMS_PING_URL`
+na poziomie repozytorium**. Nie environment (`watch` nie używa żadnego, a environment z recenzentem
+zatrzymałby heartbeat na review) i nie żaden magazyn sekretów w chmurze — konsumentem jest runner
+GitHuba, więc każde ogniwo pośrednie dokłada rzecz, która może paść sama z siebie i wyprodukować alarm
+o granicy, kiedy granica ma się dobrze. Secret **nie jest podawany do joba `measure`**: URL pozwala
+uciszyć DMS, a `measure` chodzi na koncie impersonowalnym z każdego pull requesta. Pilnuje tego guard
+`heartbeat DMS we właściwym jobie` w `validate.yml`.
+
+**Okno ciszy jest ZWIĄZANE z `watchdog_absent_seconds`** z `perimeter/alerting.yaml` (3 h): `period` = 1 h
+(kadencja `watch.yml`) + `grace` = 2 h. Musi tolerować dwa pominięte przebiegi, bo cron GitHuba jest
+best-effort, a kolizja blokady stanu z trwającym `apply` wywraca `measure` celowo. **Zmieniasz kadencję
+`watch.yml` — zmień okno u dostawcy i `watchdog_absent_seconds`; to trzy liczby opisujące jedną decyzję.**
+Nie ma pingu `/fail` przy porażce joba: alarmowałby na zdarzeniu znanym i samonaprawialnym.
+
+### Uzbrojenie
+
+```bash
+# 1. Załóż check u dostawcy: period 1h, grace 2h, i PRZYPNIJ MU KANAŁ POWIADOMIEŃ.
+#    Check bez kanału to najczęstszy sposób, w jaki DMS staje się dekoracją: świeci się
+#    na dashboardzie, na który nikt nie patrzy, bo po to był DMS, żeby nie trzeba było patrzeć.
+# 2. Wstrzyknij URL pingu jako sekret — wartość z pliku albo ze stdin, NIGDY w argumencie
+#    (argumenty lądują w historii powłoki i w `ps`).
+gh secret set DMS_PING_URL --repo <owner>/<repo> < /sciezka/do/pliku-z-url
+
+# 3. Uzbrojenie potwierdza sam przebieg, nie deklaracja:
+gh workflow run watch.yml --repo <owner>/<repo>
+gh run list --workflow=watch.yml --limit=1 --json conclusion,url
+#    W podsumowaniu przebiegu ma stać "Dead-man's-switch (poza GCP): ping wyslany".
+#    Wiersz "NIEUZBROJONY" = sekretu nie ma i warstwy nie ma.
+```
+
+Kolejność ma znaczenie i jest samosprawdzająca: check założony **przed** wpięciem sekretu zaczyna odliczać
+od razu, więc jeśli uzbrojenie utknie w połowie, dostawca zaalarmuje sam po oknie. Nie da się zostawić tego
+w stanie „prawie zrobione".
+
+### Triage — dostawca zgłosił, że heartbeat zamilkł
+
+Idź od najtańszego sprawdzenia do najdroższego; pierwsze, które odpowie „nie", jest przyczyną.
+
+```bash
+# 1. Czy `watch.yml` w ogóle chodzi? (Actions wyłączone, wyczerpane minuty, awaria GitHuba)
+gh run list --workflow=watch.yml --limit=5 --json status,conclusion,createdAt,url
+
+# 2. Chodzi, ale czerwony — który job? `measure` czerwony raz na jakiś czas jest NORMALNY
+#    (kolizja blokady stanu z trwającym apply). Czerwony stale — nie jest.
+gh run view <run-id> --log-failed | tail -40
+
+# 3. Zielony, a pingu nie ma → sekret zniknął albo dostawca odrzuca. Szukaj w podsumowaniu
+#    przebiegu wiersza "NIEUZBROJONY" (skasowany sekret) albo adnotacji "ping nie doszedl".
+
+# 4. Wszystko powyżej wygląda dobrze → sprawdź to, po co ta warstwa istnieje:
+gcloud projects describe <projekt-monitoringu> --format='value(lifecycleState)'   # ACTIVE?
+gcloud beta billing projects describe <projekt-monitoringu> \
+  --format='value(billingEnabled)'                                                # True?
+```
+
+`lifecycleState: DELETE_REQUESTED` znaczy, że projekt jest w 30-dniowym oknie kasowania i **da się go
+jeszcze odzyskać** (`gcloud projects undelete`). To jest ten moment, dla którego cała warstwa powstała —
+po oknie zostaje odtworzenie stanu Terraform i puli WIF od zera.
+
+### Test negatywny tej warstwy
+
+Obowiązkowy i osobny od testów alertów w GCP, bo mierzy inny tor. Nie wolno go zrobić ręcznym `curl`-em
+w drugą stronę — sprawdzałby palce, nie mechanizm.
+
+1. **Kontrola pozytywna:** potwierdź, że check jest `up` i że ostatni ping pochodzi z **przebiegu
+   `watch.yml`**, a nie z ręcznego wywołania (porównaj znacznik czasu pingu z czasem przebiegu).
+2. **Zatrzymaj sygnał.** Nie rozbrajaj maszynerii produkcyjnej — **skróć okno checka** u dostawcy do
+   wartości minutowych i przeczekaj jedną kadencję bez pingu.
+3. **Asercja:** check przechodzi w `down`, a powiadomienie dociera **kanałem dostawcy**. Dowód do
+   runbooka: status z API dostawcy + wpis w historii przejść (`flips`), nie zrzut ekranu.
+4. **Przywróć okno** (1 h / 2 h) i pokaż powrót do `up` po najbliższym przebiegu `watch.yml`.
+
+### Rotacja
+
+URL pingu jest poświadczeniem bearer — kto go ma, ten potrafi uciszyć DMS. Rotacja = nowy check u dostawcy
+(albo regeneracja URL-a, jeśli dostawca to potrafi) → `gh secret set DMS_PING_URL` → ręczny przebieg
+`watch.yml` → potwierdzenie, że **nowy** check dostał ping → skasowanie starego. W tej kolejności: check
+skasowany jako pierwszy zostawia okno, w którym nikt nie pilnuje i nikt o tym nie wie.
 
 ---
 

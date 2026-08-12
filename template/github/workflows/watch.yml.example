@@ -18,6 +18,11 @@
 # daje puste kubełki między zapisami, a warunek z pustym kubełkiem nigdy nie utrzyma się przez wymagany
 # czas. Zmieniasz cron -> zmień okno.
 #
+# TEN WORKFLOW JEST TEŻ NADAJNIKIEM, NIE TYLKO MIERNIKIEM. Ostatni krok joba `publish` wysyła heartbeat do
+# dead-man's-switcha u zewnętrznego dostawcy — poza tą organizacją GCP. Powód: cztery polityki alertów stoją
+# w projekcie monitoringu, więc skasowanie tego projektu albo wyłączenie mu billingu nie odpala ŻADNEJ z nich.
+# Obserwator, który zamilkłby razem z obserwowanym, nie jest obserwatorem. Szczegóły przy samym kroku.
+#
 # DWA JOBY, DWIE TOŻSAMOŚCI — najważniejsza rzecz w tym pliku. `measure` liczy i jest READ-ONLY (konto
 # `plan`, to samo, które może impersonować każdy pull request). `publish` pisze do Cloud Monitoring i ma
 # WYŁĄCZNIE `timeSeries.create` (konto `watch`). Gdyby to był jeden job, konto dostępne z pull requesta
@@ -158,3 +163,65 @@ jobs:
           printf '%s' "$METRYKI" > metryki.json
           python3 tools/perimeter_watch.py publish --input metryki.json \
             --project "${{ vars.MONITORING_PROJECT }}"
+
+      # SYGNAŁ ŻYCIA DLA OBSERWATORA POZA TĄ ORGANIZACJĄ — piąta warstwa i jedyna, której nie da się
+      # wyłączyć razem z czterema pozostałymi.
+      #
+      # CO ZAMYKA, bo to jest dokładnie ta luka, którą `terraform/alerts.tf` nazywa u siebie w nagłówku.
+      # Wszystkie cztery polityki alertów stoją w projekcie monitoringu — tym samym, w którym leży stan
+      # Terraform, pula WIF i buckety kontraktów. Skasowanie tego projektu albo wyłączenie mu billingu nie
+      # odpala ŻADNEJ z nich, bo nie ma czego ewaluować. Nie ratuje tego nawet `condition_absent`: on łapie
+      # „metryki przestały przychodzić", ale sam potrzebuje żywego silnika ewaluacji, a ten znika razem
+      # z projektem. Zostaje cisza nieodróżnialna od zdrowia — na granicy bezpieczeństwa.
+      #
+      # DLACZEGO PING STOI ZA PUBLIKACJĄ, A NIE NA POCZĄTKU JOBA. Ma znaczyć „cały łańcuch żyje", a nie
+      # „runner wstał". Wysłany stąd dowodzi po kolei: GitHub odpalił workflow → `measure` przeczytał stan
+      # Terraform z bucketa w projekcie monitoringu → WIF wydał token → `timeSeries.create` przeszedł.
+      # Wystarczy, że którekolwiek z tych ogniw padnie i pingu nie ma, a obserwator zewnętrzny odzywa się
+      # sam. Ping wysłany wcześniej meldowałby zdrowie martwej maszynerii — czyli robiłby dokładną
+      # odwrotność tego, po co tu jest.
+      #
+      # DLACZEGO NIE MA PINGU `/fail` PRZY PORAŻCE. Kolizja blokady stanu z trwającym `apply` wywraca
+      # `measure` CELOWO (patrz komentarz przy `-lock-timeout`) — to zdarzenie znane, tolerowane
+      # i samonaprawiające się. `/fail` alarmowałby na nim natychmiast, czyli nauczyłby dyżurnego ignorować
+      # kanał, który ma odezwać się raz na nigdy. Cisza zostaje JEDYNYM sygnałem, i właśnie dlatego okno po
+      # stronie dostawcy musi tolerować dwa pominięte przebiegi: period 1 h + grace 2 h = 3 h, ta sama
+      # liczba co `watchdog_absent_seconds` w `perimeter/alerting.yaml`. Zmieniasz jedno — zmień drugie.
+      #
+      # DLACZEGO SEKRET DOSTAJE TEN JOB, A NIE `measure`. URL pingu jest poświadczeniem: kto go ma, ten
+      # potrafi UCISZYĆ dead-man's-switch. `measure` chodzi na koncie `plan`, które może impersonować każdy
+      # pull request — sekret podany tam pozwoliłby autorowi dowolnego PR-a podtrzymywać heartbeat przy
+      # martwej maszynerii. To ta sama granica, dla której te dwa joby w ogóle są dwoma jobami; guard
+      # `heartbeat DMS we właściwym jobie` w `validate.yml` pilnuje, żeby nikt jej nie „uprościł".
+      - name: heartbeat dead-man's-switch (poza tą organizacją)
+        # Jawnie, mimo że krok i tak nie ruszy po porażce poprzednika. To jest WARUNEK POPRAWNOŚCI tej
+        # warstwy, a nie domyślne zachowanie, na które można się natknąć: dopisanie wyżej kroku
+        # z `continue-on-error` bez tej linijki zamieniłoby heartbeat z powrotem w „runner wstał".
+        if: success()
+        env:
+          DMS_URL: ${{ secrets.DMS_PING_URL }}
+        run: |
+          if [ -z "${DMS_URL}" ]; then
+            # BEZPIECZNA DEGRADACJA, ALE WIDOCZNA. Brak sekretu nie może wywracać `watch` — metryki są
+            # zapisane, a cztery alerty w GCP działają. Ale cicho nieuzbrojony dead-man's-switch to
+            # dokładnie ta klasa defektu, którą to wdrożenie już raz zapłaciło: kontrola obecna
+            # w konfiguracji, nieosiągalna w działaniu, brana za spokój. Stąd adnotacja i wiersz
+            # w podsumowaniu przebiegu, a nie `echo` ginące w logu.
+            echo "::warning::Obserwator poza organizacja NIEUZBROJONY — brak sekretu DMS_PING_URL. Skasowanie projektu monitoringu nie odpali dzis niczego. Uzbrojenie: docs/7-alerty.md#dms-zewnetrzny"
+            echo "- Dead-man's-switch (poza GCP): **NIEUZBROJONY** — brak sekretu \`DMS_PING_URL\`" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # `-o /dev/null` i ani śladu `-v`: URL jest sekretem, a maskowanie GitHuba nie sięga tego, co
+          # wypisze o nim sam curl. `--retry 3 --retry-all-errors`: jeden 5xx u dostawcy nie jest awarią
+          # granicy, a okno po stronie checka i tak toleruje cały pominięty przebieg.
+          if curl -fsS -m 10 --retry 3 --retry-all-errors -o /dev/null "$DMS_URL"; then
+            echo "- Dead-man's-switch (poza GCP): **ping wyslany**" >> "$GITHUB_STEP_SUMMARY"
+          else
+            # NIE `exit 1`, i to jest decyzja, nie niedbałość. Metryki SĄ opublikowane — czerwony `watch`
+            # twierdziłby coś innego i wysłał dyżurnego pod zły adres. A nieudany ping nie potrzebuje
+            # naszego meldunku: obserwator zewnętrzny widzi ciszę i odzywa się sam. Na tym polega
+            # dead-man's-switch — nie prosi obserwowanego o raport z własnej śmierci.
+            echo "::warning::Ping dead-man's-switch nie doszedl. Metryki opublikowane; jesli to sie powtorzy, obserwator zewnetrzny zglosi brak sam."
+            echo "- Dead-man's-switch (poza GCP): **ping NIE doszedl**" >> "$GITHUB_STEP_SUMMARY"
+          fi
