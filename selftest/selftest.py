@@ -5459,6 +5459,21 @@ def test_werdykt_i_narzedzia() -> None:
               tytul(out_awaria) and tytul(out_odrzut) and tytul(out_awaria) != tytul(out_odrzut),
               f"{tytul(out_awaria)} vs {tytul(out_odrzut)}")
 
+    # TYTUL ADNOTACJI MUSI PRZEZYC PARSER GITHUBA — zmierzone na zywym przebiegu, nie wywnioskowane.
+    # Tytul „BRAMKI NIE WYKONALY SIE (awaria narzedzi, NIE odrzucenie wniosku)" dojechal do API jako
+    # „BRAMKI NIE WYKONALY SIE (awaria narzedzi": PRZECINEK rozdziela WLASCIWOSCI polecenia
+    # (`title=…,file=…,line=…`), wiec reszta tytulu zostala zjedzona jako nieznana wlasciwosc — i ucieta
+    # dokladnie przed slowami, dla ktorych ten tytul istnieje. Asercja idzie po CALEJ powierzchni
+    # wykonywalnej, nie po jednym pliku: to jest wlasnosc skladni, wiec dotyczy kazdej adnotacji.
+    zle = []
+    for plik in sorted([*(ROOT / ".github/workflows").glob("*.yml"),
+                        *(ROOT / ".github/actions").glob("*/action.yml")]):
+        for tyt in re.findall(r"::error title=([^:]*)::", plik.read_text()):
+            if "," in tyt or "%" in tyt:
+                zle.append(f"{plik.relative_to(ROOT)}: {tyt!r}")
+    check("zaden tytul adnotacji nie ma przecinka ani `%` (parser GitHuba ucialby tytul)",
+          not zle, "; ".join(zle))
+
     # --- 4. GUARD `continue-on-error`. Uruchamiany, nie ogladany: para pozytyw/negatyw na kopii repo.
     p = sh(["python3", "tools/continue_on_error_check.py"], cwd=ROOT)
     check("continue_on_error_check na czystym repo: zielono", p.returncode == 0, p.stdout + p.stderr)
