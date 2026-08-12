@@ -78,19 +78,76 @@ jobs:
             echo "count=$(python3 -c 'import json;print(json.load(open("compare.json"))["ahead_by"])')"
           } >> "$GITHUB_OUTPUT"
 
+      # DRUGA KONTROLA, WĘŻSZA OD WSKAŹNIKA I SZERSZA NIŻ ON — czy zbiór DECYZJI tutaj pokrywa zbiór
+      # decyzji startera.
+      #
+      # PO CO, SKORO WSKAŹNIK. Wskaźnik odpowiada na pytanie „czy ktoś przeniósł commity", a nie „czy
+      # przeniósł całą ich treść". Zmierzone: wskaźnik wskazywał aktualny `main` startera — ta bramka
+      # była ZIELONA — a `docs/0-decyzje.md` nie miało dwóch całych decyzji, w tym jednej cytowanej
+      # w dziewięciu miejscach tego samego repozytorium. Sync commit-po-commicie tego nie widzi, bo
+      # każdy pojedynczy przeniesiony commit wygląda na kompletny.
+      #
+      # DLACZEGO TO JEST BEZPIECZNE, A PORÓWNANIE DRZEWA NIE BYŁOBY. Porównujemy ZBIÓR NUMERÓW SEKCJI,
+      # nie treść. Treść decyzji tutaj różni się od startera legalnie i zwykle różnić się musi — opisuje
+      # wdrożenie, nie szablon. Bramka na treści byłaby zawsze czerwona, czyli byłaby tym, czego ta
+      # konstrukcja unika z premedytacją.
+      #
+      # DLACZEGO TU, A NIE PRZY POZOSTAŁYCH BRAMKACH TREŚCI: potrzebuje startera, czyli sieci. Połowa,
+      # która sieci nie potrzebuje (każdy CYTOWANY numer ma sekcję), stoi w `bramki-tresci` i biegnie na
+      # każdym wniosku oraz na ścieżce apply.
+      - name: compare the set of decisions with the starter
+        id: decyzje
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -o pipefail
+          repo=$(sed -n 's/^repo:[[:space:]]*//p' .starter-sync | head -1)
+          # `--jq .content | base64 -d` zamiast surowego `raw`: `raw` na prywatnym forku wymagałby innego
+          # nagłówka, a `contents` działa jednakowo. Pusty plik na wyjściu jest wykryty przez samo
+          # narzędzie (fail-closed na zepsutym wejściu), nie przemilczany tutaj.
+          gh api "repos/$repo/contents/docs/0-decyzje.md" --jq .content | base64 -d > /tmp/decyzje-startera.md
+          if python3 tools/decisions_check.py --wzgledem /tmp/decyzje-startera.md > brak-decyzji.txt 2>&1; then
+            echo "brakujace=0" >> "$GITHUB_OUTPUT"
+            cat brak-decyzji.txt >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "brakujace=1" >> "$GITHUB_OUTPUT"
+            {
+              echo ""
+              echo "Decyzje startera, ktorych tu nie ma:"
+              echo ""
+              sed -e 's/^::error:://' brak-decyzji.txt
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          cat brak-decyzji.txt
+
       # The issue is the artefact an operator reads before promoting. Updated in place rather than opened
       # every Monday: a stack of identical issues is the same thing as no issue.
       - name: open or update the drift issue
-        if: steps.compare.outputs.behind == '1'
+        if: steps.compare.outputs.behind == '1' || steps.decyzje.outputs.brakujace == '1'
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         with:
           script: |
             const fs = require('fs');
+            // Każdy z dwóch powodów może wystąpić SAM — a plik drugiego wtedy nie istnieje. Czytanie go
+            // bez tego opakowania wywracałoby krok wyjątkiem `ENOENT` dokładnie wtedy, gdy zgłoszenie
+            // ma powstać, czyli zamieniałoby wykrytą niekompletność w awarię workflowa.
+            const czytaj = (p) => fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : '';
             const title = 'starter-drift: this repository is behind the starter';
+            const wskaznik = '${{ steps.compare.outputs.behind }}' === '1';
+            const decyzje = '${{ steps.decyzje.outputs.brakujace }}' === '1';
             const body = [
               'The template material in this repository is older than the starter.',
               '',
-              fs.readFileSync('missing.md', 'utf8'),
+              wskaznik ? czytaj('missing.md') : 'The recorded starter commit matches the starter main.',
+              '',
+              // ROZJAZD TREŚCI PRZY ZGODNYM WSKAŹNIKU jest osobnym zdaniem i tak go tu piszemy: to jest
+              // stan, w którym poprzednia wersja tej bramki świeciła na zielono, a repozytorium nie miało
+              // dwóch całych decyzji — jednej cytowanej w dziewięciu miejscach własnego kodu.
+              decyzje
+                ? ['The set of DECISIONS here does not cover the starter. This is the failure the pointer',
+                   'comparison cannot see: the commits were carried over, their content was not.',
+                   '', '```', czytaj('brak-decyzji.txt'), '```'].join('\n')
+                : 'The set of decisions covers the starter.',
               '',
               'Carry them over with a THREE-WAY merge (see `.starter-sync` for the method) and raise',
               '`commit:` in the same pull request. Do not promote a member to `enforced` until this is',
@@ -114,7 +171,16 @@ jobs:
       # Red, not just an issue. An issue nobody assigned is a note; a red scheduled workflow is visible on
       # the repository's front page and in the operator's notifications.
       - name: fail when behind
-        if: steps.compare.outputs.behind == '1'
+        if: steps.compare.outputs.behind == '1' || steps.decyzje.outputs.brakujace == '1'
         run: |
-          echo "::error::behind the starter by ${{ steps.compare.outputs.count }} commit(s) — see the starter-drift issue"
+          if [ "${{ steps.compare.outputs.behind }}" = "1" ]; then
+            echo "::error::behind the starter by ${{ steps.compare.outputs.count }} commit(s) — see the starter-drift issue"
+          fi
+          # Osobny komunikat, bo to jest inny stan i inna naprawa. „Za wskaźnikiem" znaczy „przenieś
+          # commity"; „brak decyzji przy zgodnym wskaźniku" znaczy „poprzedni sync przeniósł commit, ale
+          # nie całą jego treść" — i jest to jedyny z tych dwóch, którego samo podniesienie `commit:`
+          # nie naprawia, a wręcz zamyka mu drogę do wykrycia.
+          if [ "${{ steps.decyzje.outputs.brakujace }}" = "1" ]; then
+            echo "::error::the set of decisions does not cover the starter — the pointer is current but content is missing; see the starter-drift issue"
+          fi
           exit 1

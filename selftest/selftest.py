@@ -119,6 +119,8 @@ def bootstrap() -> None:
         "tools/bootstrap_github.sh", "docs/access-request.md",
         "tools/check_supported_services.py",
         "tools/control_plane_check.py",
+        # Kompletnosc rejestru decyzji — druga bramka rozjazdu ze starterem, obok wskaznika (DEC-20).
+        "tools/decisions_check.py",
         "tools/perimeter_to_policy.py", "tools/brownfield_import.sh",
         "tools/perimeter_watch.py", "terraform/alerts.tf",
         "perimeter/alerting.yaml", "schemas/alerting.schema.json",
@@ -2722,6 +2724,105 @@ def test_control_plane_lista() -> None:
           '"tools/**"' in wyzwalacz, wyzwalacz)
 
 
+# --------------------------------------------------------------------- kompletnosc rejestru decyzji
+def test_kompletnosc_decyzji() -> None:
+    """Bramka DEC-20: rozjazd ze starterem widziany na ZBIORZE DECYZJI, nie na wskazniku.
+
+    Kazdy przypadek negatywny odpowiada realnemu trybowi awarii zmierzonemu na wdrozeniu 2026-08-12:
+    wskaznik `.starter-sync` wskazywal aktualny `main` startera (bramka `starter-drift` zielona), a repo
+    nie mialo dwoch calych decyzji — jednej cytowanej w DZIEWIECIU wlasnych plikach.
+    """
+    print("\n== kompletnosc rejestru decyzji (DEC-20) ==")
+    decyzje = ROOT / "docs/0-decyzje.md"
+    oryginal = decyzje.read_text()
+
+    def uruchom(*extra):
+        return sh([sys.executable, "tools/decisions_check.py", *extra], cwd=ROOT)
+
+    # --- 1. stan wyjsciowy: rozpakowany starter jest spojny sam ze soba ---------------------------
+    p = uruchom()
+    check("decisions_check przechodzi na rozpakowanym starterze", p.returncode == 0, p.stdout + p.stderr)
+
+    # --- 2. decyzja CYTOWANA, ktorej nie ma w rejestrze -> odrzucenie z lista miejsc ---------------
+    # Zdejmujemy sam NAGLOWEK sekcji (tresc zostaje), bo dokladnie tak wyglada niekompletny sync:
+    # numer znika z rejestru, a odsylacze w kodzie zostaja.
+    # Kandydat musi byc cytowany z KODU (workflow/rego/tf), nie tylko z dokumentacji: caly sens bramki
+    # to odsylacz z pliku wykonywalnego prowadzacy w pustke, wiec test na dokumentacji mierzylby latwiejszy
+    # przypadek niz ten, dla ktorego bramka powstala.
+    numer_cytowany = None
+    for kandydat in re.findall(r"^## (DEC-[0-9]+)", oryginal, re.M):
+        cytaty = [c for c in sh(["grep", "-rl", kandydat, "."], cwd=ROOT).stdout.split()
+                  if "0-decyzje.md" not in c]
+        if len(cytaty) >= 2 and any(c.endswith((".yml", ".rego", ".tf")) for c in cytaty):
+            numer_cytowany = kandydat
+            break
+    check("premisa: w materiale startera jest decyzja cytowana z KODU, nie tylko z dokumentacji",
+          numer_cytowany is not None)
+    if numer_cytowany:
+        decyzje.write_text(re.sub(rf"^## {numer_cytowany} ", "## (naglowek zdjety) ", oryginal, count=1, flags=re.M))
+        p = uruchom()
+        check(f"decyzja {numer_cytowany} cytowana w kodzie, a nieobecna w rejestrze, jest ODRZUCANA",
+              p.returncode != 0 and numer_cytowany in p.stdout, p.stdout + p.stderr)
+        # Komunikat ma prowadzic do naprawy, a nie tylko oznajmiac problem: bez listy miejsc autor
+        # zmiany nie wie, co odsyla w pustke, i pierwszym odruchem jest usuniecie odsylacza.
+        check("komunikat wymienia PLIKI, ktore odsylaja w pustke",
+              ".yml:" in p.stdout or ".rego:" in p.stdout or ".tf:" in p.stdout, p.stdout)
+        decyzje.write_text(oryginal)
+        check("ANTY-TAUTOLOGIA: po przywroceniu naglowka ta sama komenda PRZECHODZI",
+              uruchom().returncode == 0)
+
+    # --- 3. `--wzgledem`: decyzja startera, ktorej NIKT nie cytuje ---------------------------------
+    # To jest druga polowa i jedyna, ktora widzi ten przypadek: sprawdzenie wewnetrzne przepuszcza
+    # decyzje bez ani jednego odsylacza, bo nie ma czego rozwiazac.
+    #
+    # PLIK WZORCA LEZY POZA ROOT — i to nie jest kosmetyka. Wewnatrz repozytorium jego wlasna tresc
+    # zostalaby policzona jako ODSYLACZ do decyzji, ktorej w rejestrze nie ma, wiec fixture testu
+    # falszowalby wynik sprawdzenia wewnetrznego. `starter-drift` z tego samego powodu zapisuje
+    # pobrany plik do `/tmp`, a nie do drzewa roboczego.
+    wzorzec = pathlib.Path(tempfile.mkdtemp(prefix="vpcsc-wzorzec-")) / "0-decyzje-startera.md"
+    wzorzec.write_text(oryginal + "\n\n## DEC-999 — decyzja obecna wylacznie w starterze\n\ntresc\n")
+    p = uruchom("--wzgledem", str(wzorzec))
+    check("decyzja obecna w starterze i nieobecna tutaj jest ODRZUCANA przez --wzgledem",
+          p.returncode != 0 and "DEC-999" in p.stdout, p.stdout + p.stderr)
+    check("sprawdzenie WEWNETRZNE tego przypadku NIE widzi (dlatego sa dwa, nie jedno)",
+          uruchom().returncode == 0)
+
+    # --- 4. ANTY-TAUTOLOGIA: zbior pokrywajacy wzorzec przechodzi ----------------------------------
+    wzorzec.write_text(oryginal)
+    check("ANTY-TAUTOLOGIA: rejestr pokrywajacy wzorzec PRZECHODZI",
+          uruchom("--wzgledem", str(wzorzec)).returncode == 0)
+
+    # --- 5. FAIL-CLOSED na zepsutym wejsciu --------------------------------------------------------
+    # Plik bez ani jednej sekcji to nie „zero roznic", tylko zepsute wejscie (404 zapisany do pliku,
+    # pusta odpowiedz API, zla sciezka). Bramka, ktora tu milczy, milczy dokladnie wtedy, gdy przestala
+    # dzialac — czyli powtarza blad, ktory sama zamyka.
+    wzorzec.write_text("# plik bez ani jednej sekcji decyzji\n")
+    p = uruchom("--wzgledem", str(wzorzec))
+    check("pusty plik wzorca jest BLEDEM, nie zerem roznic (fail-closed)", p.returncode != 0,
+          p.stdout + p.stderr)
+    check("brakujacy plik wzorca jest BLEDEM", uruchom("--wzgledem", str(ROOT / "nie-ma.md")).returncode != 0)
+    wzorzec.unlink()
+
+    # --- 6. BRAMKA STOI TAM, GDZIE MA STAC ---------------------------------------------------------
+    # Sprawdzenie wewnetrzne nalezy do MUTATORA (DEC-16), czyli do akcji wolanej przez oba tory —
+    # przeniesione do samego `validate.yml` przestaloby dzialac na pushu prosto na galaz domyslna.
+    akcja = (ROOT / ".github/actions/bramki-tresci/action.yml").read_text()
+    check("decisions_check stoi w akcji `bramki-tresci` (oba tory: PR i apply)",
+          "tools/decisions_check.py" in akcja, akcja[-400:])
+    drift = (ROOT / ".github/workflows/starter-drift.yml").read_text()
+    check("starter-drift wola decisions_check z --wzgledem", "--wzgledem" in drift)
+    check("starter-drift pobiera rejestr decyzji ze startera",
+          "contents/docs/0-decyzje.md" in drift, drift[:400])
+    # Czerwien MUSI zalezec takze od tego sprawdzenia. Bramka, ktora tylko dopisuje do podsumowania,
+    # jest notatka — a to jest ten sam blad, co zgloszenie, ktorego nikt nie przypisuje.
+    krok_fail = [k for k in yaml.safe_load(drift)["jobs"]["starter-drift"]["steps"]
+                 if k.get("name") == "fail when behind"]
+    check("premisa: starter-drift ma krok konczacy przebieg na czerwono", len(krok_fail) == 1)
+    if krok_fail:
+        check("czerwien starter-drift zalezy TAKZE od brakujacych decyzji, nie tylko od wskaznika",
+              "decyzje.outputs.brakujace" in str(krok_fail[0].get("if", "")), str(krok_fail[0].get("if")))
+
+
 # --------------------------------------------------------------------- narzedzia
 def test_tools() -> None:
     print("\n== narzedzia ==")
@@ -4484,6 +4585,7 @@ def main() -> int:
     test_lint_and_pinning()
     test_rego()
     test_control_plane_lista()
+    test_kompletnosc_decyzji()
     test_tools()
     test_preflight()
     test_eksperyment_wyscigu()

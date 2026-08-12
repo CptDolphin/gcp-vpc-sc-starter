@@ -1,6 +1,6 @@
-# Decyzje, na których stoi ten starter (DEC-1…DEC-18)
+# Decyzje, na których stoi ten starter (DEC-1…DEC-19)
 
-Osiemnaście rozstrzygnięć, które określają kształt repozytorium. Kod odsyła tutaj skrótem `DEC-1`…`DEC-18` — jeśli komentarz
+Dziewiętnaście rozstrzygnięć, które określają kształt repozytorium. Kod odsyła tutaj skrótem `DEC-1`…`DEC-19` — jeśli komentarz
 w pliku mówi „(DEC-4)", to znaczy: „powód tej linijki jest opisany w DEC-4, nie zmieniaj jej bez przeczytania".
 
 Każda pozycja ma tę samą strukturę: **decyzja** · **dlaczego** · **co odrzucono i dlaczego**. Odrzucone warianty są
@@ -1247,3 +1247,69 @@ device-trust). Dopiero razem mówią „ten poziom działa i ktoś za to odpowia
   zapomnienia. W `boundary-probe.yml` dokłada się do sondy, która i tak jest jedynym miejscem
   produkującym zdania o świecie, i dziedziczy jej kluczową własność: werdykt stawiany z **treści**
   odpowiedzi, nie z kodu błędu.
+
+---
+
+## DEC-20 — Rozjazd ze starterem mierzymy DWOMA bramkami: wskaźnikiem i POKRYCIEM ZBIORU DECYZJI
+
+**Decyzja.** Obok porównania wskaźnika (`starter-drift`, DEC-9) stoi druga, węższa kontrola:
+`tools/decisions_check.py`. Pyta o dwie rzeczy i celowo w dwóch różnych miejscach:
+
+* **każdy numer decyzji CYTOWANY gdziekolwiek w repozytorium ma w `docs/0-decyzje.md` swoją sekcję** —
+  w `.github/actions/bramki-tresci`, czyli na obu torach (pull request i apply, DEC-16). Nie potrzebuje
+  ani sieci, ani startera, więc biegnie na każdym wniosku;
+* **zbiór decyzji tutaj pokrywa zbiór decyzji startera** (`--wzgledem`) — w `starter-drift`, bo to
+  wymaga pobrania pliku ze startera.
+
+Bramka porównuje **ZBIÓR NUMERÓW SEKCJI, nigdy treść**.
+
+**Problem, który to zamyka — i dlaczego wskaźnik go nie widział.** Wskaźnik odpowiada na pytanie „czy
+ktoś przeniósł commity", a nie „czy przeniósł całą ich treść". Zmierzone na wdrożeniu 2026-08-12:
+`.starter-sync` wskazywał aktualny `main` startera, `starter-drift` był zielony — a `docs/0-decyzje.md`
+nie zawierało **dwóch całych decyzji**. Jedna z nich (DEC-16, bramka na ścieżce mutatora) była w tym
+samym repozytorium cytowana w **dziewięciu miejscach**: `apply.yml`, `plan.yml`, `validate.yml`, reguły
+`onboarding.rego`, akcja bramki promocji. Kod odsyłał do uzasadnienia, którego w repo nie było.
+
+Sync commit-po-commicie nie ma jak tego zobaczyć: każdy pojedynczy przeniesiony commit wygląda na
+kompletny, a niekompletność ujawnia się dopiero na zbiorze. To jest ta sama klasa błędu co bramka
+czytająca nieistniejący plik — zielono, bo nie ma czego odrzucić.
+
+**Dlaczego akurat decyzje, a nie „pliki bez placeholderów".** Kuszący wariant — porównywać treść tych
+plików, które nie niosą wartości środowiska — **zmierzyliśmy i odrzuciliśmy**. Na tym wdrożeniu: 120
+plików z szablonu, 35 różniących się treścią, z tego 20 bez ani jednej wartości środowiska. Ale
+**12 z tych 20 różni się WYŁĄCZNIE pinami akcji**, które w repozytorium wdrożonym są NOWSZE niż
+w szablonie (podbija je Dependabot i ma to robić), a kolejne kilka — lokalnymi pomiarami dopisanymi
+do komentarzy. Bramka na treści tego zbioru byłaby więc czerwona od pierwszego dnia i z powodów
+całkowicie legalnych, czyli byłaby dokładnie tym, czego DEC-9 unika z premedytacją. Utrzymywana
+allowlista „plików porównywalnych" przenosi tylko problem: to ona zaczyna dryfować, i to po cichu.
+
+Zbiór numerów sekcji nie ma żadnej z tych wad. Jest odporny na wartości środowiska, na piny akcji
+i na lokalne przeredagowanie treści — a mierzy dokładnie to, czego brak boli: **uzasadnienie**.
+
+**Dlaczego dwa miejsca, a nie jedno.** Decyzja może zniknąć na dwa sposoby, a każdy widzi tylko jeden:
+sprawdzenie wewnętrzne łapie decyzję CYTOWANĄ (odsyłacz w pustkę), ale przepuści taką, której nikt nie
+cytuje; `--wzgledem` łapie właśnie tę drugą, ale wymaga sieci, więc nie może biec na każdym wniosku.
+Na wdrożeniu, które to wywołało, wystąpiły OBA warianty naraz: DEC-16 była cytowana dziewięć razy,
+DEC-14 nie była cytowana ani razu.
+
+**Fail-closed na zepsutym wejściu.** Plik pobrany ze startera bez ani jednej sekcji (404 zapisany do
+pliku, pusta odpowiedź API, zła ścieżka) jest **błędem**, nie zerem różnic. Bez tego bramka milczałaby
+dokładnie wtedy, gdy jej wejście przestało działać — czyli powtórzyłaby błąd, który sama zamyka.
+
+**Czego to NIE daje.** Nie mówi, że treść decyzji jest aktualna — tylko że sekcja istnieje. Decyzja
+przeniesiona jako sam nagłówek przechodzi. Świadomie: alternatywą jest porównanie treści, czyli bramka
+zawsze czerwona. Bramka mówi „przeniesiono kadłub, nie przeniesiono nic" — i tyle ma mówić.
+
+**Odrzucone.**
+- *Porównanie całego drzewa z wyjściem `install.sh`.* DEC-9 wprost: czerwone zawsze i legalnie, bo
+  wartości środowiska są dokładnie tym, co repozytorium wdrożone ma mieć.
+- *Porównanie treści plików „bez placeholderów", z allowlistą.* Zmierzone wyżej: czerwone od pierwszego
+  dnia przez piny Dependabota, a allowlista dryfuje sama i nikt tego nie mierzy.
+- *Wymóg ciągłej numeracji (`DEC-1`…`DEC-N` bez dziur).* Krótsze, ale fałszywe: numery pochodzą ze
+  startera i nigdy nie są przenumerowywane, więc wycofana decyzja zostawia legalną dziurę. Bramka
+  pytałaby o kształt zbioru zamiast o pokrycie.
+- *Reguła OPA zamiast osobnego narzędzia.* Reguły czytają `declarations.json` — dokument o granicy,
+  nie o repozytorium. Dołożenie tam listy plików repo zamieniłoby wejście reguł w drugą, cichą
+  reprezentację drzewa.
+- *Zgłoszenie zamiast czerwieni.* To już mamy przy wskaźniku i to działa: zgłoszenie jest artefaktem
+  do przeczytania przed promocją, ale nikt go nie przypisuje. Czerwony przebieg widać na stronie repo.
