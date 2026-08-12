@@ -149,14 +149,19 @@ Monitoring. Jest tu, bo jako jedyna widzi pewien stan **od razu**, podczas gdy o
 docelowo złapią, mają progi czasowe.
 
 ```
-budzet spec: granica ma 48 atrybutow, deklaracja opisuje 53 (roznica -5) — ...
+budzet spec: ROZJAZD OCZEKIWANY   — granica ma 48 atrybutow, deklaracja opisuje 53 (roznica -5); apply ZALEGA (...)
+budzet spec: ROZJAZD NIEOCZEKIWANY — granica ma 48 atrybutow, deklaracja opisuje 53 (roznica -5), a apply NIE zalega (...)
 ```
 
 Pierwsza liczba to koszt policzony z **żywej granicy** (`servicePerimeters.get`), druga — z **deklaracji**
-w `perimeter/**` (`attribute_budget.py`). Mają być równe. **Treść komunikatu rozstrzyga, co robić** —
-producent rozróżnia dwa przypadki, bo mają różne procedury:
+w `perimeter/**` (`attribute_budget.py`). Mają być równe. **Rozstrzyga drugie słowo komunikatu** —
+producent rozróżnia dwa przypadki, bo mają różne procedury.
 
-### „apply ZALEGA" (poziom `warning`)
+Oba idą jako `::warning::` i **żaden nie czerwieni przebiegu**. Nie dlatego, że drugi jest mniej ważny —
+dlatego, że `measure` z czerwonym statusem zatrzymuje `publish` przez `needs`, więc metryki by nie powstały
+i obserwator zamilkłby dokładnie w stanie, w którym ma krzyczeć. Wagę niesie prefiks, nie poziom adnotacji.
+
+### „ROZJAZD OCZEKIWANY" — apply zalega
 
 W Gicie jest zmergowana zmiana, której jeszcze nie ma w chmurze. Różnica jest **oczekiwana** i zniknie po
 udanym `apply`. **Nie szukaj tu dryfu — nie znajdziesz go, i to jest zamierzone:**
@@ -182,7 +187,7 @@ w deklaracji i nie było go w granicy. Kolejny `apply`, zdejmujący ten wpis, za
 Adnotacja odsyłała wtedy do alertu o dryfie, czyli do kontroli, która w tym stanie milczy z definicji; to
 jest defekt naprawiony właśnie tą sekcją i rozróżnieniem w komunikacie.
 
-### „apply NIE zalega" (poziom `error`)
+### „ROZJAZD NIEOCZEKIWANY" — apply nie zalega
 
 Git i chmura **powinny** być zgodne, a nie są. Dwa źródła, oba warte reakcji:
 

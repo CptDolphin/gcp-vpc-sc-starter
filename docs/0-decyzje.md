@@ -685,9 +685,11 @@ z czystą tablicą — czyli uczył dyżurnego, że to fałszywy alarm. Zmierzon
 `watch` `31565377821` i `31565606010`): „granica ma 48 atrybutów, deklaracja opisuje 53" przy
 `drift_resources = 0` i `apply_pending_seconds = 72`; przyczyną był `apply`, który padł na numerze
 projektu nieistniejącego w organizacji. Kontrola zadziałała — zawiodło jej zdanie. Od tej poprawki
-`komunikat_rozjazdu()` rozróżnia: **apply zalega** → `warning`, „różnica oczekiwana, idź do historii
-przebiegów `apply`, nie do granicy"; **apply nie zalega** → `error`, „zmiana poza pipeline'em albo rozjazd
-arytmetyki modeli — rozstrzyga porównanie regułą po regule". To jest ta sama klasa defektu, którą DEC-13
+`komunikat_rozjazdu()` rozróżnia prefiksem treści: **ROZJAZD OCZEKIWANY** (apply zalega) → „idź do
+historii przebiegów `apply`, nie do granicy"; **ROZJAZD NIEOCZEKIWANY** (apply nie zalega) → „zmiana poza
+pipeline'em albo rozjazd arytmetyki modeli — rozstrzyga porównanie regułą po regule". Oba jako
+`::warning::`: adnotacja poziomu error mogłaby (niezmierzone) sczerwienić `measure`, a wtedy `publish`
+nie rusza przez `needs` i obserwator milknie w stanie, w którym ma krzyczeć — wagę niesie prefiks. To jest ta sama klasa defektu, którą DEC-13
 naprawiał u siebie (puste `notificationChannels`): kontrola obecna, celująca w pustkę, brana za spokój.
 
 **Gdy żywej granicy nie da się odczytać, metryka budżetu NIE POWSTAJE.** Podstawienie liczby z deklaracji
