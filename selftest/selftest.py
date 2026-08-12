@@ -123,6 +123,9 @@ def bootstrap() -> None:
         "tools/perimeter_watch.py", "terraform/alerts.tf",
         "perimeter/alerting.yaml", "schemas/alerting.schema.json",
         ".github/workflows/watch.yml",
+        # Bramki treści i bramki żywe jako akcje złożone: JEDNA definicja, wołana przez tor pull requesta
+        # (`validate.yml`/`plan.yml`) i przez mutatora (`apply.yml`). Patrz DEC-16.
+        ".github/actions/bramki-tresci/action.yml", ".github/actions/bramki-zywe/action.yml",
         ".tflint.hcl", ".github/dependabot.yml", "tests/README.md",
         "tests/snow-approved.json", "tests/snow-not-approved.json", "tests/snow-self-approved.json",
         "tests/snow-wrong-project.json", "tests/dispatch-example.json",
@@ -1853,16 +1856,17 @@ def test_external_egress_and_guard() -> None:
           rules.count("external_resources = each.value.external_resources") == 2,
           f"znaleziono {rules.count('external_resources = each.value.external_resources')}")
 
-    # Wzorzec guardu wyciągamy z workflowa, żeby test i CI sprawdzały DOKŁADNIE to samo wyrażenie.
-    wf = (ROOT / ".github/workflows/validate.yml").read_text()
-    m = re.search(r"grep -rnE '([^']+)' tools \.github/workflows", wf)
-    check("guard no-dry-run-commit istnieje w validate.yml", m is not None)
+    # Wzorzec guardu wyciągamy z tego, co REALNIE się wykonuje (workflow + wołane akcje lokalne), żeby
+    # test i CI sprawdzały DOKŁADNIE to samo wyrażenie na dokładnie tej samej powierzchni.
+    wf = tekst_wykonywany("validate.yml")
+    m = re.search(r"grep -rnE '([^']+)' tools \.github\b", wf)
+    check("guard no-dry-run-commit istnieje na torze validate", m is not None)
     if not m:
         return
     pattern = m.group(1)
 
     def guard_hits() -> str:
-        found = sh(["grep", "-rnE", pattern, "tools", ".github/workflows"], cwd=ROOT).stdout
+        found = sh(["grep", "-rnE", pattern, "tools", ".github"], cwd=ROOT).stdout
         # ta sama filtracja komentarzy co w workflow
         return "\n".join(l for l in found.splitlines()
                           if not re.match(r"^[^:]+:[0-9]+:\s*#", l))
@@ -1911,15 +1915,21 @@ def test_lint_and_pinning() -> None:
           "terraform_tflint" in (ROOT / ".pre-commit-config.yaml").read_text())
 
     # Pinowanie: każda akcja third-party z pełnym SHA. Wzorzec ten sam co w guardzie CI.
+    #
+    # `.github/actions/*/action.yml` JEST na tej liście, bo akcje złożone też wołają akcje obce (bramki
+    # treści pobierają `setup-python`). Lista, która ich nie obejmuje, zostawiłaby bez guardu pliki
+    # wykonujące najwięcej — a to ta sama luka, którą zamyka DEC-16, tylko o piętro niżej.
     uses = []
-    for f in list((ROOT / ".github/workflows").glob("*.yml")) + [ROOT / "contrib/action.yml"]:
+    for f in (list((ROOT / ".github/workflows").glob("*.yml"))
+              + sorted((ROOT / ".github/actions").glob("*/action.yml"))
+              + [ROOT / "contrib/action.yml"]):
         # Zakotwiczone na początku linii: `uses:` pojawia się też WEWNĄTRZ wzorca grepa w guardzie CI,
         # a niezakotwiczony wzorzec wyciągał stamtąd fragmenty regexa i zgłaszał je jako nieprzypięte akcje.
         uses += re.findall(r"^\s*-?\s*uses:\s*(\S+)", f.read_text(), re.M)
     third_party = [u for u in uses if not u.startswith("./") and not u.startswith("ORG/")]
     unpinned = [u for u in third_party if not re.search(r"@[0-9a-f]{40}$", u)]
     check("wszystkie akcje third-party przypiete SHA-em", not unpinned, f"bez SHA: {unpinned}")
-    check("guard na pinowanie jest w CI", "actions pinned to a SHA" in wf)
+    check("guard na pinowanie jest w CI", "actions pinned to a SHA" in tekst_wykonywany("validate.yml"))
     check("jest dependabot (pin bez aktualizacji to martwy pin)",
           (ROOT / ".github/dependabot.yml").exists())
 
@@ -2348,13 +2358,19 @@ def test_control_plane_lista() -> None:
     # w plan.yml, wiec `"--live" not in tekst` wywracalo sie o WLASNA dokumentacje. Ta sama pulapka,
     # ktora w tym repo trzy razy wywrocila guardy tekstowe (patrz `strip_heredocs`).
     walidacja = yaml.safe_load((ROOT / ".github/workflows/validate.yml").read_text())
-    plan = (ROOT / ".github/workflows/plan.yml").read_text()
+    plan = tekst_wykonywany("plan.yml")
     wywolania = [str(k.get("run", "")) for k, _ in kroki_workflow(walidacja)
                  if "tools/control_plane_check.py" in str(k.get("run", ""))]
     check("validate.yml uruchamia control_plane_check.py w trybie offline",
           len(wywolania) == 1 and "--live" not in wywolania[0], str(wywolania))
     check("plan.yml uruchamia control_plane_check.py --live",
           "tools/control_plane_check.py --live" in plan)
+    # OBA TORY, NIE JEDEN. Ta bramka chroni przed jedyna awaria, ktorej `git revert` nie cofa — a stala
+    # wylacznie na torze pull requesta, podczas gdy granice zmienia push na galaz domyslna (DEC-16).
+    stosowanie = tekst_wykonywany("apply.yml")
+    check("apply.yml uruchamia control_plane_check.py w OBU trybach (offline + --live)",
+          "python3 tools/control_plane_check.py\n" in stosowanie
+          and "tools/control_plane_check.py --live" in stosowanie)
     wyzwalacz = plan.split("jobs:", 1)[0]
     check("plan.yml ma `tools/**` w sciezkach wyzwalacza (guard widzi zmiane samego siebie)",
           '"tools/**"' in wyzwalacz, wyzwalacz)
@@ -2925,12 +2941,22 @@ def test_workflows() -> None:
     # do `collect_declarations.py`, bramka nie jest bramką, tylko ŚCIANĄ: przepuścić się jej nie da NIGDY,
     # niezależnie od tego, jak czyste jest okno. Ściana, przez którą trzeba przejść, żeby wykonać robotę,
     # kończy się usunięciem reguły — i wtedy nie ma ani ściany, ani bramki.
-    walid = (ROOT / ".github/workflows/validate.yml").read_text()
+    walid = tekst_wykonywany("validate.yml")
     check("validate: bramka promocji ma skad wziac dowod (--violations)",
           "--violations" in walid and "gh run download" in walid,
           "brak sciezki artefakt raportu -> collect_declarations.py --violations")
     check("validate: uprawnienie do odczytu artefaktow zadeklarowane",
           re.search(r"^\s*actions:\s*read\s*$", walid, re.M) is not None)
+    # TO SAMO NA SCIEZCE APPLY. Bramka `promotion_gate` jest fail-closed: bez mapy `violations_last_window`
+    # odrzuca KAZDEGO czlonka `enforced`. Gdyby dowod pobieral wylacznie tor pull requesta, bramki przed
+    # apply byly by OSTRZEJSZE od tych, ktore przepuscily review — zmergowana promocja nie zostalaby
+    # zastosowana nigdy, a przebieg wygladalby na „bramka zadziala".
+    zastosowanie = tekst_wykonywany("apply.yml")
+    check("apply: bramki na sciezce mutatora maja ten sam dowod naruszen co PR",
+          "--violations" in zastosowanie and "gh run download" in zastosowanie,
+          "job bramek w apply.yml nie pobiera artefaktu raportu")
+    check("apply: uprawnienie do odczytu artefaktow zadeklarowane",
+          re.search(r"^\s*actions:\s*read\s*$", zastosowanie, re.M) is not None)
     # Producent i konsument artefaktu muszą mówić o TEJ SAMEJ nazwie. Nazwy czytamy z obu plików, nie
     # z listy w teście — ten sam rozjazd producent/konsument wywrócił już raz bramki OPA na planie.
     nazwa_up = re.search(r"upload-artifact@[^\n]*\n(?:.*\n)*?\s*with:\s*\n\s*name:\s*(\S+)", raport)
@@ -3043,8 +3069,35 @@ sys.exit(0)
 '''
 
 
-def kroki_workflow(wf: dict):
+def akcja_lokalna(uses: str):
+    """Kroki AKCJI ZLOZONEJ wolanej przez `uses: ./sciezka` — albo None, gdy to nie jest akcja lokalna.
+
+    DLACZEGO TO JEST TU, A NIE W KAZDYM TESCIE Z OSOBNA. Odkad bramki tresci mieszkaja w jednym miejscu
+    (`.github/actions/bramki-tresci`, DEC-16), workflow, ktory je uruchamia, ma w tym miejscu JEDEN krok
+    `uses:` zamiast dwunastu `run:`. Test czytajacy same `jobs[*].steps` przestalby wiec widziec bramki
+    — i zielenilby sie na pliku, z ktorego wszystkie usunieto. To ta sama klasa bledu, ktora ten selftest
+    tropi gdzie indziej: asercja o KSZTALCIE pliku zamiast o wlasnosci, ktora ma byc prawdziwa.
+    """
+    if not isinstance(uses, str) or not uses.startswith("./"):
+        return None
+    baza = ROOT / uses[2:]
+    plik = next((baza / n for n in ("action.yml", "action.yaml") if (baza / n).exists()),
+                baza if baza.is_file() else None)
+    if plik is None:
+        return None
+    return (yaml.safe_load(plik.read_text()).get("runs") or {}).get("steps") or []
+
+
+def kroki_workflow(wf: dict, rozwijaj: bool = True):
     """Splaszcza workflow do par (krok, env), scalajac env z poziomu workflow -> job -> krok.
+
+    Kroki akcji lokalnych (`uses: ./…`) sa domyslnie ROZWIJANE w miejscu — patrz `akcja_lokalna`. Dzieki
+    temu kazda asercja o bramkach dziala tak samo, niezaleznie od tego, czy bramka stoi wpisana w workflow,
+    czy w akcji zlozonej wolanej przez dwa workflowy.
+
+    `rozwijaj=False` zostaje dla testow o WNETRZU JEDNEGO PLIKU — para producent/konsument pliku planu
+    zyje w obrebie jednego workflowa i rozwiniete kroki akcji wspolnych sa tam szumem: `conftest test …
+    declarations.json` z bramek tresci nie jest konsumentem planu, a wygladalby na niego.
 
     Env bierzemy WYLACZNIE z badanego pliku, nigdy ze srodowiska procesu: harness selftestu dostaje
     `GOOGLE_OAUTH_ACCESS_TOKEN` ze swojego wlasnego workflowa i przekazuje go dalej dzieciom. Test, ktory
@@ -3056,8 +3109,27 @@ def kroki_workflow(wf: dict):
             env = {}
             env.update(wf.get("env") or {})
             env.update(job.get("env") or {})
+            for pod in (akcja_lokalna(str(krok.get("uses", ""))) if rozwijaj else None) or []:
+                yield pod, {**env, **(pod.get("env") or {})}
             env.update(krok.get("env") or {})
             yield krok, env
+
+
+def tekst_wykonywany(nazwa_workflow: str) -> str:
+    """Tekst workflowa RAZEM z tekstem akcji lokalnych, ktore wola.
+
+    Asercje tekstowe (`"--violations" in ...`) pytaja o to, CO SIE WYKONA, a nie o to, w ktorym pliku
+    jest to zapisane. Sklejenie obu zrodel utrzymuje je prawdziwymi po przeniesieniu kroku do akcji
+    zlozonej — i nadal czerwieni je, gdy krok zniknie naprawde.
+    """
+    sciezka = ROOT / ".github/workflows" / nazwa_workflow
+    tekst = sciezka.read_text()
+    czesci = [tekst]
+    for uses in re.findall(r"^\s*-?\s*uses:\s*(\./\S+)", tekst, re.M):
+        plik = ROOT / uses[2:] / "action.yml"
+        if plik.exists():
+            czesci.append(plik.read_text())
+    return "\n".join(czesci)
 
 
 def srodowisko_bez_tozsamosci_google() -> dict:
@@ -3158,7 +3230,10 @@ def test_workflowy_wykonywalne() -> None:
     wf_kroki = {}
     for nazwa in ("plan.yml", "apply.yml"):
         wf = yaml.safe_load((ROOT / f".github/workflows/{nazwa}").read_text())
-        kroki = [k for k, _ in kroki_workflow(wf)]
+        # BEZ rozwijania akcji wspolnych: para producent/konsument pliku planu zyje w obrebie tego
+        # jednego workflowa, a `conftest test … declarations.json` z bramek tresci nie jest konsumentem
+        # planu — rozwiniety wygladalby na niego i czerwienil test o czyms, czego on nie bada.
+        kroki = [k for k, _ in kroki_workflow(wf, rozwijaj=False)]
         wf_kroki[nazwa] = kroki
         krok_planu = next((k for k in kroki if "-out=" in str(k.get("run", ""))), None)
         check(f"{nazwa} ma krok produkujacy plan (-out=)", krok_planu is not None)
@@ -3415,6 +3490,100 @@ def test_samodzielnosc() -> None:
           not skan.skanuj_tekst("Zwykly akapit o perimetrze i regulach ingress. Projekt 123456789012."))
 
 
+def test_bramki_na_sciezce_apply() -> None:
+    """Czy bramka stoi tam, gdzie NAPRAWDE zmienia sie granica — czy tylko obok.
+
+    ZMIERZONY TRYB AWARII (DEC-16). `apply.yml` wyzwala sie na push do galezi domyslnej i wykonywal
+    `plan` -> reguly `vpcsc.perimeter` na plan-JSON -> `apply`. Ani jednej bramki TRESCI: schematow,
+    `vpcsc.onboarding` (w tym `control_plane_projects`), budzetu atrybutow, `control_plane_check.py`.
+    Galaz domyslna repo perimetru bywa bez ochrony (funkcja platna na repo prywatnym), wiec commit
+    wypchniety prosto na nia omijal CALY tor `pull_request`. `terraform plan` przepuszczal to na zielono,
+    bo reguly `vpcsc.perimeter` nie wiedza nic o plaszczyznie sterowania.
+
+    Ten test mierzy ZAWIERANIE ZBIOROW, a nie obecnosc slow w pliku: kazda bramka wolana przez tor pull
+    requesta ma byc wolana takze przez mutatora. Zbiory licza sie z plikow, wiec dopisanie bramki tylko
+    do `validate.yml` czerwieni ten test od razu — a to jest jedyny sposob, zeby „te same bramki"
+    zostalo prawda po pierwszej zmianie.
+    """
+    print("\n== bramki na sciezce apply ==")
+
+    def akcje(nazwa: str) -> set:
+        wf = yaml.safe_load((ROOT / ".github/workflows" / nazwa).read_text())
+        return {str(k.get("uses")) for job in (wf.get("jobs") or {}).values()
+                for k in (job.get("steps") or [])
+                if str(k.get("uses", "")).startswith("./.github/actions/")}
+
+    tor_pr = akcje("validate.yml") | akcje("plan.yml")
+    tor_apply = akcje("apply.yml")
+    # PREMISA. Bez niej zawieranie pustego zbioru jest prawdziwe zawsze — czyli test bylby zielony takze
+    # wtedy, gdyby bramki zniknely z obu torow naraz. Dokladnie ta klasa bledu, ktora ten plik tropi.
+    check("premisa: tor pull requesta wola bramki ze wspolnej definicji", len(tor_pr) >= 2, str(tor_pr))
+    check("KAZDA bramka z toru pull requesta jest tez na sciezce mutatora",
+          tor_pr <= tor_apply, f"brakuje na apply: {sorted(tor_pr - tor_apply)}")
+
+    apply_wf = yaml.safe_load((ROOT / ".github/workflows/apply.yml").read_text())
+    joby = apply_wf["jobs"]
+    job_bramek = next((n for n, j in joby.items()
+                       if any(str(k.get("uses", "")).startswith("./.github/actions/")
+                              for k in (j.get("steps") or []))), None)
+    check("apply.yml ma job uruchamiajacy bramki", job_bramek is not None, str(list(joby)))
+
+    job_applikujacy = next((n for n, j in joby.items()
+                            if any("terraform" in str(k.get("run", "")) and " apply " in str(k.get("run", ""))
+                                   for k in (j.get("steps") or []))), None)
+    check("apply.yml ma job wykonujacy terraform apply", job_applikujacy is not None, str(list(joby)))
+
+    if job_bramek and job_applikujacy:
+        needs = joby[job_applikujacy].get("needs")
+        needs = [needs] if isinstance(needs, str) else list(needs or [])
+        # TWARDA zaleznosc, nie kolejnosc krokow: czerwone bramki maja SKASOWAC uruchomienie apply,
+        # a nie zostawic je do przerwania w polowie.
+        check("job applikujacy NIE STARTUJE bez zielonych bramek (needs)",
+              job_bramek in needs, f"needs={needs}")
+        # Job z `environment` nie wykona ani jednego kroku na galezi spoza polityki tego environment —
+        # GitHub odrzuca CALY job. Bramki tresci w tamtym jobie byly by wiec nietestowalne inaczej niz na
+        # zywej granicy; osobny job bez `environment` da sie uruchomic z galezi testowej i ZOBACZYC, ze
+        # odrzuca. To jest jedyny powod, dla ktorego test anty-tautologiczny tej zmiany w ogole istnieje.
+        check("job bramek tresci nie deklaruje environment (da sie go uruchomic z galezi testowej)",
+              "environment" not in joby[job_bramek], str(joby[job_bramek].get("environment")))
+        konta_bramek = [k.get("with", {}).get("service_account") for k in joby[job_bramek]["steps"]
+                        if "google-github-actions/auth" in str(k.get("uses", ""))]
+        # ZERO POSWIADCZEN w jobie bramek tresci: job, ktory sie nie uwierzytelnia, nie moze zmienic
+        # niczego — takze wtedy, gdy ktos dopisze do niego krok. I dziala na kazdej galezi.
+        check("job bramek tresci nie uwierzytelnia sie w chmurze", not konta_bramek, str(konta_bramek))
+
+        # BRAMKI ZYWE TOZSAMOSCIA MUTATORA. Zapytane kontem `plan` opisywalyby swiat widziany przez KOGOS
+        # INNEGO niz konto, ktore za chwile zmieni granice — a roznica wyszlaby dopiero jako czerwony apply.
+        kroki_ap = joby[job_applikujacy]["steps"]
+        zywe = [i for i, k in enumerate(kroki_ap) if str(k.get("uses", "")).endswith("/bramki-zywe")]
+        auth = [i for i, k in enumerate(kroki_ap)
+                if "google-github-actions/auth" in str(k.get("uses", ""))]
+        konta_apply = [kroki_ap[i]["with"]["service_account"] for i in auth]
+        check("bramki zywe stoja w jobie APPLIKUJACYM (ta sama tozsamosc, co mutacja)",
+              len(zywe) == 1, str(zywe))
+        check("job applikujacy uwierzytelnia sie kontem APPLY",
+              konta_apply == ["${{ vars.APPLY_SERVICE_ACCOUNT }}"], str(konta_apply))
+        stosowanie = [i for i, k in enumerate(kroki_ap)
+                      if "terraform" in str(k.get("run", "")) and " apply " in str(k.get("run", ""))]
+        check("bramki zywe wykonuja sie PRZED terraform apply",
+              zywe and stosowanie and zywe[0] < stosowanie[0], f"zywe={zywe} apply={stosowanie}")
+
+    # KONKRETNE bramki, nie sama liczba krokow: to sa te, ktorych brak zmierzono na sciezce apply.
+    kroki_apply = [k for k, _ in kroki_workflow(apply_wf)]
+    tresc = "\n".join(str(k.get("run", "")) for k in kroki_apply)
+    for opis, wzorzec in (
+        ("schematy JSON deklaracji", "check-jsonschema --schemafile schemas/policy.schema.json"),
+        ("reguly vpcsc.onboarding (w tym control_plane_projects)", "--namespace vpcsc.onboarding"),
+        ("testy jednostkowe regul (usunieta regula = czerwono)", "conftest verify --policy policy"),
+        ("budzet atrybutow", "tools/attribute_budget.py"),
+        ("control_plane_check.py offline", "python3 tools/control_plane_check.py\n"),
+        ("control_plane_check.py --live", "tools/control_plane_check.py --live"),
+        ("lista uslug wspieranych przez VPC-SC (zywa)", "tools/check_supported_services.py"),
+        ("reguly vpcsc.perimeter na plan-JSON", "--namespace vpcsc.perimeter"),
+    ):
+        check(f"sciezka apply uruchamia: {opis}", wzorzec in tresc, wzorzec)
+
+
 def test_boundary_probe() -> None:
     """Sonda blokady — jedyny workflow, ktorego wynik jest ZDANIEM O SWIECIE, a nie o konfiguracji.
 
@@ -3552,6 +3721,7 @@ def main() -> int:
     test_eksperyment_wyscigu()
     test_workflows()
     test_workflowy_wykonywalne()
+    test_bramki_na_sciezce_apply()
     test_boundary_probe()
     test_schemas()
 

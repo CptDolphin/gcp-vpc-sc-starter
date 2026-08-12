@@ -16,8 +16,25 @@
 #     it with an eTag, so two parallel applies do not corrupt anything silently: the loser fails with
 #     `Error 400: The eTag provided ... does not match`. The reason to serialize is RELIABILITY — without it
 #     roughly every overlapping run fails and has to be retried by hand (measured, see DEC-6).
-#   * the policy gates run AGAIN here, on the plan built from the default branch — see the step below. A
-#     gate that only runs on the pull request protects the pull request, not the boundary.
+#   * KAŻDA bramka biegnie tu jeszcze raz — nie tylko reguły OPA na planie. Bramka, która stoi wyłącznie
+#     na torze `pull_request`, chroni pull requesta, a nie granicę: gałąź domyślna bywa bez ochrony
+#     (funkcja płatna na repo prywatnym), więc commit wypchnięty prosto na nią omija tamten tor w całości.
+#     Zmierzone: bramka `control_plane_projects` — jedyna kontrola przed awarią, której `git revert` NIE
+#     cofa — stała wyłącznie w `validate.yml`, a `terraform plan` przepuszczał tę zmianę na zielono, bo
+#     reguły `vpcsc.perimeter` nie wiedzą nic o płaszczyźnie sterowania. DEC-16.
+#
+# BRAMKI STOJĄ W DWÓCH MIEJSCACH I PODZIAŁ NIE JEST ESTETYCZNY — idzie po TOŻSAMOŚCI:
+#   * bramki TREŚCI (schematy, `vpcsc.onboarding`, budżet, guardy) w osobnym jobie `bramki`, BEZ
+#     poświadczeń i BEZ `environment`. Job z `environment` nie wykonuje ani jednego kroku na gałęzi spoza
+#     polityki tego environment — GitHub odrzuca CAŁY job. Bramki treści umieszczone w jobie applikującym
+#     byłyby więc nietestowalne inaczej niż na żywej granicy; tutaj wystarczy `workflow_dispatch` z gałęzi
+#     testowej, żeby ZOBACZYĆ, że odrzucają. `needs:` jest twarde — job `apply` wtedy nie startuje wcale;
+#   * bramki ŻYWE (czytające API) W JOBIE APPLIKUJĄCYM, tożsamością `apply` — czyli tą, która za chwilę
+#     zmieni granicę. Bramka pytająca innym kontem opisuje świat widziany przez kogoś innego niż mutator.
+#     Cena jest realna i nazwana wprost: `terraform apply` zaczyna od REFRESHU, więc jest nadzbiorem
+#     planu, a każde wywołanie API dołożone tutaj ten nadzbiór powiększa. Uprawnienie, którego kontu
+#     `apply` zabraknie, nie osłabia granicy — ZATRZYMUJE jedyną drogę wdrożenia. Dlatego zmiana w tym
+#     miejscu wymaga sprawdzenia grantów w `iam-bootstrap`, a nie tylko zielonego pull requesta.
 
 name: apply
 
@@ -35,6 +52,11 @@ permissions:
   # przez WIF, nie przez ten token.
   contents: write
   id-token: write
+  # `actions: read` — job `bramki` pobiera artefakt `violations` z ostatniego raportu naruszeń, dokładnie
+  # tak samo jak `validate.yml`. BEZ TEGO UPRAWNIENIA bramki na ścieżce apply byłyby ostrzejsze niż te,
+  # które przepuściły pull requesta: mapa `violations_last_window` zostałaby pusta, a `promotion_gate`
+  # odrzuca `stage: enforced` bez wpisu — czyli KAŻDA zmergowana promocja przestałaby być stosowana.
+  actions: read
 
 # cancel-in-progress MUST stay false: cancelling an apply mid-flight leaves the policy half-written.
 concurrency:
@@ -42,9 +64,30 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # TEN SAM ZESTAW BRAMEK TREŚCI, CO NA PULL REQUEŚCIE — z jednej definicji, nie z kopii.
+  #
+  # ZERO POŚWIADCZEŃ, I TO JEST WŁASNOŚĆ, NIE OSZCZĘDNOŚĆ. Ten job nie uwierzytelnia się w chmurze, więc
+  # nie może zmienić niczego — także wtedy, gdy ktoś dopisze do niego krok. Uruchamia się przy tym na
+  # KAŻDEJ gałęzi, bo nie zależy ani od environment, ani od tożsamości: to jedyny powód, dla którego
+  # zdanie „ta bramka odrzuca projekt płaszczyzny sterowania" da się ZOBACZYĆ na gałęzi testowej,
+  # zamiast twierdzić, że tak będzie na żywej granicy.
+  bramki:
+    name: bramki treści (te same, co na pull requeście)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: ./.github/actions/bramki-tresci
+        with:
+          token_gh: ${{ github.token }}
+
   apply:
     name: terraform apply
     runs-on: ubuntu-latest
+    # TWARDA ZALEŻNOŚĆ, nie kolejność kroków: czerwone bramki = ten job w ogóle nie startuje, więc żaden
+    # `terraform apply` nie ma jak się wykonać. To jest cała różnica między „bramka jest w pipelinie"
+    # a „bramka stoi na ścieżce mutatora".
+    needs: bramki
     environment: perimeter-apply # this is what puts the environment claim into the OIDC token — see header
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -62,6 +105,25 @@ jobs:
       - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
         with:
           terraform_version: "1.15.5"
+
+      # BRAMKI ŻYWE — TĄ SAMĄ TOŻSAMOŚCIĄ, KTÓRA ZA CHWILĘ ZMIENI GRANICĘ, i to jest ich sedno.
+      #
+      # Te dwie bramki pytają API, jak wygląda rzeczywistość (które usługi VPC-SC wspiera; do jakiego
+      # projektu należy bucket stanu). Na pull requeście pyta konto `plan`; TUTAJ pyta konto `apply` —
+      # czyli dokładnie ta tożsamość, której odpowiedzi za moment zdecydują o kształcie granicy. Gdyby
+      # pytało konto read-only, bramka opisywałaby świat widziany przez KOGOŚ INNEGO niż mutator, a różnicę
+      # zobaczylibyśmy dopiero jako czerwony apply — czyli tam, gdzie już nie ma czego sprawdzać.
+      #
+      # DLACZEGO PRZED `plan on main`, a nie po: obie są tańsze niż plan i żadna nie potrzebuje planu.
+      # `check_supported_services.py` łapie usługę, na której `apply` pada na obiekcie org-plane — im
+      # wcześniej, tym mniej zostaje po sobie. Bramka stoi też PRZED wzięciem zamka stanu.
+      #
+      # ZNANY WARUNEK KONIECZNY (sprawdzony w kodzie `iam-bootstrap`, nie założony): konto `apply` ma
+      # `roles/storage.legacyBucketReader` na buckecie stanu — czyli `storage.buckets.get`, z którego żyje
+      # `control_plane_check.py --live`. Nadaje je ten sam `for_each`, co kontu `plan`. Zdejmij ten grant,
+      # a zatrzymasz apply — nie dlatego, że bramka jest zła, tylko dlatego, że apply przestaje widzieć
+      # własny stan.
+      - uses: ./.github/actions/bramki-zywe
 
       # We re-plan on main and apply that plan. WHY not reuse the PR artifact: main may have moved between
       # review and merge (another division's PR), and applying a stale plan would silently revert it.

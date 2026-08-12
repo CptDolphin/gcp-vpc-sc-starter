@@ -142,7 +142,7 @@ pominięte świadomie** — zapisane tutaj, żeby „nie ma tego" nie było mylo
 | **Scoped policies** (`--scopes=folders/…`) | Byłyby naturalną odpowiedzią na „każda dywizja rządzi swoim" i usuwałyby wyścig z DEC-6 — zamyka je ta sama wytyczna o jednym perimetrze. Zostają jako **środowisko testowe** (`docs/2` §4a). |
 | `vpcAccessibleServices` per członek | To pole jest własnością perimetru, nie członka — jedna lista dla całej granicy. Per-member wymagałoby wielu perimetrów. |
 | Globalny „kill-switch" wyłączający egzekwowanie całego perimetru | Wygląda na oczywisty lever incydentowy, ale rollback już istnieje i jest lepszy: `git revert` złej zmiany + apply (jeden PR, historia zachowana). Switch dokładałby **globalny wyłącznik ochrony całej organizacji** — czyli nowy blast-radius w imię oszczędzenia kilku minut. Awaryjne wyjęcie POJEDYNCZEGO członka robi `break-glass.yml`. |
-| Promocja komendą `perimeters dry-run enforce` | Commituje CAŁĄ konfigurację dry-run naraz. Przy jednym perimetrze = promocja wszystkich dywizji jednym wywołaniem. Guard `no-dry-run-commit` w `validate.yml` nie dopuszcza jej do workflow ani skryptów. |
+| Promocja komendą `perimeters dry-run enforce` | Commituje CAŁĄ konfigurację dry-run naraz. Przy jednym perimetrze = promocja wszystkich dywizji jednym wywołaniem. Guard `no-dry-run-commit` (w `.github/actions/bramki-tresci`, wołany przez PR i przez apply) nie dopuszcza jej do workflow ani skryptów. |
 
 Każda pozycja to decyzja odwracalna: dołożenie pola do renderera jest zmianą na kilkanaście linii w
 `terraform/`, plus wpis w schemacie i test. Kolejność jest odwrotna niż zwykle — najpierw przypadek użycia,
@@ -152,4 +152,4 @@ potem knob.
 
 `terraform` 1.15.5 · `conftest` (OPA) · `tflint` 0.63.1 (`tflint --init` raz, po plugin google) · `python3`
 z `pyyaml` · opcjonalnie `actionlint`, `check-jsonschema`. Wszystkie wersje są w `.tool-versions`, a CI
-instaluje je sam w `validate.yml` — lokalny brak narzędzia daje w selfteście SKIP z nazwą, nie ciche zielone.
+instaluje je sam w `.github/actions/bramki-tresci` — lokalny brak narzędzia daje w selfteście SKIP z nazwą, nie ciche zielone.
