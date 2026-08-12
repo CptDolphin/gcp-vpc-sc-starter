@@ -21,7 +21,7 @@
 #     (funkcja płatna na repo prywatnym), więc commit wypchnięty prosto na nią omija tamten tor w całości.
 #     Zmierzone: bramka `control_plane_projects` — jedyna kontrola przed awarią, której `git revert` NIE
 #     cofa — stała wyłącznie w `validate.yml`, a `terraform plan` przepuszczał tę zmianę na zielono, bo
-#     reguły `vpcsc.perimeter` nie wiedzą nic o płaszczyźnie sterowania. DEC-14.
+#     reguły `vpcsc.perimeter` nie wiedzą nic o płaszczyźnie sterowania. DEC-16.
 #
 # BRAMKI STOJĄ W DWÓCH MIEJSCACH I PODZIAŁ NIE JEST ESTETYCZNY — idzie po TOŻSAMOŚCI:
 #   * bramki TREŚCI (schematy, `vpcsc.onboarding`, budżet, guardy) w osobnym jobie `bramki`, BEZ

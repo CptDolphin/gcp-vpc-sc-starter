@@ -1,6 +1,6 @@
-# Decyzje, na których stoi ten starter (DEC-1…DEC-13)
+# Decyzje, na których stoi ten starter (DEC-1…DEC-15)
 
-Trzynaście rozstrzygnięć, które określają kształt repozytorium. Kod odsyła tutaj skrótem `DEC-1`…`DEC-13` — jeśli komentarz
+Piętnaście rozstrzygnięć, które określają kształt repozytorium. Kod odsyła tutaj skrótem `DEC-1`…`DEC-15` — jeśli komentarz
 w pliku mówi „(DEC-4)", to znaczy: „powód tej linijki jest opisany w DEC-4, nie zmieniaj jej bez przeczytania".
 
 Każda pozycja ma tę samą strukturę: **decyzja** · **dlaczego** · **co odrzucono i dlaczego**. Odrzucone warianty są
@@ -689,7 +689,7 @@ po stronie Google. Alerty z metryk (`alerts.tf`) — nie: zapis idzie z GitHuba,
 z nich zamilkną, a czwarty (`apply`) ODPALI warunkiem o braku danych, i będzie to prawda, bo w tym samym
 momencie apply też nie zadziała (stan leży w tym samym projekcie). **Ryzyko szczątkowe nazwane wprost:**
 skasowanie projektu monitoringu albo wyłączenie mu billingu nie odpala niczego. Zamknięcie tej luki wymaga
-obserwatora poza organizacją i świadomie nie wchodzi tutaj.
+obserwatora poza organizacją — i jest przedmiotem osobnej decyzji, **DEC-14**.
 
 **Odrzucone.**
 - *Nasłuch na `workflow_run` z `conclusion: failure` (GitHub → webhook → alert).* Najprostsze i najczęściej
@@ -714,9 +714,118 @@ obserwatora poza organizacją i świadomie nie wchodzi tutaj.
   z `alignment_period` w politykach — okno krótsze od kadencji daje puste kubełki, w których żaden warunek
   nie utrzyma się przez wymagany czas.
 
+## DEC-14 — Ostatnią warstwą obserwacji jest dead-man's-switch POZA tą organizacją, a jego poświadczenie mieszka w repozytorium perimetru
+
+**Decyzja.** Job `publish` w `watch.yml` wysyła po udanej publikacji metryk jeden `GET` na URL checka
+u zewnętrznego dostawcy dead-man's-switch. Dostawca alarmuje własnym kanałem, gdy sygnał ustanie. URL to
+**sekret repozytorium** `DMS_PING_URL` — poziom repozytorium, nie environment — podawany **wyłącznie**
+jobowi `publish`. Okno ciszy u dostawcy jest związane z `watchdog_absent_seconds` (period = kadencja
+`watch.yml`, grace = 2× kadencja). Brak sekretu nie wywraca przebiegu, ale melduje się adnotacją
+i wierszem w podsumowaniu. Bramka `heartbeat DMS we właściwym jobie` w `validate.yml` pilnuje konstrukcji.
+
+**Dlaczego w ogóle piąta warstwa, skoro DEC-13 ma warunek na brak danych.** Bo warunek o BRAKU danych też
+jest ewaluowany przez silnik, który stoi **w tym samym projekcie** co stan Terraform, pula WIF i buckety
+kontraktów. Cztery polityki alertów odpowiadają na pytanie „czy maszyneria działa"; żadna nie odpowiada na
+pytanie „czy projekt, w którym te pytania są zadawane, jeszcze istnieje". Skasowanie projektu albo
+wyłączenie mu billingu nie odpala niczego — nie ma czego ewaluować. Zostaje cisza nieodróżnialna od
+zdrowia, i to na granicy bezpieczeństwa: przez ten czas review, `git revert` i raport zgodności mówią
+o konfiguracji, o której nikt nie wie, czy jest w chmurze. Obserwator, który umiera razem z obserwowanym,
+nie jest obserwatorem — jest jego częścią.
+
+**Dlaczego ping za publikacją, a nie na starcie joba.** Ma znaczyć „cały łańcuch żyje", nie „runner
+wstał". Wysłany na końcu dowodzi po kolei: GitHub odpalił workflow → `measure` odczytał stan Terraform
+z bucketa w projekcie monitoringu → dostawca tożsamości wydał token → `timeSeries.create` przeszedł.
+Pęknięte którekolwiek ogniwo = brak pingu = obserwator odzywa się sam. Ping wysyłany wcześniej meldowałby
+zdrowie martwej maszynerii, czyli robiłby dokładną odwrotność tego, po co warstwa istnieje.
+
+**Dlaczego cisza jest jedynym sygnałem — bez pingu `/fail`.** Kolizja blokady stanu z trwającym `apply`
+wywraca `measure` CELOWO i jest zdarzeniem znanym, tolerowanym i samonaprawialnym. Ping porażki alarmowałby
+na nim natychmiast, czyli nauczyłby dyżurnego ignorować kanał, który ma odezwać się raz na nigdy. Ceną jest
+związanie okna: musi tolerować dwa pominięte przebiegi, stąd grace = 2× kadencja i ta sama liczba co
+`watchdog_absent_seconds`. Trzy liczby (cron, okno u dostawcy, próg w `alerting.yaml`) opisują JEDNĄ
+decyzję i zmieniają się razem.
+
+**Dlaczego sekret w repozytorium, a nie w magazynie sekretów w chmurze.** Konsumentem jest runner GitHuba.
+Każde ogniwo pośrednie — magazyn w chmurze, klaster, pośrednik — dokłada rzecz, która może paść sama
+z siebie i wyprodukować alarm o granicy wtedy, gdy granica ma się dobrze. Gorzej: magazyn **wewnątrz tej
+samej organizacji** znika razem z projektem, czyli w dokładnie tym scenariuszu, dla którego warstwa
+powstała. Poziom repozytorium, a nie environment, bo `watch` nie używa żadnego environment, a environment
+z wymaganym recenzentem zatrzymałby heartbeat na review — dead-man's-switch czekający na zatwierdzenie
+melduje śmierć, której nie ma.
+
+**Dlaczego sekret NIE trafia do joba `measure`.** URL pingu jest poświadczeniem: kto go ma, ten potrafi
+UCISZYĆ dead-man's-switch. `measure` chodzi na koncie `plan`, impersonowalnym z każdego pull requesta —
+sekret podany tam pozwoliłby autorowi dowolnego PR-a podtrzymywać heartbeat przy martwej maszynerii. To ta
+sama granica, dla której `watch.yml` w ogóle ma dwa joby (DEC-13), więc łamiąc ją tutaj, unieważnia się ją
+i tam. Dlatego pilnuje jej bramka czytająca zparsowany YAML, a nie komentarz.
+
+**Brak sekretu = degradacja bezpieczna, ale WIDOCZNA.** Przebieg nie pada — metryki są zapisane, cztery
+alerty działają. Ale cicho nieuzbrojony dead-man's-switch to kontrola obecna w konfiguracji i nieosiągalna
+w działaniu, czyli spokój wzięty z niczego. Stąd adnotacja i wiersz w podsumowaniu zamiast `echo` ginącego
+w logu. Kolejność uzbrajania też jest samosprawdzająca: check założony PRZED wpięciem sekretu zaczyna
+odliczać od razu, więc uzbrojenie porzucone w połowie zgłasza się samo.
+
+**Odrzucone.**
+- *Piąty alert w Cloud Monitoring — cokolwiek by mierzył.* Każda polityka w tym projekcie dzieli los
+  projektu. Nie da się zbudować wewnątrz obiektu kontroli nad jego zniknięciem.
+- *Alert w DRUGIM projekcie tej samej organizacji.* Tańszy i pozornie wystarczający, ale nie pokrywa
+  scenariuszy organizacyjnych (zawieszone konto rozliczeniowe, wyłączony billing na poziomie konta,
+  utrata dostępu do organizacji), a te są dokładnie tą klasą zdarzeń, której nie widać od środka.
+- *Nasłuch po stronie dostawcy na „workflow failed" zamiast heartbeatu.* Ta sama wada co w DEC-13, tylko
+  przeniesiona na zewnątrz: przebieg, który się nie odpalił, nie generuje zdarzenia. Heartbeat mierzy stan.
+- *Ping `/start` i `/fail` obok pingu sukcesu.* Daje ładniejszy wykres czasu trwania i alarmuje szybciej —
+  na zdarzeniach, które są tolerowane z założenia. Kanał, który odzywa się przy normalnej pracy, przestaje
+  być kanałem ostatniej instancji.
+- *Ping z joba `measure`, „bo i tak zawsze się wykonuje".* Właśnie dlatego nie: zawsze się wykonuje, więc
+  meldowałby zdrowie także wtedy, gdy publikacja metryk pada. Plus sekret w jobie impersonowalnym z PR-a.
+- *Heartbeat z osobnego workflowa na tym samym cronie.* Wysyłałby ping niezależnie od tego, czy `watch`
+  cokolwiek zmierzył — czyli mierzyłby dostępność GitHub Actions, a nie żywotność maszynerii granicy.
+
 ---
 
-## DEC-14 — Bramka należy do MUTATORA, nie do zdarzenia `pull_request`
+---
+
+## DEC-15 — `combining_function: OR` wymaga napisanego powodu; pusty warunek nie jest już doklejany
+
+**Decyzja.** Access level z `combining_function: OR` musi nieść pole `or_reason` (min. 20 znaków) i mieć co
+najmniej dwa warunki do połączenia; poziom bez ani jednego warunku jest odrzucany. Renderuje to trzy niezależne
+warstwy: `schemas/access-level.schema.json` (`if/then/else`), reguły `vpcsc.onboarding` na deklaracjach
+i `precondition` w `terraform/perimeter.tf`. Osobno: renderer przestał wysyłać PUSTY warunek do poziomu
+złożonego wyłącznie z `required_access_levels`.
+
+**Dlaczego.** Dwa problemy tej samej klasy — „wygląda inaczej, niż działa".
+
+*OR.* `combiningFunction` łączy warunki poziomu. Przy `AND` poziom `corp_network_and_region` znaczy „region PL/DE
+**oraz** korpo-sieć". Przestawienie jednego słowa na `OR` daje „region PL/DE **albo** korpo-sieć", czyli wpuszcza
+dowolny adres z regionu — a diff to jedna linia wyglądająca na przeredagowanie. Po stronie API nie ma na czym
+oprzeć wykrycia: ZMIERZONE na żywym ACM (2026-08-11), `POST` z `combiningFunction: OR` na poziomie złożonym
+kończy się `200` i tą samą wartością w odpowiedzi, bez ostrzeżenia i bez śladu, że polityka osłabła.
+`or_reason` zamienia jednosłowny diff w zdanie o osłabieniu — recenzent czyta powód zamiast domyślać się intencji.
+
+*Pusty warunek.* Blok `conditions` renderował się bezwarunkowo, więc kompozycja bez własnych atrybutów dostawała
+doklejony warunek `{}`, a ACM odrzucał całość jako `AccessLevel definition has a trivial condition`. Materiał
+zapisał ten wynik jako właściwość API („kompozycja musi nieść własny warunek") i na tej podstawie blokował
+`corp_network AND corp_managed_device` — najmocniejszy wariant dostępu człowieka. ZMIERZONE: ten sam poziom
+wysłany surowym `POST`-em (`{"basic":{"conditions":[{"requiredAccessLevels":[…]}]}}`) POWSTAJE. Ograniczenie
+było nasze. Po poprawce `dynamic "conditions"` renderuje dokładnie jeden warunek — i dopiero teraz brak
+warunków w ogóle nie ma żadnej bariery po stronie API, dlatego pojawia się `precondition` na ten przypadek.
+
+**Co odrzucono i dlaczego.**
+- *Zakaz `OR`.* Wzorzec „korpo-sieć **albo** zarządzane urządzenie" jest poprawny i częsty (laptop na
+  zarządzanym sprzęcie pracuje spoza sieci firmowej). Zakaz wypchnąłby go do `custom_expression`, czyli do
+  wyrażenia CEL — nieporównywalnie trudniejszego do zaudytowania niż lista warunków.
+- *Flaga `or_is_intentional: true` zamiast tekstu.* Boolean odhacza się bez myślenia i nie zostawia w pliku
+  żadnej informacji dla następnego czytelnika. To samo rozstrzygnięcie co przy `control_plane_exception`.
+- *Bramka wyłącznie na plan-JSON (`vpcsc.perimeter`), zgodnie z zasadą „waliduj plan, nie YAML".* Reguły planu
+  dostają `--data perimeter/policy.yaml`, a nie katalog poziomów, więc nie widziałyby `or_reason` — furtka
+  byłaby niewyrażalna. `precondition` renderera daje tę samą własność (leży NA ścieżce planu i apply,
+  nie da się go pominąć nie uruchamiając conftesta) i widzi deklarację razem z uzasadnieniem.
+- *Ostrzeżenie zamiast odmowy przy `OR` na jednym warunku.* Taki zapis nic nie robi, więc kusi, żeby go
+  tolerować. Ożywa jednak w dniu, w którym ktoś dołoży `required_access_levels`: osłabienie wchodzi wtedy
+  bez żadnego diffu przy `combining_function`, bo to słowo stało w pliku od dawna.
+---
+
+## DEC-16 — Bramka należy do MUTATORA, nie do zdarzenia `pull_request`
 
 **Decyzja.** Wszystkie bramki treści (schematy JSON, reguły `vpcsc.onboarding` wraz z
 `control_plane_projects`, testy jednostkowe reguł, budżet atrybutów, guardy repozytorium) oraz obie bramki

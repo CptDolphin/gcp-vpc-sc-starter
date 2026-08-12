@@ -55,7 +55,7 @@ jobs:
       # WSZYSTKIE bramki treści są W JEDNYM MIEJSCU, wołanym też przez `apply.yml`. Rozpisane tutaj jako
       # kroki byłyby kopią, a kopia rozjeżdża się przy pierwszej zmianie — i wtedy wraca defekt, który ten
       # układ zamyka: bramka stojąca obok ścieżki, którą realnie zmienia się granicę (patrz nagłówek
-      # `.github/actions/bramki-tresci/action.yml` i DEC-14).
+      # `.github/actions/bramki-tresci/action.yml` i DEC-16).
       - uses: ./.github/actions/bramki-tresci
         with:
           token_gh: ${{ github.token }}

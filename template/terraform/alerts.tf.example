@@ -26,10 +26,14 @@
 #   * CZWARTY — `vpcsc_apply_stale` — ODPALI, bo jego drugi warunek to BRAK danych. To nie jest fałszywy
 #     alarm: w tym samym momencie apply też nie działa (Terraform zapisuje stan do GCS wewnątrz granicy),
 #     więc „nie umiem potwierdzić, że Git == chmura" jest wtedy prawdą, a nie artefaktem;
-#   * czego to NIE pokrywa i co zostaje jawnym ryzykiem szczątkowym: skasowanie projektu monitoringu albo
-#     wyłączenie mu billingu. Wtedy nie ma czego ewaluować i nie odpali NIC. Zamknięcie tej luki wymaga
-#     obserwatora poza tą organizacją (dead-man's-switch u zewnętrznego dostawcy) — świadomie nie tutaj,
-#     bo wymaga poświadczenia, którego ten stack nie posiada.
+#   * czego ŻADEN alert w tym pliku nie pokrywa: skasowanie projektu monitoringu albo wyłączenie mu
+#     billingu. Wtedy nie ma czego ewaluować i nie odpali NIC — również `condition_absent`, bo warunek
+#     o braku danych też potrzebuje żywego silnika ewaluacji. TĘ LUKĘ ZAMYKA PIĄTA WARSTWA, POZA TYM
+#     PLIKIEM I POZA TĄ ORGANIZACJĄ: `watch.yml` wysyła po udanej publikacji metryk heartbeat do
+#     dead-man's-switcha u zewnętrznego dostawcy, a ten alarmuje sam, gdy sygnał ustanie. Okno ciszy jest
+#     ZWIĄZANE z `watchdog_absent_seconds` (3 h = trzy przebiegi). Procedura, triage i test negatywny:
+#     `docs/7-alerty.md#dms-zewnetrzny`. Warstwa jest OPCJONALNA z konstrukcji — bez sekretu
+#     `DMS_PING_URL` `watch` chodzi dalej, tylko głośno melduje, że jest nieuzbrojona.
 # WNIOSEK, KTÓRY TRZEBA ZAPISAĆ PRZED WŁĄCZENIEM GRANICY WOKÓŁ TEGO PROJEKTU: albo `monitoring.project_id`
 # zostaje poza konfiguracją egzekwowaną, albo dostaje regułę ingress dopuszczającą zapis metryk z CI.
 # Wybór jest decyzją architekta, ale MUSI być świadomy — dlatego stoi tutaj, a nie w README.

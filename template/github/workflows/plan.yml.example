@@ -77,7 +77,7 @@ jobs:
 
       # Bramki żywe — jedyne w pipelinie, które rozmawiają z API. Definicja stoi w jednym miejscu, bo woła
       # je także job bramek w `apply.yml`: pull request i mutator mają dostawać DOKŁADNIE ten sam zestaw,
-      # a dwie kopie tych samych dwóch kroków rozjeżdżają się przy pierwszej zmianie (DEC-14).
+      # a dwie kopie tych samych dwóch kroków rozjeżdżają się przy pierwszej zmianie (DEC-16).
       # Tożsamość wybiera WYWOŁUJĄCY — tutaj konto `plan`, uwierzytelnione krokiem wyżej.
       - uses: ./.github/actions/bramki-zywe
 

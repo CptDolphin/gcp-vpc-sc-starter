@@ -388,6 +388,73 @@ contributor_allows(repo, project) if {
 	project in c.allowed_projects
 }
 
+# --- access levels ----------------------------------------------------------------------------------
+# Access level jest warunkiem, pod którym ruch spoza granicy jest wpuszczany. Poziom zbyt szeroki jest
+# GORSZY niż jego brak, bo w regule wygląda jak kontrola. Reguły niżej pilnują tych osłabień poziomu, które
+# nie wyglądają na osłabienie w diffie — API przyjmuje każde z nich bez ostrzeżenia (zmierzone na żywym ACM).
+
+# `combining_function: OR` łączy warunki ALTERNATYWĄ. Diff to jedno słowo, a polityka po nim jest inna:
+# „region PL/DE ORAZ korpo-sieć" zamienia się w „region PL/DE ALBO korpo-sieć", czyli wpuszcza dowolny adres
+# z regionu. Nie zakazujemy tego — „korpo-sieć ALBO zarządzane urządzenie" to poprawny wymóg — ale żądamy
+# ZDANIA w pliku. Recenzent ma przeczytać powód osłabienia, a nie domyślać się intencji z jednego słowa.
+deny contains msg if {
+	some name, al in object.get(input, "access_levels", {})
+	object.get(al, "combining_function", "AND") == "OR"
+	count(object.get(al, "or_reason", "")) < 20
+	msg := sprintf(
+		"access-levels[%s]: `combining_function: OR` czyni z warunków alternatywę (słabsza polityka) — dopisz `or_reason` (min. 20 znaków)",
+		[name],
+	)
+}
+
+# Uzasadnienie bez OR to napis, który przeżył powrót do AND. W review wygląda na aktualny opis polityki
+# i uczy czytać `or_reason` jako ozdobnik, a nie jako sygnał osłabienia.
+deny contains msg if {
+	some name, al in object.get(input, "access_levels", {})
+	count(object.get(al, "or_reason", "")) > 0
+	object.get(al, "combining_function", "AND") != "OR"
+	msg := sprintf(
+		"access-levels[%s]: `or_reason` bez `combining_function: OR` — usuń uzasadnienie albo ustaw OR",
+		[name],
+	)
+}
+
+# OR przy jednym warunku nie robi NIC: `combiningFunction` łączy warunki między sobą, a atrybuty wewnątrz
+# jednego warunku są ANDowane zawsze. Taki zapis wygląda w pliku na decyzję, jest nieporozumieniem — i ożywa
+# jako niezamierzone osłabienie w dniu, w którym ktoś dołoży `required_access_levels`. Renderer produkuje
+# dokładnie dwa warunki: bezpośredni (gdy poziom ma własne atrybuty) i kompozycyjny.
+deny contains msg if {
+	some name, al in object.get(input, "access_levels", {})
+	object.get(al, "combining_function", "AND") == "OR"
+	not poziom_ma_dwa_warunki(al)
+	msg := sprintf(
+		"access-levels[%s]: `combining_function: OR` przy jednym warunku nic nie zmienia (OR łączy warunki, nie atrybuty) — usuń je albo dołóż drugi warunek",
+		[name],
+	)
+}
+
+# Poziom bez ani jednego warunku nie sprawdza niczego, a w regule ingress wygląda tak samo jak każdy inny.
+# Do 2026-08 chronił nas przed nim przypadek: renderer wysyłał wtedy pusty warunek, a API odrzucało go jako
+# `trivial condition`. Po naprawie tamtego kształtu (pusty warunek blokował LEGALNĄ kompozycję) ta ścieżka
+# nie ma już bariery po stronie API — więc bariera stoi tutaj i w `precondition` renderera.
+deny contains msg if {
+	some name, al in object.get(input, "access_levels", {})
+	not poziom_ma_warunek_bezposredni(al)
+	count(object.get(al, "required_access_levels", [])) == 0
+	count(object.get(al, "custom_expression", "")) == 0
+	msg := sprintf("access-levels[%s]: poziom bez jakiegokolwiek warunku — nie ogranicza niczego", [name])
+}
+
+poziom_ma_warunek_bezposredni(al) if {
+	some pole in ["ip_subnetworks", "members", "regions", "negate", "device_policy"]
+	object.get(al, pole, null) != null
+}
+
+poziom_ma_dwa_warunki(al) if {
+	poziom_ma_warunek_bezposredni(al)
+	count(object.get(al, "required_access_levels", [])) > 0
+}
+
 # --- reguły baseline ---------------------------------------------------------------------------------
 # Reguła stosowana do WSZYSTKICH członków bez warunku kontekstu to realne poszerzenie granicy. Dopuszczamy
 # to (skaner woła z własnej infrastruktury i nie spełni korpo-access-levelu), ale wyłącznie JAWNIE — pole

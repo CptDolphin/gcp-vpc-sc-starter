@@ -124,7 +124,7 @@ def bootstrap() -> None:
         "perimeter/alerting.yaml", "schemas/alerting.schema.json",
         ".github/workflows/watch.yml",
         # Bramki treści i bramki żywe jako akcje złożone: JEDNA definicja, wołana przez tor pull requesta
-        # (`validate.yml`/`plan.yml`) i przez mutatora (`apply.yml`). Patrz DEC-14.
+        # (`validate.yml`/`plan.yml`) i przez mutatora (`apply.yml`). Patrz DEC-16.
         ".github/actions/bramki-tresci/action.yml", ".github/actions/bramki-zywe/action.yml",
         ".tflint.hcl", ".github/dependabot.yml", "tests/README.md",
         "tests/snow-approved.json", "tests/snow-not-approved.json", "tests/snow-self-approved.json",
@@ -1918,7 +1918,7 @@ def test_lint_and_pinning() -> None:
     #
     # `.github/actions/*/action.yml` JEST na tej liście, bo akcje złożone też wołają akcje obce (bramki
     # treści pobierają `setup-python`). Lista, która ich nie obejmuje, zostawiłaby bez guardu pliki
-    # wykonujące najwięcej — a to ta sama luka, którą zamyka DEC-14, tylko o piętro niżej.
+    # wykonujące najwięcej — a to ta sama luka, którą zamyka DEC-16, tylko o piętro niżej.
     uses = []
     for f in (list((ROOT / ".github/workflows").glob("*.yml"))
               + sorted((ROOT / ".github/actions").glob("*/action.yml"))
@@ -1996,6 +1996,128 @@ def test_acm_naming() -> None:
     for rule in policy.get("baseline_ingress", []):
         used |= set(rule.get("access_levels", []))
     check("poziomy uzywane w projects.yaml/baseline istnieja w katalogu", used <= known, f"brakuje: {sorted(used - known)}")
+
+
+# --------------------------------------------------- access levels: kompozycja i combining_function
+def test_access_levels_ksztalt() -> None:
+    """Osłabienia access levelu, których NIE WIDAĆ w diffie — i jedno ograniczenie, które było nasze.
+
+    DLACZEGO ten test mierzy PLAN, a nie tekst YAML-a: pytanie brzmi „co poleci do API", a między
+    deklaracją a wywołaniem stoi renderer. Dokładnie tam siedział defekt, przez który materiał przez
+    kilka miesięcy twierdził coś nieprawdziwego o API Google: blok `conditions` renderował się
+    BEZWARUNKOWO, więc poziom złożony wyłącznie z `required_access_levels` dostawał doklejony PUSTY
+    warunek, a ACM odrzucał go jako `AccessLevel definition has a trivial condition`. Wniosek zapisany
+    wtedy w komentarzach („kompozycja musi nieść własny warunek") był wnioskiem o NASZYM kodzie.
+    ZMIERZONE 2026-08-11 na żywym ACM: ten sam poziom wysłany surowym POST-em POWSTAJE bez błędu.
+
+    Druga połowa testu pilnuje `combining_function: OR`. To jest jednosłowny diff, po którym polityka
+    jest SŁABSZA („region ORAZ korpo-sieć" → „region ALBO korpo-sieć"), a API przyjmuje go bez
+    ostrzeżenia (zmierzone: odpowiedź 200 z `combiningFunction: OR`). Każdy negatyw ma tu parę
+    pozytywną — bez niej „bramka odrzuca OR" znaczyłoby tylko „bramka odrzuca wszystko".
+    """
+    print("\n== access levels: kompozycja i combining_function ==")
+    if not have("terraform"):
+        check("terraform dostepny (access levels)", False, "brak terraform na PATH — pomijam")
+        return
+
+    tf = ROOT / "terraform"
+    probe = ROOT / "perimeter/access-levels/zz-selftest-poziomy.yaml"
+    out = "zz_poziomy.tfplan"
+
+    def plan(poziom: str, zapisz: bool = False):
+        probe.write_text("schema_version: 1\naccess_levels:\n" + textwrap.indent(textwrap.dedent(poziom).strip(), "  ") + "\n")
+        cmd = ["terraform", f"-chdir={tf}", "plan", "-no-color", "-input=false", "-lock=false"]
+        if zapisz:
+            cmd.append(f"-out={out}")
+        return sh(cmd)
+
+    kompozycja_bez_wlasnego_warunku = """
+        - name: zz_kompozycja
+          title: "Composition without a condition of its own"
+          combining_function: AND
+          required_access_levels:
+            - corp_network
+    """
+
+    try:
+        # 1. KOMPOZYCJA BEZ WŁASNEGO WARUNKU — legalna po stronie API, więc plan ma przejść…
+        p = plan(kompozycja_bez_wlasnego_warunku, zapisz=True)
+        check("access level: kompozycja bez wlasnego warunku PRZECHODZI plan",
+              p.returncode == 0, p.stdout[-500:] + p.stderr[-700:])
+
+        # …i renderować DOKŁADNIE JEDEN warunek. To jest właściwa asercja: sam zielony plan przeszedłby
+        # także na kodzie doklejającym pusty warunek (Terraform go akceptuje, odrzuca dopiero ACM).
+        warunki = None
+        if p.returncode == 0:
+            s = sh(["terraform", f"-chdir={tf}", "show", "-json", out])
+            if s.returncode == 0:
+                for r in json.loads(s.stdout)["planned_values"]["root_module"].get("resources", []):
+                    if r["type"] == "google_access_context_manager_access_level" and "zz_kompozycja" in r["address"]:
+                        warunki = r["values"]["basic"][0]["conditions"]
+        (tf / out).unlink(missing_ok=True)
+        check("access level: kompozycja renderuje DOKLADNIE JEDEN warunek (bez pustego)",
+              warunki is not None and len(warunki) == 1 and warunki[0].get("required_access_levels"),
+              f"conditions={warunki!r}")
+
+        # 2. OR BEZ UZASADNIENIA — plan ma paść, i to z nazwą poziomu w komunikacie. Bramka, która pada
+        #    z komunikatem o wyrażeniu HCL, nie mówi wnioskodawcy, który poziom poprawić.
+        or_bazowy = """
+            - name: zz_or
+              title: "Region OR corporate network"
+              combining_function: OR
+              {reason}regions: [PL, DE]
+              required_access_levels:
+                - corp_network
+        """
+        p = plan(or_bazowy.format(reason=""))
+        check("access level: OR bez or_reason ODRZUCONY na planie",
+              p.returncode != 0 and "or_reason" in (p.stdout + p.stderr) and "zz_or" in (p.stdout + p.stderr),
+              (p.stdout[-400:] + p.stderr[-400:]))
+
+        # 3. ANTY-TAUTOLOGIA: ten sam OR z napisanym powodem PRZECHODZI. Furtka ma działać — inaczej to
+        #    jest zakaz OR-a, a wtedy poprawny wzorzec „korpo-sieć ALBO zarządzane urządzenie" ucieka
+        #    do `custom_expression`, czyli w miejsce trudniejsze do audytu.
+        p = plan(or_bazowy.format(reason='or_reason: "zarzadzany laptop pracuje spoza korpo-sieci i ma miec dostep"\n              '))
+        check("access level: TEN SAM OR z or_reason PRZECHODZI (anty-tautologia)",
+              p.returncode == 0, p.stdout[-400:] + p.stderr[-700:])
+
+        # 4. Uzasadnienie skrócone do „ok" degeneruje furtkę do pola do odhaczenia.
+        p = plan(or_bazowy.format(reason='or_reason: "bo tak"\n              '))
+        check("access level: OR z uzasadnieniem ponizej progu ODRZUCONY",
+              p.returncode != 0, p.stdout[-300:] + p.stderr[-300:])
+
+        # 5. OR przy JEDNYM warunku nie robi nic — `combiningFunction` łączy warunki, a nie atrybuty
+        #    w jednym warunku. W pliku wygląda jak decyzja i ożywa jako osłabienie w dniu, w którym ktoś
+        #    dołoży `required_access_levels`.
+        p = plan("""
+            - name: zz_or_jeden
+              title: "EU only with a pointless OR"
+              combining_function: OR
+              or_reason: "powod napisany, ale nie ma czego laczyc alternatywa"
+              regions: [DE, FR, NL]
+        """)
+        check("access level: OR przy jednym warunku ODRZUCONY",
+              p.returncode != 0, p.stdout[-300:] + p.stderr[-300:])
+
+        # 6. Poziom bez ANI JEDNEGO warunku. Do naprawy z p.1 chronił nas przed nim przypadek (pusty
+        #    warunek odrzucało API); teraz jedyną barierą jest `precondition`, więc ona musi być mierzona.
+        p = plan("""
+            - name: zz_pusty
+              title: "Level with no condition at all"
+        """)
+        check("access level: poziom bez zadnego warunku ODRZUCONY",
+              p.returncode != 0 and "zz_pusty" in (p.stdout + p.stderr),
+              p.stdout[-300:] + p.stderr[-300:])
+    finally:
+        # Plik-sonda MUSI zniknąć: kolejne testy czytają `perimeter/access-levels/` jako deklaracje repo
+        # i policzyłyby sondę jako poziom materiału.
+        probe.unlink(missing_ok=True)
+        (tf / out).unlink(missing_ok=True)
+
+    # KONTROLA, że sprzątanie zadziałało — inaczej ten test cicho zatruwa wszystkie następne.
+    p = sh(["terraform", f"-chdir={tf}", "plan", "-no-color", "-input=false", "-lock=false"])
+    check("access level: po sprzatnieciu sondy plan repo jest znowu zielony", p.returncode == 0,
+          p.stdout[-300:] + p.stderr[-500:])
 
 
 def test_rego() -> None:
@@ -2244,7 +2366,7 @@ def test_control_plane_lista() -> None:
     check("plan.yml uruchamia control_plane_check.py --live",
           "tools/control_plane_check.py --live" in plan)
     # OBA TORY, NIE JEDEN. Ta bramka chroni przed jedyna awaria, ktorej `git revert` nie cofa — a stala
-    # wylacznie na torze pull requesta, podczas gdy granice zmienia push na galaz domyslna (DEC-14).
+    # wylacznie na torze pull requesta, podczas gdy granice zmienia push na galaz domyslna (DEC-16).
     stosowanie = tekst_wykonywany("apply.yml")
     check("apply.yml uruchamia control_plane_check.py w OBU trybach (offline + --live)",
           "python3 tools/control_plane_check.py\n" in stosowanie
@@ -2951,7 +3073,7 @@ def akcja_lokalna(uses: str):
     """Kroki AKCJI ZLOZONEJ wolanej przez `uses: ./sciezka` — albo None, gdy to nie jest akcja lokalna.
 
     DLACZEGO TO JEST TU, A NIE W KAZDYM TESCIE Z OSOBNA. Odkad bramki tresci mieszkaja w jednym miejscu
-    (`.github/actions/bramki-tresci`, DEC-14), workflow, ktory je uruchamia, ma w tym miejscu JEDEN krok
+    (`.github/actions/bramki-tresci`, DEC-16), workflow, ktory je uruchamia, ma w tym miejscu JEDEN krok
     `uses:` zamiast dwunastu `run:`. Test czytajacy same `jobs[*].steps` przestalby wiec widziec bramki
     — i zielenilby sie na pliku, z ktorego wszystkie usunieto. To ta sama klasa bledu, ktora ten selftest
     tropi gdzie indziej: asercja o KSZTALCIE pliku zamiast o wlasnosci, ktora ma byc prawdziwa.
@@ -3240,6 +3362,33 @@ def test_schemas() -> None:
     _alerting_odrzuca("prog-zaleglosci-ponizej-minimum",
                       lambda d: d["thresholds"].__setitem__("apply_pending_seconds", 60))
 
+    # NEGATYWY DO SCHEMATU ACCESS LEVELI. `combining_function: OR` to jednosłowny diff, po którym warunki
+    # stają się ALTERNATYWĄ — polityka jest słabsza, a wygląda na przeredagowaną. Schemat jest tu pierwszą
+    # z trzech warstw (dalej reguła OPA na deklaracjach i `precondition` renderera); żadna nie jest jedyna,
+    # bo `check-jsonschema` bywa niedostępny lokalnie, a reguły OPA można uruchomić z inną ścieżką.
+    import copy as _copy
+    poziomy_doc = yaml.safe_load((ROOT / "perimeter/access-levels/corp.yaml").read_text())
+
+    def _poziomy_wynik(nazwa: str, mutacja) -> int:
+        zly = _copy.deepcopy(poziomy_doc)
+        mutacja(zly["access_levels"][0])
+        sciezka = ROOT / f"poziomy-{nazwa}.yaml"
+        sciezka.write_text(yaml.safe_dump(zly, sort_keys=False, allow_unicode=True))
+        wynik = sh(["check-jsonschema", "--schemafile", "schemas/access-level.schema.json", sciezka.name], cwd=ROOT)
+        sciezka.unlink(missing_ok=True)
+        return wynik.returncode
+
+    check("schema poziomow ODRZUCA combining_function: OR bez or_reason",
+          _poziomy_wynik("or-bez-powodu", lambda al: al.__setitem__("combining_function", "OR")) != 0)
+    # ANTY-TAUTOLOGIA: ta sama mutacja z uzasadnieniem MUSI przejść, inaczej schemat po prostu zakazuje OR.
+    check("schema poziomow AKCEPTUJE OR z or_reason (anty-tautologia)",
+          _poziomy_wynik("or-z-powodem", lambda al: al.update({
+              "combining_function": "OR",
+              "or_reason": "zarzadzany laptop pracuje spoza korpo-sieci i ma miec dostep"})) == 0)
+    # Uzasadnienie, które przeżyło powrót do AND, w review wygląda na aktualny opis polityki.
+    check("schema poziomow ODRZUCA or_reason bez OR",
+          _poziomy_wynik("powod-bez-or", lambda al: al.__setitem__("or_reason", "zostalo po rewercie i nikt nie usunal")) != 0)
+
     # Furtka `control_plane_exception` musi przejść PRZEZ SCHEMĘ, bo validate.yml sprawdza schematy ZANIM
     # uruchomi reguły OPA (`additionalProperties: false` odrzuciłoby ją wcześniej). Gdyby jej tam brakło,
     # jedyną drogą przy realnej potrzebie byłoby usunięcie projektu z control_plane_projects — czyli
@@ -3344,7 +3493,7 @@ def test_samodzielnosc() -> None:
 def test_bramki_na_sciezce_apply() -> None:
     """Czy bramka stoi tam, gdzie NAPRAWDE zmienia sie granica — czy tylko obok.
 
-    ZMIERZONY TRYB AWARII (DEC-14). `apply.yml` wyzwala sie na push do galezi domyslnej i wykonywal
+    ZMIERZONY TRYB AWARII (DEC-16). `apply.yml` wyzwala sie na push do galezi domyslnej i wykonywal
     `plan` -> reguly `vpcsc.perimeter` na plan-JSON -> `apply`. Ani jednej bramki TRESCI: schematow,
     `vpcsc.onboarding` (w tym `control_plane_projects`), budzetu atrybutow, `control_plane_check.py`.
     Galaz domyslna repo perimetru bywa bez ochrony (funkcja platna na repo prywatnym), wiec commit
@@ -3563,6 +3712,7 @@ def main() -> int:
     test_brownfield()
     test_external_egress_and_guard()
     test_acm_naming()
+    test_access_levels_ksztalt()
     test_lint_and_pinning()
     test_rego()
     test_control_plane_lista()

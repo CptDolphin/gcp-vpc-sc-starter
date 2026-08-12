@@ -18,30 +18,48 @@ resource "google_access_context_manager_access_level" "level" {
       # („albo korpo-IP, albo urządzenie"), co jest słabszą polityką i trudną do zauważenia w review.
       combining_function = lookup(each.value, "combining_function", "AND")
 
-      conditions {
-        ip_subnetworks = lookup(each.value, "ip_subnetworks", null)
-        # Tożsamości: grupy i konta serwisowe. Bez tego poziom mówi tylko „z tej sieci".
-        members = lookup(each.value, "members", null)
-        # Kody ISO 3166-1 alfa-2 — tanie ucięcie szumu, nie zabezpieczenie (VPN to omija).
-        regions = lookup(each.value, "regions", null)
-        # `negate` odwraca sens CAŁEGO warunku — patrz ostrzeżenie w access-levels/corp.yaml.
-        negate = lookup(each.value, "negate", null)
+      # WARUNEK BEZPOŚREDNI renderuje się TYLKO wtedy, gdy poziom deklaruje choć jeden jego atrybut.
+      #
+      # Blok statyczny (bez `dynamic`) wysyłał do API warunek `{}` także dla poziomu złożonego wyłącznie
+      # z `required_access_levels` — a API odrzuca PUSTY warunek komunikatem
+      # `Error 400: AccessLevel definition has a trivial condition.` (raw REST, zmierzone 2026-08-11).
+      # Przez ten kształt materiał twierdził, że „kompozycja bez własnego warunku jest odrzucana przez API".
+      # NIEPRAWDA: ten sam poziom wysłany do ACM z pominięciem tego renderera (`{"basic":{"conditions":
+      # [{"requiredAccessLevels":[...]}]}}`) POWSTAJE bez błędu. Ograniczenie było NASZE, nie Google'a —
+      # i blokowało `corp_network AND corp_managed_device`, czyli najmocniejszy wariant dostępu człowieka.
+      dynamic "conditions" {
+        for_each = anytrue([
+          contains(keys(each.value), "ip_subnetworks"),
+          contains(keys(each.value), "members"),
+          contains(keys(each.value), "regions"),
+          contains(keys(each.value), "negate"),
+          contains(keys(each.value), "device_policy"),
+        ]) ? [1] : []
+        content {
+          ip_subnetworks = lookup(each.value, "ip_subnetworks", null)
+          # Tożsamości: grupy i konta serwisowe. Bez tego poziom mówi tylko „z tej sieci".
+          members = lookup(each.value, "members", null)
+          # Kody ISO 3166-1 alfa-2 — tanie ucięcie szumu, nie zabezpieczenie (VPN to omija).
+          regions = lookup(each.value, "regions", null)
+          # `negate` odwraca sens CAŁEGO warunku — patrz ostrzeżenie w access-levels/corp.yaml.
+          negate = lookup(each.value, "negate", null)
 
-        dynamic "device_policy" {
-          for_each = contains(keys(each.value), "device_policy") ? [each.value.device_policy] : []
-          content {
-            require_screen_lock              = lookup(device_policy.value, "require_screen_lock", null)
-            require_corp_owned               = lookup(device_policy.value, "require_corp_owned", null)
-            require_admin_approval           = lookup(device_policy.value, "require_admin_approval", null)
-            allowed_encryption_statuses      = lookup(device_policy.value, "allowed_encryption_statuses", null)
-            allowed_device_management_levels = lookup(device_policy.value, "allowed_device_management_levels", null)
+          dynamic "device_policy" {
+            for_each = contains(keys(each.value), "device_policy") ? [each.value.device_policy] : []
+            content {
+              require_screen_lock              = lookup(device_policy.value, "require_screen_lock", null)
+              require_corp_owned               = lookup(device_policy.value, "require_corp_owned", null)
+              require_admin_approval           = lookup(device_policy.value, "require_admin_approval", null)
+              allowed_encryption_statuses      = lookup(device_policy.value, "allowed_encryption_statuses", null)
+              allowed_device_management_levels = lookup(device_policy.value, "allowed_device_management_levels", null)
 
-            dynamic "os_constraints" {
-              for_each = lookup(device_policy.value, "os_constraints", [])
-              content {
-                os_type                    = os_constraints.value.os_type
-                minimum_version            = lookup(os_constraints.value, "minimum_version", null)
-                require_verified_chrome_os = lookup(os_constraints.value, "require_verified_chrome_os", null)
+              dynamic "os_constraints" {
+                for_each = lookup(device_policy.value, "os_constraints", [])
+                content {
+                  os_type                    = os_constraints.value.os_type
+                  minimum_version            = lookup(os_constraints.value, "minimum_version", null)
+                  require_verified_chrome_os = lookup(os_constraints.value, "require_verified_chrome_os", null)
+                }
               }
             }
           }
@@ -85,6 +103,56 @@ resource "google_access_context_manager_access_level" "level" {
         contains(keys(each.value), "required_access_levels"),
       ]))
       error_message = "Access level ${each.key}: `custom_expression` wyklucza się z warunkami basic (ip_subnetworks/members/regions/device_policy/required_access_levels). Wybierz jedno."
+    }
+
+    # Poziom, który nie deklaruje ŻADNEGO warunku, renderuje się na `basic {}` bez ani jednego `conditions`
+    # — czyli obiekt, który nie sprawdza niczego. Do 2026-08 ratował nas przed nim przypadek: statyczny blok
+    # `conditions` zawsze coś wysyłał, więc API odrzucało to jako `trivial condition`. Po naprawie tamtego
+    # kształtu ten przypadek nie ma już żadnej bariery poniżej, więc bariera musi stać tutaj — na planie,
+    # z nazwą poziomu w komunikacie, a nie w odpowiedzi API o „trywialnym warunku" bez wskazania winowajcy.
+    precondition {
+      condition = anytrue([
+        contains(keys(each.value), "ip_subnetworks"),
+        contains(keys(each.value), "members"),
+        contains(keys(each.value), "regions"),
+        contains(keys(each.value), "device_policy"),
+        contains(keys(each.value), "required_access_levels"),
+        contains(keys(each.value), "custom_expression"),
+      ])
+      error_message = "Access level ${each.key}: brak jakiegokolwiek warunku — poziom bez warunku nie ogranicza niczego. Dodaj ip_subnetworks/members/regions/device_policy/required_access_levels albo custom_expression."
+    }
+
+    # `combining_function: OR` = ALTERNATYWA warunków. Diff jest jednosłowny i wygląda kosmetycznie, a
+    # polityka po nim jest SŁABSZA: poziom `region PL/DE ORAZ korpo-sieć` zamienia się w `region PL/DE ALBO
+    # korpo-sieć`, czyli przepuszcza dowolny adres z regionu. ZMIERZONE na żywym ACM: API przyjmuje taką
+    # zmianę bez ostrzeżenia (`combiningFunction: OR` wraca w odpowiedzi 200), więc jedyne miejsce, gdzie
+    # ktokolwiek może to zauważyć, jest PRZED apply.
+    #
+    # Dlaczego opt-in tekstem, a nie zakaz: „korpo-sieć ALBO zarządzane urządzenie" to poprawny i częsty
+    # wymóg (laptop w domu na zarządzanym sprzęcie). Zakaz wypchnąłby ten wzorzec do `custom_expression`,
+    # czyli w miejsce trudniejsze do audytu. Wymóg `or_reason` zamienia jednosłowny diff w zdanie
+    # o osłabieniu — recenzent czyta powód, a nie domyśla się intencji.
+    precondition {
+      condition     = lookup(each.value, "combining_function", "AND") != "OR" || length(lookup(each.value, "or_reason", "")) >= 20
+      error_message = "Access level ${each.key}: `combining_function: OR` czyni z warunków ALTERNATYWĘ (słabsza polityka). Dopisz `or_reason` (min. 20 znaków) wyjaśniające, dlaczego alternatywa jest tu zamierzona."
+    }
+
+    # OR bez drugiego warunku nie robi NIC — `combiningFunction` łączy warunki między sobą, a atrybuty
+    # wewnątrz jednego warunku i tak są zawsze ANDowane. Poziom z jednym warunkiem i `OR` w deklaracji
+    # wygląda w pliku jak decyzja, a jest nieporozumieniem; przy dołożeniu drugiego warunku ożywa jako
+    # osłabienie, którego nikt świadomie nie wprowadził. Renderer produkuje dziś dokładnie dwa warunki:
+    # bezpośredni (gdy są atrybuty) i kompozycyjny (gdy jest `required_access_levels`).
+    precondition {
+      condition = lookup(each.value, "combining_function", "AND") != "OR" || (
+        anytrue([
+          contains(keys(each.value), "ip_subnetworks"),
+          contains(keys(each.value), "members"),
+          contains(keys(each.value), "regions"),
+          contains(keys(each.value), "negate"),
+          contains(keys(each.value), "device_policy"),
+        ]) && length(lookup(each.value, "required_access_levels", [])) > 0
+      )
+      error_message = "Access level ${each.key}: `combining_function: OR` przy jednym warunku nie zmienia niczego (OR łączy warunki, nie atrybuty w jednym warunku). Usuń je albo dołóż drugi warunek."
     }
   }
 }

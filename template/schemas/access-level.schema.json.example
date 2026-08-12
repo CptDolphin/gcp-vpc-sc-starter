@@ -23,6 +23,34 @@
           "name",
           "title"
         ],
+        "allOf": [
+          {
+            "$comment": "OR = alternatywa warunków, czyli SŁABSZA polityka przy jednosłownym diffie. Uzasadnienie jest obowiązkowe, żeby osłabienie było widoczne w pliku, a nie tylko w intencji autora.",
+            "if": {
+              "properties": {
+                "combining_function": {
+                  "const": "OR"
+                }
+              },
+              "required": [
+                "combining_function"
+              ]
+            },
+            "then": {
+              "required": [
+                "or_reason"
+              ]
+            },
+            "else": {
+              "$comment": "Bez OR uzasadnienie nie ma czego uzasadniać — a zostawione po powrocie do AND wygląda w review na aktualne.",
+              "not": {
+                "required": [
+                  "or_reason"
+                ]
+              }
+            }
+          }
+        ],
         "properties": {
           "name": {
             "type": "string",
@@ -38,7 +66,12 @@
               "AND",
               "OR"
             ],
-            "description": "Domyślnie AND. OR zamienia listę warunków w alternatywę — słabsza polityka, łatwa do przeoczenia w review."
+            "description": "Domyślnie AND. OR zamienia listę warunków w alternatywę — słabsza polityka, łatwa do przeoczenia w review. Wymaga `or_reason`."
+          },
+          "or_reason": {
+            "type": "string",
+            "minLength": 20,
+            "description": "Dlaczego alternatywa jest tu zamierzona. Wymagane przy `combining_function: OR` i zabronione bez niego — inaczej uzasadnienie przeżywa powrót do AND i przestaje cokolwiek znaczyć."
           },
           "ip_subnetworks": {
             "type": "array",

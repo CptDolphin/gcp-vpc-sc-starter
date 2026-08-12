@@ -534,3 +534,91 @@ test_egress_access_levels_from_denied if {
 
 # Reguła „jeden projekt = jeden wpis" ma testy wyżej, w sekcji o duplikatach w jednym pliku — razem
 # z przypadkami, które przy pliku na projekt nie mogły powstać (ten sam klucz, mapa gubiąca wpis).
+
+# --- access levels: OR, uzasadnienie i poziom bez warunku -------------------------------------------
+#
+# ZMIERZONE na zywym ACM (2026-08-11): API przyjmuje `combiningFunction: OR` na poziomie zlozonym
+# i zwraca 200 z ta wartoscia w odpowiedzi. Po tamtej stronie nie ma zadnego ostrzezenia, na ktore
+# mozna liczyc — wiec albo zlapie to bramka przed apply, albo nikt.
+#
+# Kazdy negatyw ma tu pare pozytywna. Regula odrzucajaca KAZDY poziom przeszlaby same negatywy,
+# a rozniloby ja od poprawnej dopiero to, ze zdrowy poziom u niej NIE przechodzi.
+
+poziomy(al) := object.union(healthy_input, {"access_levels": al})
+
+kompozycja_and := {
+	"name": "corp_network_and_region",
+	"title": "Corporate network AND allowed region",
+	"combining_function": "AND",
+	"regions": ["PL", "DE"],
+	"required_access_levels": ["corp_network"],
+}
+
+test_kompozycja_and_passes if {
+	count(deny) == 0 with input as poziomy({"corp_network_and_region": kompozycja_and})
+}
+
+test_poziom_prosty_bez_combining_passes if {
+	count(deny) == 0 with input as poziomy({"corp_network": {
+		"name": "corp_network",
+		"title": "Corporate network",
+		"ip_subnetworks": ["198.51.100.0/24"],
+	}})
+}
+
+# NEGATYW: samo przestawienie AND -> OR. To jest dokladnie ten diff, ktory w review wyglada kosmetycznie.
+test_or_bez_uzasadnienia_denied if {
+	zly := object.union(kompozycja_and, {"combining_function": "OR"})
+	count(deny) > 0 with input as poziomy({"corp_network_and_region": zly})
+}
+
+# POZYTYW DO POWYZSZEGO: ten sam OR z napisanym powodem przechodzi. Bez tej pary „bramka odrzuca OR"
+# znaczyloby tylko „bramka odrzuca wszystko, co ma OR" — czyli zakaz, a nie swiadoma decyzja.
+test_or_z_uzasadnieniem_passes if {
+	dobry := object.union(kompozycja_and, {
+		"combining_function": "OR",
+		"or_reason": "laptop na zarzadzanym sprzecie pracuje spoza korpo-sieci i ma miec dostep",
+	})
+	count(deny) == 0 with input as poziomy({"corp_network_and_region": dobry})
+}
+
+# NEGATYW: uzasadnienie za krotkie degeneruje furtke do „ok" i przestaje byc decyzja.
+test_or_z_krotkim_uzasadnieniem_denied if {
+	zly := object.union(kompozycja_and, {"combining_function": "OR", "or_reason": "bo tak"})
+	count(deny) > 0 with input as poziomy({"corp_network_and_region": zly})
+}
+
+# NEGATYW: uzasadnienie, ktore przezylo powrot do AND. W pliku wyglada na aktualny opis polityki.
+test_uzasadnienie_bez_or_denied if {
+	zly := object.union(kompozycja_and, {"or_reason": "kiedys bylo OR, zostalo po rewercie i nikt nie usunal"})
+	count(deny) > 0 with input as poziomy({"corp_network_and_region": zly})
+}
+
+# NEGATYW: OR na poziomie z jednym warunkiem nic nie robi — dopoki ktos nie dolozy drugiego warunku.
+test_or_przy_jednym_warunku_denied if {
+	zly := {
+		"name": "eu_only",
+		"title": "Requests from the EU only",
+		"combining_function": "OR",
+		"or_reason": "powod napisany, ale i tak nie ma czego laczyc alternatywa",
+		"regions": ["DE", "FR", "NL"],
+	}
+	count(deny) > 0 with input as poziomy({"eu_only": zly})
+}
+
+# NEGATYW: poziom, ktory nie sprawdza NICZEGO. W regule ingress wyglada jak kazdy inny access level.
+test_poziom_bez_warunku_denied if {
+	zly := {"name": "pusty", "title": "Level with no condition at all"}
+	count(deny) > 0 with input as poziomy({"pusty": zly})
+}
+
+# POZYTYW DO POWYZSZEGO — i osobno wazny: kompozycja BEZ wlasnego warunku jest LEGALNA. API ja tworzy
+# (zmierzone raw REST 2026-08-11), a odrzucal ja wylacznie nasz renderer, ktory doklejal pusty warunek.
+test_kompozycja_bez_wlasnego_warunku_passes if {
+	dobry := {
+		"name": "corp_network_and_device",
+		"title": "Corporate network AND managed device",
+		"required_access_levels": ["corp_network", "corp_managed_device"],
+	}
+	count(deny) == 0 with input as poziomy({"corp_network_and_device": dobry})
+}
