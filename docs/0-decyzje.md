@@ -2120,3 +2120,80 @@ drugiego toru przewyższa szkodę z jego braku.
 * **Sprawdzanie doręczenia przez `sendVerificationCode` przy każdym apply** — odrzucone: metoda wysyła
   wiadomość do odbiorcy i nie zwraca nic poza `200` (zmierzone: pustą odpowiedź `{}`), więc kosztuje mail
   za każdym razem i nie odpowiada na żadne pytanie.
+
+---
+
+## DEC-29 — Droga awaryjna jest ćwiczeniem, nie plikiem: tożsamość, kolejność kroków i zegar okna
+
+**Decyzja.** Procedura break-glass (`break-glass.yml`) dostaje cztery własności, których wcześniej nie miała,
+i wszystkie cztery wynikają z jednego przećwiczonego przebiegu na żywej granicy:
+
+1. **Tożsamość.** `iam-bootstrap` wiąże z kontem `apply` **oba** environmenty — rutynowy
+   (`apply_environment`) i awaryjny (`break_glass_environment`) — zamiast jednego. To samo konto, dwa
+   dopuszczone environmenty.
+2. **Kolejność.** Najpierw uwierzytelnienie i `terraform init` (dostęp do stanu), **dopiero potem** zapis do
+   `perimeter/projects.yaml`, commit i push. Krok, który może paść z powodu niezależnego od treści zmiany,
+   pada, zanim powstanie ślad twierdzący, że coś się stało.
+3. **Werdykt z żywej granicy.** Po `apply` procedura czyta perimetr przez API i pada, jeśli numer projektu
+   nadal stoi w `status.resources`. Zielony `apply` nie jest dowodem na powrót ruchu.
+4. **Zegar.** Democja przestawia `dry_run_since` na dzień jej wykonania, a issue postmortem powstaje
+   **także po nieudanym przebiegu** (`if: always()`) i mówi wprost, w jakim stanie zostało środowisko.
+
+Osobno rozstrzygnięty zostaje access level `break_glass`: **nie uzbrajamy go**, bo należy do innej procedury.
+
+**Dlaczego.** Procedura awaryjna, której nikt nie uruchomił, jest hipotezą — a ta konkretna była hipotezą
+fałszywą w czterech miejscach naraz, przy zielonych bramkach, zielonym planie i runbooku opisującym kroki:
+
+* **Nie miała jak zapisać granicy ANI RAZU od dnia powstania.** `principalSet` konta apply dopasowuje
+  environment po nazwie, a job deklaruje `environment: break-glass` — inną niż `perimeter-apply`. Wynik:
+  `Permission 'iam.serviceAccounts.getAccessToken' denied` przy `terraform init`, czyli droga awaryjna
+  nie potrafiła nawet odczytać stanu. Rozdział environmentów, którym plik się szczycił, był dokładnie tym,
+  co go unieruchamiało.
+* **Kolejność kroków zamieniła awarię w kłamstwo.** Plik był przepisywany i wypychany PRZED
+  uwierzytelnieniem. Po odmowie repozytorium twierdziło „demoted", a granica **nadal egzekwowała** członka:
+  ten sam `etag` perimetru przed i po, wywołujący nadal z `403`. Operator w incydencie czyta git i przestaje
+  szukać.
+* **Issue postmortem — jedyny trwały ślad poza commitem — zostało POMINIĘTE**, bo poprzedni krok padł.
+  Nieudana akcja awaryjna nie zostawiła po sobie nic poza commitem mówiącym nieprawdę.
+* **Skutek nastąpił, ale nie z tej procedury.** Commit bota nie wyzwala workflowów (GitHub, ochrona przed
+  pętlą), więc democja czekała na gałęzi domyślnej, aż 88 s później scalenie **cudzego, niezwiązanego**
+  pull requesta uruchomiło `apply.yml` i zastosowało ją przy okazji — pod tytułem tamtej zmiany.
+
+Zegar (`dry_run_since`) dochodzi z innego pytania: co MA znaczyć powrót. Runbook obiecuje przy ponownej
+promocji „świeże okno", ale bez przestawienia daty bramka `dry_run_min_days` jest spełniona **natychmiast**
+dla każdego członka, który przed pierwszą promocją odsiedział swoje okno — czyli dla każdego, który przeszedł
+ścieżkę legalnie. Data jest zegarem obserwacji, nie dowodem; dowód o przepływach leży w audit-logu i w
+raporcie naruszeń, i tych break-glass nie dotyka. Przeciwnie — zmierzone: po democji to samo wywołanie
+generuje wpis `dryRun: true` zamiast odmowy bez tego pola, seria jest ciągła, a `violations_report`
+(świadomie bez predykatu na `dryRun`) liczy **też odmowy z samego incydentu**: 628 wpisów dla jednego członka
+w oknie 14 dni po jednej sesji. Powrót jest więc albo powolny, albo jawnie zwolniony przez
+`promotion_waivers` — i to jest właściwe miejsce na tę decyzję.
+
+Access level `break_glass` rozstrzygamy przy tej samej okazji, bo nosi nazwę procedury i był oznaczony jako
+„do uzbrojenia razem z nią". Nie jest jej częścią: ta procedura **wyprowadza członka z konfiguracji
+egzekwowanej**, więc żaden access level nie ma czego spełniać. Poziom należałby do procedury innej — „granica
+dalej egzekwuje, ale wpuść bastion" — której ten starter nie ma i która wymagałaby własnej reguły ingress
+na członku. Uzbrojony placeholder bez tej reguły dawałby najgorszy wynik: audyt widzi kontrolę awaryjną,
+incydent nie ma z niej pożytku. Zostaje `armed: false` z uzasadnieniem wskazującym na tę decyzję, a usunięcie
+poziomu jest osobnym ruchem — bramka `vpcsc.perimeter` świadomie odrzuca plan kasujący obiekt polityki
+dostępu, więc taka zmiana nie może przejść „przy okazji".
+
+**Co odrzucono i dlaczego.**
+
+* **Osobne konto serwisowe dla break-glassu.** Wygląda na czystszy rozdział, a jest drugim kompletem ról,
+  grantów i wiązań do utrzymania. Rozjeżdża się cicho i ujawnia to w incydencie — czyli w jedynym momencie,
+  w którym nie ma czasu na diagnozę IAM. Rozdział, który ta droga naprawdę kupuje, dotyczy
+  **zatwierdzających**, nie uprawnień: obie drogi zapisują ten sam obiekt tym samym zestawem operacji.
+* **`environment: perimeter-apply` w workflow awaryjnym.** Naprawia tożsamość jedną linijką i jednocześnie
+  kasuje jedyny powód istnienia osobnej drogi: awaria czekałaby na tych samych ludzi, co rutyna. Odrzucone
+  na tyle stanowczo, że `break_glass_environment == apply_environment` wywraca teraz walidację zmiennej.
+* **Poleganie na `apply.yml` wyzwalanym push-em democji.** Zmierzone, że nie działa (token bota), a w wersji
+  „zadziała, gdy ktoś inny coś zmerguje" jest gorsze niż nie działa wcale: skutek nadchodzi w nieprzewidywalnym
+  momencie i pod cudzym tytułem.
+* **Sprawdzanie skutku przez `terraform output`.** Tańsze niż odczyt API i tautologiczne: outputy mówią, co
+  konfiguracja MIAŁA zrobić. Pytanie brzmi, co jest w granicy.
+* **Timer automatycznie przywracający `enforced` po N godzinach.** Kuszące („nie zapomnimy"), odrzucone:
+  automat przywracający egzekwowanie w środku niedokończonej naprawy odtwarza incydent, i to bez człowieka
+  przy klawiaturze. Zamiast tego procedura mówi wprost, że timera NIE MA, i pisze to w issue postmortem.
+* **Zostawienie `dry_run_since` bez zmian i dopisanie zdania do runbooka.** Dokument nie jest bramką;
+  ta sama obietnica „świeżego okna" stała w runbooku od początku i nie była egzekwowana przez nic.

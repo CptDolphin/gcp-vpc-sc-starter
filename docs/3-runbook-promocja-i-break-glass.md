@@ -278,6 +278,25 @@ skutku co jego ustawienie; pilnuje tego reguła OPA.
 Zdejmujemy członka z konfiguracji **egzekwowanej**, zostawiając go w **dry-run**. Incydent nie kasuje wiedzy
 o jego ruchu — po naprawie promocja wymaga takiego samego dowodu jak za pierwszym razem.
 
+**To NIE JEST procedura „wpuść bastion przez działającą granicę".** Access level `break_glass` w
+`perimeter/access-levels/` należy do tamtej, innej procedury i ta droga go **nie używa** — patrz DEC-29.
+Szukanie w incydencie adresu, który trzeba dopisać do poziomu, jest szukaniem w złym miejscu.
+
+### Czasy, na które można liczyć (zmierzone, nie szacowane)
+
+| Odcinek | Ile | Skąd |
+|---|---|---|
+| `workflow_dispatch` → start przebiegu | ~10 s | ćwiczenie procedury |
+| demote + commit + push | ~3 s | j.w. |
+| `terraform apply` (jeden członek z konfiguracji egzekwowanej) | ~90 s | przebieg `apply` na tej samej zmianie |
+| koniec `apply` → **realny powrót ruchu** | **13 s** | sonda co 5 s tym samym wywołaniem, które dostawało `403` |
+| rollback promocji (kierunek odwrotny, dla porównania) | 46 s do `apply`, **78 s do ruchu** | pomiar promocji |
+
+Wniosek operacyjny, bo to jest pytanie, które pada w incydencie: **konfiguracja cofa się natychmiast, skutek
+kilkanaście–kilkadziesiąt sekund później.** Nie ponawiaj procedury, gdy `apply` zszedł na zielono, a wywołujący
+nadal widzi `403` — odczekaj minutę i sonduj dalej. Ponowne uruchomienie w tym oknie nie przyspiesza niczego,
+a wchodzi w tę samą kolejkę `concurrency: vpc-sc-apply`, więc realnie opóźnia.
+
 ### Kroki
 
 1. Potwierdź, że to naprawdę perimetr (a nie IAM, nie sieć, nie aplikacja):
@@ -308,12 +327,27 @@ gh workflow run break-glass.yml \
    Gdy ich nie ma, workflow rusza od razu; to nie jest awaria procedury, ale ma być zapisane jako
    odstępstwo (`docs/1`, etap 4), a nie odkryte w trakcie incydentu.
 
-4. Workflow demotuje członka, applikuje i **sam otwiera issue postmortem**. Ślad audytowy zostaje w
-   repozytorium, nie tylko w interfejsie Actions: kto uruchomił i odsyłacz do przebiegu idą do **treści
-   commita** oraz do issue. Tam też stoi zdanie, o którym najłatwiej zapomnieć — **nie ma żadnego timera**:
-   członek jest niechroniony do momentu ponownej promocji i nic mu o tym nie przypomni.
+4. Workflow, **w tej kolejności**: bierze tożsamość i sprawdza dostęp do stanu → demotuje członka
+   i przestawia mu `dry_run_since` na dziś → commituje i wypycha → `apply` → **czyta żywą granicę**
+   i pada, jeśli numer projektu nadal stoi w `status.resources` → otwiera issue postmortem (także gdy coś
+   po drodze padło). Kolejność jest częścią procedury, nie stylem: zapis do repozytorium przed zdobyciem
+   tożsamości zostawia commit twierdzący coś, czego granica nie zrobiła (zmierzone — patrz DEC-29).
 
-5. Zweryfikuj, że ruch wrócił (ta sama komenda z kroku 1 — ma być pusta).
+   Ślad audytowy zostaje w repozytorium, nie tylko w interfejsie Actions: kto uruchomił i odsyłacz do
+   przebiegu idą do **treści commita** oraz do issue. Tam też stoi zdanie, o którym najłatwiej zapomnieć —
+   **nie ma żadnego timera**: członek jest niechroniony do momentu ponownej promocji i nic mu o tym nie
+   przypomni.
+
+5. Zweryfikuj, że ruch wrócił — **tym samym wywołaniem, które go nie miało**, a nie brakiem nowych wpisów.
+   Pusty log jest nierozróżnialny od „nikt nie próbował"; jedynym dowodem powrotu jest przejście wywołania.
+   Odczekaj kilkanaście sekund po zielonym `apply` (tabela czasów wyżej).
+
+> [!WARNING]
+> **Nie licz na to, że commit z tej procedury sam uruchomi `apply.yml`.** GitHub nie wyzwala workflowów
+> push-em wykonanym tokenem `GITHUB_TOKEN`. Zmierzone: commit democji nie uruchomił niczego, a granica
+> zmieniła się dopiero przy scaleniu **cudzego, niezwiązanego** pull requesta 88 s później — zmiana granicy
+> bezpieczeństwa pojechała pod tytułem zmiany, której autor jej nie widział. Dlatego `apply` jest krokiem
+> tej procedury. Jeśli kiedyś ten krok zostanie z niej wyjęty, wróci ten sam tryb awarii.
 
 ### Po incydencie
 
@@ -329,6 +363,30 @@ odpowiedzi i wnioski:
 
 Ponowna promocja: świeże okno, świeży raport, ten sam próg. Skrócenie okna „bo już raz było zielono" to
 dokładnie ta decyzja, która wywołała incydent.
+
+### Powrót do `enforced` — dwie rzeczy, które zaskakują, i obie są własnością konstrukcji
+
+**1. Dowód o przepływach zostaje — i dlatego blokuje powrót.** Członek zostaje w konfiguracji dry-run, więc
+to samo wywołanie, które w czasie egzekwowania dawało odmowę **bez** pola `dryRun`, po democji daje wpis
+z `dryRun: true`. Ten sam `violationReason`, ten sam cel, ciągła seria — okno obserwacji nie zaczyna się od
+zera i o to w tej procedurze chodzi. **Ale** `violations_report` nie ma predykatu na `dryRun` (bo odmowa
+egzekwowana tego pola nie ma w ogóle), więc odmowy **z samego incydentu** wchodzą do liczby czytanej przez
+`promotion_gate`. Zmierzone na ćwiczeniu: **628 wpisów** dla jednego członka w oknie 14 dni po jednej sesji
+odmów. Powrót wymaga więc świadomej decyzji, jednej z dwóch:
+
+* **przeczekać**, aż wpisy wypadną z okna (`clean_window_days`) — właściwe, gdy nie ma presji czasu;
+* **`promotion_waivers`** w `perimeter/policy.yaml` z `accept_violations_up_to` — zakres jednego członka,
+  data ważności, uzasadnienie min. 40 znaków, właściciel Security. Nie obniżaj progu globalnie.
+
+**2. Zegar rusza od nowa.** Procedura przestawia `dry_run_since` na dzień democji, więc `dry_run_min_days`
+liczy się od tego dnia — a nie od pierwszego wejścia członka do dry-run. Bez tego bramka „odsiedziałeś okno"
+byłaby przy powrocie spełniona natychmiast dla każdego, kto przeszedł ścieżkę legalnie, czyli dokładnie tam,
+gdzie obietnica „świeże okno" ma znaczyć najwięcej. Data to **zegar obserwacji, nie dowód**; dowód leży
+w audit-logu i w raporcie, a te zostają nietknięte.
+
+Konsekwencja obu naraz: **powrót po break-glassie jest zawsze albo powolny, albo jawnie zwolniony wpisem
+w `policy.yaml`.** Trzeciej drogi nie ma i nie ma jej celowo — „wracamy, bo już naprawiliśmy" ma zostawić
+ślad z nazwiskiem i datą, a nie wynikać z pola, którego nikt nie ogląda.
 
 ---
 

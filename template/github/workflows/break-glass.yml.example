@@ -26,6 +26,36 @@
 # for the same people the routine path waits for. Whether it waits for ANYBODY is a repository setting, not
 # a property of this file — see the header of `apply.yml`. An emergency procedure blocked on a reviewer who
 # is not there at 03:00 is worse than no procedure, because it looks like one.
+#
+# ====================================================================================================
+# KOLEJNOŚĆ KROKÓW NIE JEST STYLEM — jest jedyną rzeczą, która dzieli nieudany break-glass od kłamiącego
+# ====================================================================================================
+# ZMIERZONE na żywej granicy przy pierwszym uruchomieniu tej procedury (ćwiczenie, nie awaria): wersja,
+# w której plik był przepisywany i wypychany PRZED uwierzytelnieniem, zostawiła po sobie stan gorszy niż
+# brak procedury. Krok `apply` padł 6 s po wypchnięciu commita (tożsamość, patrz akapit niżej), a repo od
+# tej chwili twierdziło, że członek jest w dry-run, podczas gdy granica **nadal go egzekwowała**: ten sam
+# `etag` perimetru przed i po, wywołujący nadal z `403`. Operator w incydencie czyta git, widzi „demoted",
+# przestaje szukać — a ruch stoi dalej.
+#
+# Stąd niezmiennik: **najpierw zdobądź tożsamość i dosięgnij stanu, dopiero potem tknij plik.** Krok,
+# który może paść z powodu niezależnego od treści zmiany (WIF, sieć, zamek stanu), ma paść ZANIM
+# powstanie ślad twierdzący, że coś się stało. Po `apply` jest jeszcze jeden krok — odczyt ŻYWEJ granicy;
+# „zielony apply" nie jest dowodem na to, że członek wyszedł z konfiguracji egzekwowanej.
+#
+# ====================================================================================================
+# TOŻSAMOŚĆ: ODDZIELNY ENVIRONMENT MA CENĘ, KTÓREJ NIE WIDAĆ W TYM PLIKU
+# ====================================================================================================
+# `principalSet` konta apply pinuje JEDEN atrybut — nazwę environment (`iam-bootstrap/main.tf`). Job
+# deklarujący `environment: break-glass` niesie w tokenie OIDC INNĄ nazwę niż `perimeter-apply`, więc bez
+# osobnego wiązania nie wymieni go na nic. ZMIERZONE: `Permission 'iam.serviceAccounts.getAccessToken'
+# denied` na buckecie stanu — procedura awaryjna nie była w stanie zapisać granicy ANI RAZU od dnia
+# powstania, a wyglądała na gotową (workflow jest, environment jest, runbook opisuje kroki).
+#
+# Dlatego `iam-bootstrap` wiąże z kontem apply OBA environmenty (`apply_environment` i
+# `break_glass_environment`), a nie jeden. Rozdział, który ten plik kupuje, dotyczy **kto zatwierdza**,
+# nie **czym się pisze**: osobne konto serwisowe dla awarii to drugi zestaw grantów do utrzymania, który
+# rozjeżdża się cicho i ujawnia to w incydencie. Zbiór refów zdolnych wybić tożsamość zapisującą się przy
+# tym NIE ZMIENIA — oba environmenty mają politykę gałęzi zawężoną do gałęzi domyślnej.
 
 name: break-glass
 
@@ -60,6 +90,29 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
+      # TOŻSAMOŚĆ I DOSTĘP DO STANU IDĄ PRZED JAKĄKOLWIEK ZMIANĄ PLIKU — patrz nagłówek. Te trzy kroki
+      # nie zmieniają niczego, a padają na wszystkim, co i tak by procedurę zatrzymało: brak wiązania WIF
+      # dla tego environment, niedostępny bucket stanu, cudzy zamek. Padając TUTAJ zostawiają repozytorium
+      # nietknięte, więc nikt nie przeczyta „demoted" z commita, którego skutek nie nastąpił.
+      - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.APPLY_SERVICE_ACCOUNT }}
+
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: "1.15.5"
+
+      # Potrzebne krokowi „potwierdź EFEKT" — ten jeden odczyt idzie do API Access Context Managera,
+      # a nie do stanu Terraforma, bo pytanie brzmi „co jest w granicy", nie „co według nas powinno być".
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+
+      # `init` bierze backend, czyli realnie sprawdza to, co w zmierzonej awarii padło: prawo do stanu.
+      # Świadomie BEZ `plan` — plan przy niezmienionym pliku nie powiedziałby nic o democji, a kosztuje
+      # kwotę odczytów ACM (każdy zasób granularny czyta cały perimetr) w momencie, w którym liczy się czas.
+      - name: potwierdź dostęp do stanu, ZANIM cokolwiek zmienisz
+        run: terraform -chdir=terraform init -input=false
+
       # The member is addressed by its KEY (`<division>-<project_id>`) — the same string that used to be the
       # file name and is still the Terraform state address. Nothing about the emergency path changed except
       # where the entry lives (DEC-12).
@@ -69,9 +122,13 @@ jobs:
       # A duplicate key silently resolved to "last one wins" here would demote a member nobody asked about
       # and nobody would see it in the diff. The strict loader turns that into a stopped workflow.
       - name: demote the member to dry-run
+        id: demote
         run: |
           pip install --quiet pyyaml
           python3 - "${{ github.event.inputs.member }}" <<'PY'
+          import datetime as dt
+          import os
+          import pathlib
           import sys
           sys.path.insert(0, "tools")
           import projects_file
@@ -89,13 +146,45 @@ jobs:
           if m["stage"] != "enforced":
               sys.exit(f"{nazwa} jest juz {m['stage']} — nie ma czego cofac")
           m["stage"] = "dry-run"
+
+          # ZEGAR OKNA OBSERWACJI RUSZA OD NOWA — i to jest ROZNICA MIEDZY ZEGAREM A DOWODEM, nie utrata
+          # wiedzy. Dowod o przeplywach mieszka w audit-logu i w raporcie naruszen; ten czlonek zostaje
+          # w konfiguracji dry-run wlasnie po to, zeby dalej go produkowal. `dry_run_since` nie jest
+          # dowodem — jest odpowiedzia na pytanie „od kiedy go OBSERWUJEMY".
+          #
+          # Bez tego przypisania data zostaje sprzed incydentu, wiec bramka `dry_run_min_days` jest przy
+          # powrocie spelniona NATYCHMIAST dla kazdego czlonka, ktory przed pierwsza promocja odsiedzial
+          # swoje okno — czyli dla kazdego, ktory te droge przeszedl legalnie. Runbook obiecuje przy
+          # powrocie „swieze okno"; bez tej linijki obietnicy nie egzekwuje nic. Poprzednia wartosc nie
+          # ginie: idzie do tresci commita nizej i zostaje w historii pliku.
+          #
+          # Skutek uboczny jest zamierzony: powrot do `enforced` wymaga albo odczekania okna, albo
+          # jawnego `promotion_waivers` (zakres jednego czlonka, data waznosci, wlasciciel Security).
+          # Decyzja „wracamy szybciej, bo znamy powod" ma byc zapisana, a nie wynikac z daty, ktorej
+          # nikt nie oglada.
+          poprzednia = m.get("dry_run_since")
+          m["dry_run_since"] = dt.date.today().isoformat()
           projects_file.zapisz(".", doc)
-          print(f"demoted {nazwa}")
+          pathlib.Path("poprzedni_dry_run_since.txt").write_text(str(poprzednia))
+
+          # Numer projektu jedzie do kroku potwierdzajacego EFEKT. Bierzemy go z WPISU, ktory wlasnie
+          # zdemotowalismy, a nie z pola formularza — pytanie brzmi „czy wyszedl TEN czlonek", wiec zrodlem
+          # ma byc to samo miejsce, ktore o tym zdecydowalo.
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write(f"numer={m['project_number']}\n")
+          print(f"demoted {nazwa}; dry_run_since {poprzednia} -> {m['dry_run_since']}")
           PY
 
       # The commit is the DURABLE half of the audit trail, so it carries the actor and the run URL. The
       # author is a bot and cannot be anything else (the workflow, not a person, holds the token), which is
       # exactly why "who" has to be in the message body rather than left to `git log --format=%an`.
+      #
+      # TEN COMMIT NIE URUCHAMIA `apply.yml` I NIE WOLNO NA TO LICZYĆ. GitHub nie wyzwala workflowów
+      # push-em wykonanym tokenem `GITHUB_TOKEN` (ochrona przed pętlą). ZMIERZONE: commit democji wylądował
+      # na gałęzi domyślnej i nie uruchomił NICZEGO; granica zmieniła się dopiero 88 s później, przy okazji
+      # scalenia CUDZEGO, niezwiązanego pull requesta — czyli zmiana granicy bezpieczeństwa pojechała pod
+      # tytułem zmiany, której autor jej nie widział. Dlatego `apply` niżej jest KROKIEM TEJ PROCEDURY,
+      # a nie skutkiem ubocznym wypchnięcia pliku.
       - name: commit
         run: |
           git config user.name "vpc-sc-break-glass"
@@ -108,50 +197,107 @@ jobs:
           Applied outside the normal review path under the break-glass procedure.
           Pulled by: @${{ github.actor }}
           Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          Observation window restarted: dry_run_since $(cat poprzedni_dry_run_since.txt) -> $(date -u +%F).
           The member is NOT protected from now on, with no automatic expiry, until it is re-promoted.
           Postmortem issue is opened automatically by this workflow."
           git push
 
-      - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
-        with:
-          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
-          service_account: ${{ vars.APPLY_SERVICE_ACCOUNT }}
-
-      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
-        with:
-          terraform_version: "1.15.5"
-
       - name: apply
+        run: terraform -chdir=terraform apply -input=false -auto-approve -lock-timeout=10m
+
+      # ZIELONY `apply` NIE JEST DOWODEM NA TO, ŻE RUCH WRÓCIŁ — jest dowodem na to, że zapis się udał.
+      # Ten krok czyta ŻYWĄ granicę i sprawdza jedną rzecz: czy numer projektu zniknął z `status.resources`.
+      # Bez niego procedura kończy się na zielono także wtedy, gdy `apply` zaaplikował cudzy, wcześniejszy
+      # plan albo gdy demotowany klucz wskazał innego członka niż ten, o którego chodziło w incydencie.
+      #
+      # Do RUCHU jest jeszcze kawałek i on też ma tu być powiedziany, żeby operator nie uznał, że nie
+      # zadziałało: konfiguracja cofa się natychmiast, SKUTEK propaguje się dłużej. Zmierzone dwa razy na
+      # tej samej granicy — 78 s od startu rollbacku przy ~32 s od `apply`, oraz 13 s od `apply` przy
+      # ćwiczeniu break-glassu. Rząd wielkości to kilkanaście–kilkadziesiąt sekund PO zielonym kroku.
+      - name: potwierdź EFEKT na żywej granicy (nie sam kod wyjścia apply)
+        env:
+          NUMER: ${{ steps.demote.outputs.numer }}
         run: |
-          terraform -chdir=terraform init -input=false
-          terraform -chdir=terraform apply -input=false -auto-approve -lock-timeout=10m
+          terraform -chdir=terraform output -json > /tmp/tf-out.json
+          python3 - "$NUMER" <<'PY'
+          import json, subprocess, sys
+          numer = sys.argv[1]
+          out = json.load(open("/tmp/tf-out.json"))
+          nazwa = out["perimeter_name"]["value"] if "perimeter_name" in out else None
+          if not nazwa:
+              sys.exit("::error::brak outputu `perimeter_name` — nie umiem odczytać granicy, więc nie orzekam")
+          surowe = subprocess.run(
+              ["gcloud", "access-context-manager", "perimeters", "describe", nazwa.split("/")[-1],
+               "--policy", nazwa.split("/")[1], "--format", "json"],
+              capture_output=True, text=True, check=True).stdout
+          egzekwowani = ((json.loads(surowe).get("status") or {}).get("resources")) or []
+          if f"projects/{numer}" in egzekwowani:
+              sys.exit(f"::error::apply przeszedl, ale projects/{numer} NADAL jest w konfiguracji "
+                       f"egzekwowanej — ruch sie NIE odblokowal, procedura NIE jest wykonana")
+          print(f"potwierdzone: projects/{numer} poza konfiguracja egzekwowana ({len(egzekwowani)} czlonkow zostaje)")
+          PY
 
       # An emergency without a postmortem repeats. The issue is created automatically so that the follow-up
       # is not "somebody should write this up" but an item with a number.
+      #
+      # `if: always()` I TO JEST NAJWAŻNIEJSZE SŁOWO W TYM KROKU. Przy pierwszym uruchomieniu procedury krok
+      # `apply` padł, a ten krok został POMINIĘTY — więc jedynym trwałym śladem nieudanej akcji awaryjnej
+      # był commit twierdzący, że członek jest niechroniony, podczas gdy granica nadal go egzekwowała.
+      # Nieudany break-glass jest tym, o czym trzeba się dowiedzieć NAJPILNIEJ; issue ma powstać zwłaszcza
+      # wtedy i ma powiedzieć wprost, w którym stanie zostało środowisko.
       - name: open the postmortem issue
+        if: always()
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        env:
+          WYNIK: ${{ job.status }}
         with:
           script: |
+            const udany = process.env.WYNIK === 'success';
+            // DWIE RÓŻNE RZECZYWISTOŚCI, DWA RÓŻNE ZDANIA. Przy niepowodzeniu granica NIE zmieniła się,
+            // a gałąź domyślna może już nieść commit twierdzący coś przeciwnego — to jest pierwsza
+            // informacja, jakiej potrzebuje ktoś czytający to w środku incydentu.
+            const stan = udany
+              ? [
+                  'The member was demoted to the dry-run configuration and is currently **not protected**.',
+                  'It stays in dry-run, so its traffic is still being recorded — but see the note on evidence below.',
+                ]
+              : [
+                  '> [!CAUTION]',
+                  '> **PROCEDURA NIE ZOSTAŁA WYKONANA.** Przebieg zakończył się wynikiem `' + process.env.WYNIK + '`,',
+                  '> więc granica najpewniej **nadal egzekwuje** tego członka i ruch **nadal stoi**. Jeśli commit',
+                  '> democji zdążył trafić na gałąź domyślną, repozytorium twierdzi teraz coś przeciwnego niż',
+                  '> rzeczywistość — nie ufaj gitowi, przeczytaj granicę:',
+                  '> `gcloud access-context-manager perimeters describe <perimetr> --policy <id> --format="value(status.resources)"`',
+                ];
             await github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              title: `postmortem: break-glass on ${{ github.event.inputs.member }} (${{ github.event.inputs.incident }})`,
+              title: `postmortem: break-glass on ${{ github.event.inputs.member }} (${{ github.event.inputs.incident }})` + (udany ? '' : ' — NIEUDANY'),
               labels: ['postmortem', 'break-glass'],
               body: [
                 '**What happened:** ${{ github.event.inputs.reason }}',
                 '',
                 '**Pulled by:** @${{ github.actor }} · **run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}',
                 '',
-                'The member was demoted to the dry-run configuration and is currently **not protected**.',
-                'It stays in dry-run, so its traffic is still being recorded.',
+                ...stan,
                 '',
                 '**There is no timer on this.** Nothing re-promotes the member automatically and nothing will',
                 'remind you; it is unprotected until the checklist below is done and a promotion PR is merged.',
+                '',
+                '### Zanim wrócisz do `enforced` — dwie rzeczy, które zaskakują',
+                'Break-glass **nie kasuje** wiedzy o przepływach: członek zostaje w dry-run i dalej produkuje wpisy.',
+                'Ceną jest to, że **odmowy z samego incydentu też są w oknie** i bramka policzy je jako naruszenia',
+                '(zmierzone na ćwiczeniu: 628 wpisów w oknie 14 dni po jednej sesji odmów). Powrót wymaga więc albo',
+                'odczekania, aż wypadną z okna, albo jawnego `promotion_waivers` w `perimeter/policy.yaml` —',
+                'zakres jednego członka, data ważności, właściciel Security. Drugie: `dry_run_since` zostało',
+                'przestawione na dzień democji, więc `dry_run_min_days` liczy się **od nowa** (to jest zegar',
+                'obserwacji, nie dowód — dowód leży w audit-logu).',
                 '',
                 '### Before re-promoting',
                 '- [ ] which flow was blocked, and why was it missing from the rules?',
                 '- [ ] does an existing profile cover it, or do we need a new one?',
                 '- [ ] why did the observation window not catch it (too short? rare job? seasonal?)',
                 '- [ ] fresh clean window + violations report attached to the promotion PR',
+                '- [ ] waiver albo przeczekane okno — świadomie wybrane i zapisane, nie odziedziczone po dacie',
               ].join('\n'),
             });
