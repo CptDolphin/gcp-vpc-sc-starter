@@ -280,7 +280,7 @@ jobs:
       # BEZ STANU POSREDNIEGO. `create-pull-request` wypycha galaz ZANIM wola API pull requestow, wiec
       # odmowa na tym wolaniu zostawia galaz z plikiem czlonka i bez PR-a — niewidoczna na liscie PR-ow,
       # a jednoczesnie gotowa do otwarcia recznie przez kogos, kto nie widzial przebiegu, ktory ja
-      # wyprodukowal. Zmierzone 2026-08-11 (#1947): galaz `external/lab-div-rwlab-vpcsc-t-div` zostala
+      # wyprodukowal. Zmierzone na wdrozeniu: galaz `external/example-division-prj-example-vertex-dev` zostala
       # po nieudanym zgloszeniu. Kasujemy to, co utworzyl TEN przebieg, i tylko to.
       - name: clean up the branch when the pull request was refused
         if: failure() && steps.pr.outcome == 'failure'

@@ -295,7 +295,7 @@ jobs:
       # refusal at that call leaves a branch carrying a member file and no pull request pointing at it —
       # invisible in the pull-request list, and a starting point for somebody to open that PR by hand later
       # without ever seeing the run that produced it. Measured on the division channel the same day, branch
-      # `external/lab-div-rwlab-vpcsc-t-div`. We delete what THIS run created, and only that.
+      # `external/example-division-prj-example-vertex-dev`. We delete what THIS run created, and only that.
       - name: clean up the branch when the pull request was refused
         if: failure() && steps.pr.outcome == 'failure'
         env:
