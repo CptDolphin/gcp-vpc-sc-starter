@@ -1313,3 +1313,72 @@ zawsze czerwona. Bramka mówi „przeniesiono kadłub, nie przeniesiono nic" —
   reprezentację drzewa.
 - *Zgłoszenie zamiast czerwieni.* To już mamy przy wskaźniku i to działa: zgłoszenie jest artefaktem
   do przeczytania przed promocją, ale nikt go nie przypisuje. Czerwony przebieg widać na stronie repo.
+
+## DEC-21 — Akcja dywizji mieszka w PUBLICZNYM starterze, bo `uses:` rozwiązuje się bez tokenu
+
+**Decyzja.** `contrib/action.yml` przestaje być materiałem szablonu instalowanym do repozytorium
+perimetru i staje się **żywą akcją w tym repozytorium**, pod `.github/actions/contrib/`. Repozytoria
+dywizji wołają ją przez `uses: ORG/gcp-vpc-sc-starter/.github/actions/contrib@<40-znakowy SHA>`.
+W repozytorium perimetru zostaje **wyłącznie** `contrib/validate-local.sh` — bo ten jedzie do dywizji
+w paczce bramek, czyli jako **release asset**, a nie przez `uses:`.
+
+**Powód, zmierzony a nie wywnioskowany.** `uses:` rozwiązuje runner na etapie **`Set up job`**,
+**`GITHUB_TOKEN`-em repozytorium wywołującego** — zanim wykona się jakikolwiek krok. Token aplikacji,
+na którym stoi cała konstrukcja tego kanału, powstaje **w kroku**. Kolejność jest więc taka, że w miejscu,
+gdzie akcja jest pobierana, poświadczenia jeszcze nie ma i **nie ma jak być**. Przy wskazaniu prywatnego
+repozytorium perimetru:
+
+```
+##[error]Unable to resolve action `<org>/gcp-vpc-sc`, repository not found
+```
+
+job kończy się na `Set up job`, **zero wykonanych kroków**. Żadne uprawnienie aplikacji tego nie zmienia
+— to nie jest brak dostępu, to jest zła kolejność. Ta sama aplikacja, w tym samym przebiegu, bez problemu
+pobiera potem kontrakt i paczkę bramek: bo tamte są **release assetami**, ściąganymi **w kroku**.
+
+**Podział, który z tego wynika, jest podziałem po SPOSOBIE DOSTARCZENIA, nie po treści.** Artefakt
+pobierany tokenem (paczka bramek, kontrakt, `validate-local.sh`) może mieszkać w prywatnym repozytorium
+perimetru i tam mieszka. Artefakt pobierany przez `uses:` musi być publiczny. Jedyny taki artefakt to
+plik akcji — i tylko on się przeprowadza.
+
+**Dlaczego nie zostawić kopii także w perimetrze.** Kopia w prywatnym repozytorium wygląda w diffie na
+działającą i jest niewykonalna dla jedynego konsumenta, jaki istnieje. Dwie kopie jednego renderera to
+zresztą dokładnie to, co usunęło #1947 — z tym że tutaj rozjazd byłby gorszy niż zwykły dryf: rozjechałyby
+się plik, którego ktoś czyta, i plik, który się uruchamia. Bramka w selfteście pyta więc o
+**NIEOBECNOŚĆ** `contrib/action.yml` w rozpakowanym repozytorium, a nie o obecność tej właściwej: to
+pierwsze da się zepsuć po cichu przez dopisanie linii do `install.sh`, to drugie nie.
+
+### Alternatywy odrzucone
+
+**1. Poszerzenie polityki dostępu Actions repozytorium perimetru**
+(`PUT /repos/{o}/{r}/actions/permissions/access` → `{"access_level":"user"}`). Jedno wywołanie API,
+naprawia objaw. Odrzucone, bo działa **na całym repozytorium i dla wszystkich workflowów konta naraz**:
+otwiera każdą prywatną akcję tej organizacji dla każdego workflowa, który zechce ją zawołać, żeby
+rozwiązać jeden przypadek jednego pliku. Repozytorium perimetru trzyma konta usług członków
+(`perimeter/projects.yaml`) i firmowe zakresy adresów (`perimeter/access-levels/`) — jest prywatne
+z powodów, których nie znosi się po to, żeby udostępnić 11 KB YAML-a. Dodatkowo ustawienie jest
+**niewidoczne w kodzie**: nic w repozytorium nie mówi, że kanał od niego zależy, więc następna osoba
+przywracająca domyślne `none` zepsułaby onboarding dywizji bez śladu w żadnym diffie.
+
+**2. Osobne publiczne repozytorium tylko na akcję.** Najczystsze wersjonowanie (własne tagi wydań)
+i najwęższy zakres. Odrzucone, bo dokłada **trzecią powierzchnię synchronizacji** do układu, w którym dwie
+już wymagały zbudowania bramek: rozjazd starter↔perimetr pilnują dziś wskaźnik (DEC-9) i pokrycie zbioru
+decyzji (DEC-20). Akcja i reguły, które ona egzekwuje, muszą zmieniać się razem — rozdzielone do dwóch
+repozytoriów rozjeżdżają się tak samo jak wszystko inne, tylko bez właściciela tego rozjazdu. Starter
+i tak jest publiczny i i tak jest źródłem materiału perimetru — poprawki i tak powstają tutaj.
+
+**3. Vendoring akcji do repozytorium dywizji.** Odrzucone: znosi „jedna definicja na trzy kanały" (DEC-7)
+i przenosi obowiązek aktualizacji na tego, kto ma najmniej powodów, żeby o nim wiedzieć. Trzydzieści
+dywizji to trzydzieści kopii walidatora, z których każda starzeje się osobno.
+
+### Konsekwencje
+
+* Repozytorium dywizji odwołuje się do **dwóch** repozytoriów: publicznego startera (`uses:`, bez tokenu)
+  i prywatnego perimetru (release'y, tokenem aplikacji). To jest widoczne w workflow i ma być widoczne.
+* Przypięcie `@<SHA>` przestaje być higieną, a staje się **granicą zaufania**: starter jest publiczny,
+  więc referencja ruchoma oddaje kod uruchamiany z poświadczeniem dywizji temu, kto kontroluje gałąź.
+  Selftest odrzuca `@main`, `@master` i `@v*` w przykładzie; SHA-a w szablonie nie wymaga, bo przykład
+  nie może przypiąć commita, który powstanie dopiero po jego zmergowaniu.
+* Organizacja, która chce mieć własne źródło akcji, publikuje **publiczną kopię startera** i wskazuje ją
+  w `uses:` — nic w akcji nie nazywa organizacji, projektu ani perimetru; wszystko środowiskowe wchodzi
+  wejściami (`perimeter-repo`, `member-file`, `app-token`) albo przyjeżdża w kontrakcie.

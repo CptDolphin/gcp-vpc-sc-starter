@@ -90,7 +90,11 @@ def bootstrap() -> None:
         ".github/workflows/starter-drift.yml", ".starter-sync",
         ".github/workflows/boundary-probe.yml",
         ".github/workflows/intake-rebase.yml", ".gitattributes",
-        "contrib/action.yml", "contrib/validate-local.sh", "contrib/README.md",
+        # `contrib/action.yml` i jego README NIE lądują tutaj — akcja mieszka w starterze pod
+        # `.github/actions/contrib/`, bo `uses:` rozwiązuje się tokenem repo DYWIZJI, zanim wykona się
+        # jakikolwiek krok, a repo perimetru jest prywatne (DEC-21). Zostaje sam `validate-local.sh`:
+        # ten jedzie do dywizji w paczce bramek, czyli jako release asset, a nie przez `uses:`.
+        "contrib/validate-local.sh",
         ".gitignore", ".pre-commit-config.yaml", ".tool-versions",
         "perimeter/policy.yaml", "perimeter/access-levels/corp.yaml", "perimeter/contributors.yaml",
         "perimeter/projects.yaml",
@@ -986,9 +990,18 @@ def test_contract() -> None:
     check("kontrakt niesie flage members_published (pusta lista nie jest dwuznaczna)",
           "members_published = local.contract_enabled &&" in body)
 
-    # Action zespołu nie może już wymagać submodule'a.
-    action = (ROOT / "contrib/action.yml").read_text()
+    # Action zespołu żyje w STARTERZE, nie w rozpakowanym repo — czyta się ją stąd, nie z ROOT.
+    action = (STARTER / ".github/actions/contrib/action.yml").read_text()
     check("contrib/action: brak zaleznosci od submodule", "submodules: true" not in action)
+
+    # BRAMKA DEC-21: akcja NIE MOŻE wrócić do repozytorium perimetru. `uses:` rozwiązuje runner tokenem
+    # repozytorium DYWIZJI na etapie `Set up job` — zanim istnieje jakikolwiek krok, więc token aplikacji
+    # (tworzony w kroku) nie ma jak pomóc. Zmierzone na żywo: `Unable to resolve action …, repository not
+    # found`, zero wykonanych kroków. Kopia w prywatnym repo perimetru wygląda w diffie jak działająca
+    # i jest niewykonalna — dlatego pytamy o JEJ NIEOBECNOŚĆ, nie o obecność tej właściwej.
+    check("contrib/action NIE wraca do repo perimetru (uses: rozwiazuje sie bez tokenu, DEC-21)",
+          not (ROOT / "contrib/action.yml").exists(),
+          "install.sh znowu instaluje akcje do repozytorium, ktore dla dywizji jest nieczytelne")
     # Kontrakt i bramki jada TA SAMA droga: release repozytorium perimetru. `gcloud` w tym pliku oznaczalby
     # powrot do wymagania tozsamosci w GCP po stronie dywizji — czyli do stanu, ktory ta konstrukcja usuwa.
     check("contrib/action: pobiera kontrakt i paczke bramek z release'ow (bez gcloud)",
@@ -1168,6 +1181,21 @@ def test_przyklad_repo_dywizji() -> None:
           "merged == true" in str(zgloszenie.get("if", "")), str(zgloszenie.get("if")))
     uzywa_akcji = [s for s in zgloszenie["steps"] if "contrib@" in str(s.get("uses", ""))]
     check("workflow wola akcje contrib (a nie kopiuje jej logiki)", len(uzywa_akcji) == 1)
+
+    # SKĄD akcja jest brana — to jest bramka, nie kosmetyka. Ścieżka musi wskazywać na repozytorium, które
+    # runner umie pobrać BEZ tokenu (starter jest publiczny), a referencja musi być 40-znakowym SHA-em:
+    # ruchoma referencja to referencja mutowalna, a kto ją kontroluje, kontroluje kod uruchamiany
+    # z poświadczeniem dywizji. Placeholdera `<SHA…>` też nie przepuszczamy jako „prawie pinu".
+    #
+    # Sam SHA-a tutaj NIE wymagamy i to jest świadome: przykład w starterze nie może przypiąć commita,
+    # który powstanie dopiero po jego zmergowaniu. Wymagamy tego, co da się orzec o szablonie —
+    # że referencja nie jest RUCHOMA. Placeholder krzyczy „uzupełnij", `@main` udaje, że jest gotowe.
+    odn = str(uzywa_akcji[0]["uses"])
+    check("akcja brana ze STARTERA (publiczny), nie z repo perimetru (DEC-21)",
+          "/gcp-vpc-sc-starter/.github/actions/contrib@" in odn, odn)
+    ref = odn.split("@", 1)[1].split()[0]
+    check("odniesienie do akcji NIE jest ruchome (@main/@master/@v* = mutowalne)",
+          ref not in {"main", "master", "HEAD"} and not re.fullmatch(r"v[\d.]+", ref), odn)
     check("job walidacji NIE wola akcji wysylajacej dispatch",
           not [s for s in wf["jobs"]["walidacja"]["steps"] if "contrib@" in str(s.get("uses", ""))])
 
@@ -1272,7 +1300,8 @@ def klucze_inputs_akcji(tekst: str) -> set:
 
 def test_kanal_dywizji() -> None:
     print("\n== kanal dywizji (workflow_dispatch, nie repository_dispatch) ==")
-    akcja = (ROOT / "contrib/action.yml").read_text()
+    # Akcja czytana ze STARTERA: w rozpakowanym repozytorium jej nie ma i być nie może (DEC-21).
+    akcja = (STARTER / ".github/actions/contrib/action.yml").read_text()
     ext_tekst = (ROOT / ".github/workflows/external-intake.yml").read_text()
     ext = yaml.safe_load(ext_tekst)
     # `on:` w YAML-u jest wartoscia logiczna True (YAML 1.1), a nie napisem — stad ten odczyt.
@@ -2007,10 +2036,14 @@ def test_lint_and_pinning() -> None:
     # `.github/actions/*/action.yml` JEST na tej liście, bo akcje złożone też wołają akcje obce (bramki
     # treści pobierają `setup-python`). Lista, która ich nie obejmuje, zostawiłaby bez guardu pliki
     # wykonujące najwięcej — a to ta sama luka, którą zamyka DEC-16, tylko o piętro niżej.
+    #
+    # Akcja dywizji dołączona ze STARTERA, nie z rozpakowanego repo (DEC-21): tam jej nie ma, a jest to
+    # jedyny plik akcji, który uruchamia się w CUDZYM repozytorium — czyli ostatni, który wolno zostawić
+    # bez guardu na pinowanie.
     uses = []
     for f in (list((ROOT / ".github/workflows").glob("*.yml"))
               + sorted((ROOT / ".github/actions").glob("*/action.yml"))
-              + [ROOT / "contrib/action.yml"]):
+              + [STARTER / ".github/actions/contrib/action.yml"]):
         # Zakotwiczone na początku linii: `uses:` pojawia się też WEWNĄTRZ wzorca grepa w guardzie CI,
         # a niezakotwiczony wzorzec wyciągał stamtąd fragmenty regexa i zgłaszał je jako nieprzypięte akcje.
         uses += re.findall(r"^\s*-?\s*uses:\s*(\S+)", f.read_text(), re.M)
