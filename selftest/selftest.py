@@ -2864,6 +2864,14 @@ case "$*" in
     [ "${STUB_PROJECT_FAIL:-}" = "1" ] && awaria \\
       "ERROR: (gcloud.projects.describe) User [x@example.com] does not have permission to access projects instance [prj-example:get] (or it may not exist)."
     printf '%s\\t%s\\n' "123456789012" "${STUB_LIFECYCLE-ACTIVE}" ;;
+  # `beta billing projects describe` NIE wpada w galaz `projects describe ` wyzej: tamten wzorzec jest
+  # zakotwiczony na poczatku `$*`, a tu `$*` zaczyna sie od `beta billing`. Trzy wartosci zamiast dwoch,
+  # bo check ma trzy wyjscia: True (jest), False (nie ma) i PUSTE (nie odczytalem) — a to ostatnie musi
+  # dac inny komunikat niz „nie ma", inaczej brak jednej roli u recenzenta wyglada jak wada cudzego projektu.
+  *"billing projects describe "*)
+    [ "${STUB_FAIL:-}" = "billing" ] && awaria \\
+      "ERROR: (gcloud.beta.billing.projects.describe) PERMISSION_DENIED: caller lacks billing.resourceAssociations.list"
+    printf '%s\\n' "${STUB_BILLING-True}" ;;
   *"service-accounts describe "*)
     for arg in "$@"; do case " $STUB_SA_OK " in *" $arg "*) exit 0 ;; esac; done
     exit 1 ;;
@@ -2944,6 +2952,59 @@ def test_preflight() -> None:
     check("preflight: nieudany odczyt projektu cytuje odpowiedz API i nazywa obie mozliwosci",
           p.returncode != 0 and "NIE ISTNIEJE albo brak dostępu" in p.stdout
           and "or it may not exist" in p.stdout, p.stdout + p.stderr)
+
+    # ------------------------------------------------------------------ konto rozliczeniowe (check 1b)
+    # ZMIERZONE NA ZYWEJ ORGANIZACJI: przed tym checkiem projekt BEZ konta rozliczeniowego dostawal wyjscie
+    # BAJT W BAJT takie samo jak projekt, ktory je ma — z linia `pre-flight zaliczony` wlacznie. Pre-flight
+    # o billingu po prostu MILCZAL, wiec recenzent nie mial z czego sie dowiedziec, ze pytanie nie padlo.
+    #
+    # SEVERITY JEST TU CZESCIA ASERCJI, NIE SZCZEGOLEM. Sprawdzamy JEDNOCZESNIE, ze ostrzezenie pada
+    # I ze kod wyjscia zostaje ZEROWY. Hipoteze „brak billingu = wywolania API sie odbijaja" zmierzono
+    # i obalono (odczyt przechodzi; `services enable` na chronionej usludze konczy sie sukcesem), wiec
+    # twardy BLAD zatrzymywalby kandydata POPRAWNEGO. Ta asercja istnieje po to, zeby ktos „poprawiajacy
+    # przeoczenie" na `problem` wywrocil test, zamiast po cichu zamienic ostrzezenie w blokade.
+    p = sh(baza, cwd=ROOT, env=env)
+    check("preflight: konto rozliczeniowe PODPIETE = OK", p.returncode == 0
+          and "konto rozliczeniowe podpięte" in p.stdout, p.stdout + p.stderr)
+
+    p_bez = sh(baza, cwd=ROOT, env=dict(env, STUB_BILLING="False"))
+    check("preflight: BRAK konta rozliczeniowego = UWAGA, ale pre-flight NIE JEST blokowany",
+          p_bez.returncode == 0 and "UWAGA" in p_bez.stdout
+          and "NIE MA konta rozliczeniowego" in p_bez.stdout, p_bez.stdout + p_bez.stderr)
+
+    # ANTY-TAUTOLOGIA CZESC 1 — check musi CZYTAC wartosc, a nie wypisywac stalej. Gdyby byl no-opem,
+    # oba przebiegi dalyby identyczne wyjscie i asercja wyzej zzielieniala by na samej obecnosci slowa.
+    check("preflight: wyjscie dla projektu Z billingiem ROZNI SIE od wyjscia BEZ (check nie jest no-opem)",
+          p.stdout != p_bez.stdout, p.stdout + "\n---\n" + p_bez.stdout)
+
+    # Nieodczytany billing to NIE jest „billingu nie ma". Odczyt wymaga uprawnienia z domeny billingu,
+    # ktorego read-only zestaw recenzenta swiadomie nie zawiera — wiec brak roli ma byc widoczny jako
+    # osobny stan, a nie jako ostrzezenie o CUDZYM projekcie, ktorego nikt nie umie potem naprawic.
+    p = sh(baza, cwd=ROOT, env=dict(env, STUB_FAIL="billing"))
+    check("preflight: NIEODCZYTANY billing cytuje odpowiedz i nie udaje 'brak billingu'",
+          p.returncode == 0 and "nie zweryfikowano konta rozliczeniowego" in p.stdout
+          and "billing.resourceAssociations.list" in p.stdout, p.stdout + p.stderr)
+
+    p = sh(baza, cwd=ROOT, env=dict(env, STUB_BILLING=""))
+    check("preflight: PUSTE billingEnabled = 'nie odczytalem', nie ciche OK ani 'nie ma'",
+          p.returncode == 0 and "nie odczytałem pola billingEnabled" in p.stdout, p.stdout + p.stderr)
+
+    # ANTY-TAUTOLOGIA CZESC 2 — rozbroj DOKLADNIE linie werdyktu i powtorz TEN SAM przypadek.
+    # Podmiana calego lancucha, nie wyrazenie regularne: gdy linia sie zmieni, podmiana nie zajdzie
+    # i test padnie glosno, zamiast po cichu zzielieniec na nieaktualnej kotwicy.
+    zrodlo_b = (ROOT / "tools/preflight_check.sh").read_text()
+    linia_bill = [w for w in zrodlo_b.splitlines() if 'uwaga "projekt NIE MA konta rozliczeniowego' in w]
+    check("preflight: linia werdyktu o billingu istnieje (kotwica anty-tautologii)",
+          len(linia_bill) == 1, str(linia_bill))
+    if len(linia_bill) == 1:
+        rozbrojony = ROOT / "tools/preflight_rozbrojony.sh"
+        rozbrojony.write_text(zrodlo_b.replace(linia_bill[0], '  ok "ROZBROJONE — bez sprawdzenia billingu"'))
+        p = sh(["bash", "tools/preflight_rozbrojony.sh", "--project", "prj-example", "--number", "123456789012"],
+               cwd=ROOT, env=dict(env, STUB_BILLING="False"))
+        check("preflight: po ROZBROJENIU projekt BEZ billingu nie dostaje ani slowa (asercja nie jest pusta)",
+              p.returncode == 0 and "NIE MA konta rozliczeniowego" not in p.stdout
+              and "ROZBROJONE" in p.stdout, p.stdout + p.stderr)
+        rozbrojony.unlink()
 
     p = sh(baza + ["--identity", "serviceAccount:sa-example@prj-example.iam.gserviceaccount.com"], cwd=ROOT, env=env)
     check("preflight: ISTNIEJACE konto serwisowe przechodzi", p.returncode == 0, p.stdout + p.stderr)
