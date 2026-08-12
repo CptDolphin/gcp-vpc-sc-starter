@@ -28,3 +28,13 @@ output "view_name" {
   description = "Pełna nazwa widoku — jednostka, na której nadaje się dostęp do surowego strumienia odmów."
   value       = local.view_name
 }
+
+output "config_view_name" {
+  description = "Widok zmian konfiguracji granicy (ACM). To jest wejście alertu „konfiguracja zmieniona poza pipeline'em” — obserwator czyta ten widok, bo log-based metryka tego wpisu ZOBACZYĆ NIE MOŻE (leży w `_Required` organizacji, a metryki log-based istnieją tylko per projekt)."
+  value       = "${local.bucket_name}/views/${local.config_view_name}"
+}
+
+output "config_delivery_check" {
+  description = "Czy sink dostarcza WPISY O ZMIANIE GRANICY. Zwraca 0 dopóki nikt nie tknie ACM — żeby to potwierdzić, zmień cokolwiek w granicy spoza pipeline'u i powtórz."
+  value       = "gcloud logging read 'protoPayload.serviceName=\"accesscontextmanager.googleapis.com\"' --project=${var.sink_project_id} --bucket=${var.bucket_id} --location=${var.bucket_location} --view=${local.config_view_name} --freshness=1h --format='value(protoPayload.methodName)' | wc -l"
+}
