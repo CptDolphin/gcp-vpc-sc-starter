@@ -29,4 +29,3 @@ members:
       - serviceAccount:sa-analytics@prj-example-app-dev.iam.gserviceaccount.com
       external_resources:
       - s3://example-approved-dataset
-  exceptions: []

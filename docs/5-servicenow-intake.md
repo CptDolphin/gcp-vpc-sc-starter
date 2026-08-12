@@ -19,7 +19,7 @@ perimetru i nie wywołuje API Google.
 | Robi | Nie robi |
 |---|---|
 | zbiera wniosek w ustrukturyzowanej formie | nie zapisuje niczego w Access Context Managerze |
-| przeprowadza approval (dywizja → networking → security dla profili `risk: high`) | nie decyduje, czy projekt jest chroniony (o tym decyduje merge PR-a i `stage`) |
+| przeprowadza approval (dywizja → networking → security dla profili `risk: high`) | **nie jest miejscem, w którym zgoda Security zaczyna obowiązywać** — tym jest wpis w `perimeter/policy.yaml` §`egress_approvals` (DEC-23) |
 | wysyła `workflow_dispatch` do repo perimetru | nie tworzy projektów GCP ani sieci (patrz §7) |
 | zostaje rekordem „kto poprosił, kto zatwierdził, kiedy" | nie zastępuje audytu w gicie — ten jest w historii PR-ów |
 
@@ -43,7 +43,7 @@ Nazwy techniczne po lewej to nazwy zmiennych w Catalog Item; automat wysyła je 
 | `profiles` | Multi-row (lista) | tak, min. 1 | każdy wiersz: `name` + parametry | dozwolone nazwy = katalog `perimeter/profiles/` opublikowany w kontrakcie |
 | `profiles[].params` | Key-value per wiersz | tak | klucze = `parameters` profilu | brak parametru → OPA odrzuca PR z nazwą brakującego pola |
 | `use_case` | Multi-line text | tak | min. 40 znaków | nie trafia do YAML-a; zostaje w tickecie i w opisie PR-a jako uzasadnienie |
-| `data_classification` | Choice | tak | słownik klasyfikacji danych organizacji | steruje tym, czy wymagany jest approval Security (profile `risk: high` — zawsze) |
+| `data_classification` | Choice | tak | słownik klasyfikacji danych organizacji | wejście do decyzji Security, nie jej egzekwowanie — bramka czyta `risk` profilu z katalogu, a nie to pole (DEC-23) |
 | `requested_by` | Reference (User) | auto | — | wypełnia SNOW |
 
 **Czego formularz świadomie NIE ma:**
@@ -68,6 +68,20 @@ wnioskodawca (dywizja)
       └─ approval 3: security  ── TYLKO gdy któryś z profili ma `risk: high`
                                   (dziś: bq-omni-external-read — jedyny, który wypuszcza dane z GCP)
 ```
+
+**Approval 3 jest ZAPISEM DECYZJI, a nie jej egzekwowaniem — i ta różnica kosztowała już jeden defekt.**
+Do 2026-08-12 ten diagram był jedynym miejscem, w którym udział Security istniał: `perimeter/projects.yaml`
+ma w CODEOWNERS wyłącznie zespół sieciowy, a pole `risk` nie sterowało niczym (`grep -rn "risk" terraform/
+policy/ .github/` → publikacja w kontrakcie i enum w schemacie, zero bramek). Ticket z pominiętym approvalem
+3 wjeżdżał do granicy tak samo gładko jak każdy inny.
+
+Od DEC-23 zgoda Security **materializuje się jako wpis** w `perimeter/policy.yaml` §`egress_approvals` —
+w pliku, którego Security jest właścicielem w CODEOWNERS — i wymienia członka, profil oraz **dokładne cele**,
+z obowiązkową datą wygaśnięcia. Bez tego wpisu reguła OPA odrzuca wniosek, i robi to **także na ścieżce
+apply**, więc nie da się jej ominąć commitem prosto na gałąź domyślną. Praktyczna konsekwencja dla ścieżki
+ticketowej: po approvalu 3 ktoś z Security otwiera jednolinijkowy pull request do `policy.yaml`. To jest
+jedyny krok ręczny, jaki ta zgoda dokłada — i jedyny, który zostawia po sobie ślad dający się zaudytować bez
+dostępu do ServiceNow i bez dostępu do GitHuba.
 
 Po ostatnim approvalu Flow Designer wysyła:
 
