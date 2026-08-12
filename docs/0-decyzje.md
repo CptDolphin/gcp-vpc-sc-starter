@@ -1864,3 +1864,110 @@ Nagłówek `boundary-probe.yml` mówi teraz wprost, czego ten workflow **nie mie
 * **Zostawienie zasady „bez maszyny" i uznanie egressu za nieweryfikowalny** — odrzucone, bo to zamienia
   ograniczenie budżetowe w milczącą lukę: perimetr bez zmierzonego egressu chroni kierunek łatwiejszy
   do zmierzenia, a nie ten, dla którego został wdrożony.
+
+## DEC-26 — Werdykt bramki niesie ADNOTACJA i podsumowanie, nigdy kolor przebiegu; narzędzia mają jedno źródło, sumę i ponawianie
+
+### Kontekst
+
+Przebieg bramek treści padł na kroku instalującym narzędzia:
+
+```
+curl: (60) SSL certificate problem: self-signed certificate
+##[error]Process completed with exit code 60.
+```
+
+Wszystkie kroki bramek poniżej dostały `outcome=skipped` — **ani jedna bramka nie wystartowała**. Ten sam
+przebieg wznowiony cztery minuty później przeszedł normalnie i odrzucił wniosek treściowo (`32 tests,
+26 passed, 6 failures`). W interfejsie oba wyglądały identycznie: czerwony X przy „schema, policy and
+budget". Kto poprzestałby na kolorze, zaraportowałby „bramka odrzuciła wniosek" o przebiegu, w którym
+bramek nie było — i zamknąłby wniosek z błędnym powodem.
+
+Druga strona tej samej monety została zmierzona osobno: krok z `continue-on-error: true` raportuje w REST
+API `steps[].conclusion: "success"` **mimo `##[error]` w logu**, bo per-krokowego `outcome` API nie wystawia
+w ogóle. Razem: **kolor przebiegu nie niesie werdyktu w żadną stronę**. To jest ta sama zasada, dla której
+`PERMISSION_DENIED` nie rozstrzyga między odmową VPC-SC a wyłączonym API — kod nie jest werdyktem, werdykt
+jest w treści.
+
+Trzeci fakt, bez którego rozwiązanie byłoby inne. `conftest` był pobierany z sieci **przy każdym**
+uruchomieniu bramek, z **sześciu** osobnych kopii tego samego `curl`-a (`bramki-tresci`, `plan`, `apply`,
+`intake`, `external-intake`, `publish-gates`), **bez żadnej weryfikacji** pobranego pliku binarnego — na
+ścieżce jedynego mutatora granicy bezpieczeństwa organizacji.
+
+### Decyzja
+
+**1. Werdykt idzie adnotacją i sekcją `$GITHUB_STEP_SUMMARY`, a klasyfikuje go krok `if: always()`.**
+Trzy stany mają trzy różne tytuły adnotacji:
+
+| stan | tytuł adnotacji | co znaczy dla wnioskodawcy |
+|---|---|---|
+| awaria narzędzi | `BRAMKI NIE WYKONALY SIE (awaria narzedzi, NIE odrzucenie wniosku)` | werdykt **nie zapadł**, powtórz przebieg |
+| odrzucenie treści | `WNIOSEK ODRZUCONY PRZEZ BRAMKE TRESCI` | powtórzenie nic nie zmieni, popraw wniosek |
+| przejście | brak adnotacji, `✅ WERDYKT: ZALICZONY` w podsumowaniu | — |
+
+Klasyfikacja stoi na **dwóch znacznikach zapisywanych przez kroki, które naprawdę się wykonały**
+(`${RUNNER_TEMP}/vpcsc-narzedzia-ok` i `…/vpcsc-bramki-tresci-ok`), nie na czyjejś interpretacji stanu
+joba. Brak pierwszego znacznika kończy się `exit 1` — „nie wiem, czy bramki się wykonały" nigdy nie może
+być traktowane jak przejście.
+
+**2. Narzędzia bramek powstają w JEDNEJ akcji złożonej** (`.github/actions/narzedzia`), która: pinuje
+wersję, **weryfikuje pobranie sumą SHA-256** wpisaną w akcji, ponawia pobranie (`--retry 5
+--retry-all-errors`, bo `--retry-all-errors` ponawia także błąd `60`, czyli dokładnie zmierzony tryb
+awarii) i sama melduje swoją porażkę jako „bramki nie wykonały się". Źródłem zostaje GitHub Releases.
+
+**3. `continue-on-error` ma powód zapisany obok albo znika.** Na powierzchni bramek (`.github/actions/**`)
+flaga jest zakazana; w workflowach wymaga `id`, komentarza `# POWOD (continue-on-error): …` bezpośrednio
+nad flagą i wypisania `steps.<id>.outcome` do podsumowania. Pilnuje tego `tools/continue_on_error_check.py`
+wołany z bramek treści, czyli na obu torach.
+
+### Konsekwencje
+
+* Czerwień z awarii środowiska jest odróżnialna od odrzucenia **bez czytania logu** — w interfejsie
+  (adnotacja na górze strony przebiegu + sekcja podsumowania) i przez API
+  (`GET /repos/{o}/{r}/check-runs/{id}/annotations`).
+* Pobranie narzędzia na ścieżce mutatora granicy przestaje być niekontrolowane: podmieniony artefakt
+  wywraca krok, zamiast wejść na `/usr/local/bin` i orzekać o wniosku.
+* **Kierunek degradacji przestaje być przypadkowy.** Dotąd awaria pobrania zatrzymywała apply wyłącznie
+  dlatego, że `set -e` łapał kod wyjścia `curl` — nic tego nie asertowało. Teraz robi to jawna klasyfikacja
+  z `exit 1`.
+* Cena: jedna akcja złożona więcej i jeden poziom zagnieżdżenia (`bramki-tresci` woła `narzedzia`).
+  Selftest musi rozwijać akcje lokalne **rekurencyjnie**, inaczej asercje o bramkach przestają je widzieć —
+  to jest dokładnie ta klasa błędu, którą ten starter tropi gdzie indziej, więc rekurencja weszła razem
+  ze zmianą.
+* Wersja `conftest` przestaje być zmienialna z workflowa: jest stałą w akcji, nie wejściem. Podmiana
+  jednego pola w `with:` byłaby podmianą narzędzia orzekającego o granicy i wyglądałaby w diffie na
+  zmianę konfiguracji.
+
+### Alternatywy odrzucone
+
+**Nośnik werdyktu**
+
+* **Kod wyjścia kroku.** Odrzucone **pomiarem**: REST API nie wystawia kodów wyjścia, a job wołający akcję
+  złożoną ma w `steps[]` **jeden** wpis (`Run ./.github/actions/bramki-tresci`, `conclusion: failure`) —
+  kroki wewnątrz akcji złożonej nie pojawiają się tam w ogóle. Nośnik, którego nie widać, nie rozróżnia.
+* **Nazwa kroku niosąca werdykt** (np. „awaria = bramki nie wykonały się"). Odrzucone z tego samego
+  pomiaru: nazwy kroków wewnątrz akcji złożonej też nie są przez API wystawiane.
+* **Osobny check na pull requeście** (własny check run przez API). Wymaga `checks: write` w jobie, który
+  dziś ma `contents: read` i stoi na ścieżce mutatora granicy. Poszerzanie uprawnień po to, żeby ładniej
+  raportować, jest złym kierunkiem — a przy tym `apply` biegnie z pusha, gdzie żadnego PR-a nie ma.
+* **Komentarz na pull requeście.** Istniałby wyłącznie na jednym torze: `apply` rusza z pusha na gałąź
+  domyślną, a `intake`/`external-intake` w ogóle nie działają w kontekście PR-a. Do tego wymaga
+  `pull-requests: write` i generuje szum na każdym przebiegu — a szum jest sposobem, w jaki bramki umierają.
+
+**Dostarczanie narzędzi** (ograniczenie nadrzędne: starter jest publiczny i ma dać się odtworzyć
+w środowisku, które nie ma naszej infrastruktury — więc każdy wariant wymagający NASZEGO rejestru, lustra
+albo runnera odpada bez dyskusji)
+
+* **Obraz kontenera z narzędziami** (`container:` w jobie albo własny obraz). Wymaga rejestru, a `container:`
+  przenosi do obrazu **cały** job — razem z terraformem, `gcloud` i wymianą tokenu WIF. Blast-radius
+  nieproporcjonalny do problemu, który brzmi „jeden `curl` bywa niedostępny".
+* **`actions/cache` na binarnym pliku.** Cache jest per-repozytorium, pusty przy pierwszym przebiegu i po
+  siedmiu dniach bez trafienia, a chybienie spada z powrotem na sieć. Zmienia **częstość** awarii, nie jej
+  **tryb** — a dokłada drugi mechanizm do diagnozowania, gdy coś pójdzie nie tak.
+* **Obca akcja `setup-conftest`.** Dokłada dostawcę na ścieżce, na której guard pinowania istnieje właśnie
+  po to, żeby liczbę takich dostawców ograniczać. Wymienia jedno pobranie z sieci na inne pobranie z sieci
+  plus jeden podmiot, który kontroluje, co się wykona z naszym tokenem OIDC.
+* **Vendorowanie pliku binarnego w repozytorium.** ~30 MB w historii gita, aktualizacja poza zasięgiem
+  Dependabota, a pytanie „czy to jest ten plik" zamienia się w pytanie o historię repo zamiast o sumę
+  kontrolną, którą można sprawdzić jednym poleceniem.
+* **Suma kontrolna brana z `checksums.txt` obok wydania.** Odrzucone, bo plik z sumami leci z tego samego
+  miejsca i tym samym kanałem, więc potwierdzałby sam siebie. Suma jest wpisana w akcji.

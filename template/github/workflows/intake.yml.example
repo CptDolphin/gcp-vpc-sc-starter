@@ -94,13 +94,12 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: install tooling
-        run: |
-          pip install --quiet pyyaml check-jsonschema
-          curl -sSfL -o /tmp/conftest.tar.gz \
-            https://github.com/open-policy-agent/conftest/releases/download/v0.56.0/conftest_0.56.0_Linux_x86_64.tar.gz
-          tar -xzf /tmp/conftest.tar.gz -C /tmp conftest
-          sudo mv /tmp/conftest /usr/local/bin/
+      # Jedno miejsce dla wszystkich narzedzi bramek: pin + suma kontrolna + ponawianie, a porazka
+      # melduje sie jako „bramki NIE wykonaly sie", nie jako czerwien nierozroznialna od odrzucenia
+      # wniosku (DEC-26). Wczesniej ten sam `curl` stal w szesciu plikach, w zadnym z suma kontrolna.
+      - uses: ./.github/actions/narzedzia
+        with:
+          pakiety_python: pyyaml check-jsonschema
 
       # TEST MODE — bounded on purpose, because a test facility on the entry path of a security boundary is
       # a hole unless somebody wrote down what bounds it.
