@@ -1850,10 +1850,12 @@ Nagłówek `boundary-probe.yml` mówi teraz wprost, czego ten workflow **nie mie
   `RESOURCES_NOT_IN_SAME_SERVICE_PERIMETER` zaksięgowane jako naruszenie **egress** — czyli sonda widzi
   „odmowę VPC-SC", nie mierząc access levelu. Przy ręcznym sondowaniu ustawiaj
   `CLOUDSDK_BILLING_QUOTA_PROJECT` na sondowany projekt.
-* **Okno dry-run dla egressu NIE jest ślepe** (zmierzone): maszyna w projekcie będącym wyłącznie w `spec`
-  produkuje wpisy `dryRun=true` + `egressViolations`, czyli dwustopniowy onboarding chroni również ten
-  kierunek. Zastrzeżenie: gdy konfiguracja egzekwowana już odmawia danego wywołania, **osobny wpis dry-run
-  nie powstaje** — okno pokazuje to, co dopiero zacznie być blokowane.
+* **Okno dry-run dla egressu NIE jest ślepe wobec celów SPOZA perimetru** (zmierzone): maszyna w projekcie
+  będącym wyłącznie w `spec` produkuje wpisy `dryRun=true` + `egressViolations`. Dwa zastrzeżenia, oba
+  zmierzone: gdy konfiguracja egzekwowana już odmawia danego wywołania, **osobny wpis dry-run nie powstaje**
+  (okno pokazuje to, co dopiero zacznie być blokowane); a **ruch do innego członka, który też jest w dry-run,
+  nie generuje wpisu W OGÓLE**, bo dla konfiguracji dry-run oba końce są wewnątrz perimetru — **DEC-27**.
+  Ta sekcja tego nie widziała, bo mierzona maszyna wołała wyłącznie cele spoza granicy.
 * **Koszt przestaje być zerowy** — rząd eurocentów za przelot — i weryfikacja egressu przestaje dać się
   wykonać wyłącznie z CI. Wymaga też włączenia `compute.googleapis.com` w projekcie członkowskim; API
   wraca do stanu wyłączonego w tym samym zadaniu, a potwierdzenie tego jest częścią procedury.
