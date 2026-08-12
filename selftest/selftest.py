@@ -4048,6 +4048,34 @@ def test_boundary_probe() -> None:
     check("boundary-probe czyta stan granicy z API (status i spec), nie z gita",
           "perimeters describe" in tresc and "status" in tresc and "spec" in tresc)
 
+    # KROK AUDYTOWY MUSI CZEKAC NA WPIS, NIE ORZEKAC OD RAZU (#1999). Wpis pojawia sie w `logging read`
+    # po ~14 s, a krok biegnie sekundy po sondach — pojedyncze zapytanie zwracalo zero i wywracalo
+    # przebieg, w ktorym granica zadzialala poprawnie. Sprawdzamy MECHANIZM (petla + odstep + gorna
+    # granica prob), a nie obecnosc slowa o ponawianiu: komentarz „przy pustym wyniku powtorz krok" byl
+    # w pliku juz wczesniej i sprawial, ze ponawianie WYGLADALO na obecne, choc go nie bylo.
+    audyt = tresc[tresc.index("- name: odmowa w audit-logu"):]
+    check("boundary-probe: krok audytowy PONAWIA odczyt w petli",
+          'for PROBA in $(seq 1 "$PROBY")' in audyt
+          and 'sleep "$ODSTEP"' in audyt
+          and "PROBY=" in audyt and "ODSTEP=" in audyt)
+
+    # Rozroznienie „nie udalo sie przeczytac" (koniec natychmiast) od „jeszcze nie ma" (czekaj dalej).
+    # Bez tego awaria uprawnien wygladalaby jak wolno indeksujacy log i kosztowalaby dwie minuty ciszy.
+    # `index()` na brakujacym napisie rzuca wyjatkiem, a test ma PADAC, nie wybuchac: wywrocony selftest
+    # przerywa cala reszte asercji, wiec rozbrojenie jednej linii ukrywaloby dziesiatki innych.
+    check("boundary-probe: blad odczytu konczy krok NATYCHMIAST, nie po petli",
+          "::error::nie udalo sie przeczytac audit-logu" in audyt and "sleep" in audyt
+          and audyt.index("::error::nie udalo sie przeczytac audit-logu") < audyt.index("sleep"))
+
+    # Filtr `dryRun="false"` NIE LAPIE NIGDY NICZEGO — pole istnieje wylacznie przy dry-run. Asercja
+    # pilnuje, zeby ta pomylka nie wrocila tylnymi drzwiami przy nastepnej edycji filtra.
+    # ...ale liczy sie WYLACZNIE kod, nie komentarz. Plik OPISUJE te pulapke w komentarzu i pierwsza
+    # wersja tej asercji lapala wlasnie ostrzezenie przed nia — czyli karala dokumentacje za to, ze
+    # istnieje. Patrzymy tylko na linie niebedace komentarzem.
+    kod_workflow = [w for w in tresc.splitlines() if not w.lstrip().startswith("#")]
+    check("boundary-probe: filtr nie uzywa dryRun rownego false",
+          not any('dryRun="false"' in w for w in kod_workflow))
+
     # Wyciagamy kod werdyktu z pliku i uruchamiamy go na wejsciach, ktorych nigdy nie widzial.
     # `[-1]` — bierzemy OSTATNI heredok python3 tego pliku (werdykt), nie pierwszy (odczyt stanu granicy).
     kod = re.search(r"python3 - <<'PY'[^\n]*\n(.*?)\n\s*PY\n", tresc[tresc.index("- name: sondy"):], re.S)
