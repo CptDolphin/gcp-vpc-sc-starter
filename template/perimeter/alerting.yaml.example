@@ -28,11 +28,25 @@ schema_version: 1
 # realnie budzacy (PagerDuty / Opsgenie / webhook do dyzuru) podmienia sie TUTAJ i nigdzie indziej —
 # `monitoring.tf` czyta te dwie nazwy, nie zna typu kanalu.
 #
-# UWAGA OPERACYJNA, KTORA WYWRACA PIERWSZE WDROZENIE: kanal e-mail zalozony przez API startuje jako
-# `verificationStatus: UNVERIFIED`. Google wysyla na ten adres jeden mail z linkiem i DO CZASU KLIKNIECIA
-# NIE DOSTARCZA POWIADOMIEN — polityka alertu wyglada wtedy na uzbrojona (ma `notificationChannels`),
-# incydent sie otwiera, a do skrzynki nie przychodzi nic. Po pierwszym `apply` sprawdz:
-#   gcloud alpha monitoring channels list --project=<projekt> --format='table(displayName,verificationStatus)'
+# UWAGA OPERACYJNA, KTORA WYWRACA PIERWSZE WDROZENIE — I POPRAWKA DO NIEJ. Tryb awarii jest realny:
+# polityka alertu wyglada na uzbrojona (ma `notificationChannels`), incydent sie otwiera, a do skrzynki
+# nie przychodzi nic. Ale sprawdzenie, ktore tu wczesniej stalo, NIE UMIE go wykryc:
+#
+#   gcloud alpha monitoring channels list --project=<projekt> --format='table(...,verificationStatus)'
+#
+# Kolumna wraca PUSTA i zadna wersja tej komendy tego nie naprawi. `verificationStatus` jest enumem
+# proto3, wiec wartosc domyslna `VERIFICATION_STATUS_UNSPECIFIED` nie serializuje sie do odpowiedzi —
+# a Google opisuje ja jako „stan nieznany, pominiety ALBO NIEADEKWATNY (kanaly, ktore weryfikacji ani
+# nie wspieraja, ani nie wymagaja)". Puste pole nie znaczy wiec „niezweryfikowany"; znaczy „nie wiesz".
+# Zmierzone: jawna maska `?fields=...,verificationStatus` tez go nie zwraca, a po `:sendVerificationCode`
+# (HTTP 200) pole NADAL nie istnieje — choc stan `UNVERIFIED` jest wartoscia niedomyslna i musialby sie
+# pojawic, gdyby kanal weryfikacji wymagal. Kontrola pozytywna metody: `type`, `displayName` i `enabled`
+# z tego samego odczytu przychodza poprawnie.
+#
+# CO SPRAWDZAC ZAMIAST TEGO (DEC-28): `python3 tools/kanaly_check.py --project <projekt>`. Narzedzie
+# pyta o to, co da sie rozstrzygnac — czy kazda polityka `CRITICAL` ma kanal, ktorego DORECZENIE
+# potwierdza maszyna — i nie udaje, ze wie cokolwiek o skrzynkach pocztowych. Doreczenie na `email`
+# potwierdza WYLACZNIE czlowiek, po tescie negatywnym z `docs/7-alerty.md`.
 channels:
   # Pojemnosc i higiena: budzet atrybutow, czlonkowie po `review_by`, nieudany apply.
   capacity:

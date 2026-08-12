@@ -155,7 +155,7 @@
           "type": "string",
           "format": "email",
           "pattern": "^[^@ ]+@[^@ ]+\\.[^@ ]+$",
-          "description": "Adres odbiorcy. Kanał e-mail założony przez API startuje jako UNVERIFIED i do czasu kliknięcia linku Google NIE dostarcza powiadomień — polityka wygląda wtedy na uzbrojoną, a skrzynka milczy."
+          "description": "Adres odbiorcy. Doręczalności kanału e-mail NIE POTWIERDZA żadne API Google — pole verificationStatus nie jest zwracane, a jego brak znaczy „nie wiesz”, nie „niezweryfikowany” (DEC-28). Polityka może wyglądać na uzbrojoną, a skrzynka milczeć; jedynym dowodem jest człowiek po teście negatywnym. Alert CRITICAL nie może stać wyłącznie na tym kanale — sprawdza to tools/kanaly_check.py."
         }
       }
     }

@@ -170,12 +170,19 @@ locals {
 # tak samo: odbiorca uczy się ignorować całą kategorię, bo dziewięć na dziesięć wiadomości nie wymaga
 # reakcji — i przegapia dziesiątą.
 #
-# `verification_status` JEST W STANIE I TO JEST WAŻNE PRZY PIERWSZYM WDROŻENIU: kanał e-mail założony przez
-# API startuje jako `UNVERIFIED`. Google wysyła jeden mail z linkiem i DO CZASU KLIKNIĘCIA NIE DOSTARCZA
-# POWIADOMIEŃ. Polityka wygląda wtedy na uzbrojoną (ma `notificationChannels`, incydent się otwiera),
-# a skrzynka milczy — czyli dokładnie ten tryb awarii, przed którym te alerty mają chronić, tylko o piętro
-# niżej. Po pierwszym apply potwierdź, że stoi tam `VERIFIED`:
-#   gcloud alpha monitoring channels list --project=<projekt> --format='table(displayName,verificationStatus)'
+# `verification_status` JEST W STANIE TERRAFORMA I NIE JEST DOWODEM NA NIC (DEC-28). Pole przychodzi puste,
+# bo API go NIE ZWRACA: `verificationStatus` to enum proto3, a jego wartość domyślna
+# `VERIFICATION_STATUS_UNSPECIFIED` nie serializuje się do odpowiedzi. Google opisuje tę wartość jako „stan
+# nieznany, pominięty ALBO NIEADEKWATNY (kanały, które weryfikacji ani nie wspierają, ani nie wymagają)" —
+# więc pusta wartość NIE ZNACZY „niezweryfikowany". Zmierzone na żywym API: jawna maska pola też go nie
+# zwraca, a po `:sendVerificationCode` (HTTP 200) pole nadal nie istnieje, choć `UNVERIFIED` jest wartością
+# niedomyślną i musiałaby się wtedy pojawić. Terraform tego pola nie ustawia i ustawić nie może —
+# jest `output only` i „illegal to specify a non-default value in Create() or Update()".
+#
+# Tryb awarii, przed którym to ostrzeżenie miało chronić, JEST REALNY (polityka z kanałem, który nic nie
+# dostarcza), tylko wykrywa się go inaczej — `python3 tools/kanaly_check.py --project <projekt>`: czy każda
+# polityka `CRITICAL` ma kanał, którego doręczenie potwierdza maszyna. Doręczenie na skrzynkę potwierdza
+# wyłącznie człowiek, po teście negatywnym z `docs/7-alerty.md`.
 
 resource "google_monitoring_notification_channel" "capacity" {
   count = local.alert_count
