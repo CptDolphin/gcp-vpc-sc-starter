@@ -55,7 +55,14 @@
 #   * werdykt „to była odmowa VPC-SC" stawia z TREŚCI odpowiedzi (`vpcServiceControlsUniqueIdentifier`),
 #     nigdy z samego kodu;
 #   * ma KONTROLĘ NEGATYWNĄ — usługę spoza `restricted_services`, która po promocji ma NADAL działać.
-#     Bez niej nie odróżnisz działającej granicy od zepsutego projektu, bo w obu odmawia „wszystko";
+#     Bez niej nie odróżnisz działającej granicy od zepsutego projektu, bo w obu odmawia „wszystko".
+#     TA KONTROLA JEST WAŻNA WYŁĄCZNIE DLA KIERUNKU WEJŚCIA i przeniesiona na egress świeciłaby na czerwono
+#     przy poprawnie działającej granicy. Z WNĘTRZA perimetru usługa spoza `vpc_accessible_services`
+#     dostaje odmowę `SERVICE_NOT_ALLOWED_FROM_VPC` — to jest działanie zamierzone, nie awaria. Zmierzone
+#     (2026-08-12, #2018): 132 takie wpisy w oknie 865, w tym 112 odmów już egzekwowanych; wpis tej klasy
+#     nie ma ANI `ingressViolations`, ANI `egressViolations` (DEC-31). Sonda egressowa
+#     (`tools/sonda_egress_wewnetrzna.py`) ma więc własne oczekiwanie: usługą, która ma nadal działać
+#     z wnętrza, jest usługa Z LISTY `vpc_accessible_services`, a nie „dowolna spoza `restricted_services`";
 #   * ma KONTROLĘ POZYTYWNĄ — wywołanie DOZWOLONE regułą ingress, które po promocji ma NADAL przechodzić.
 #     Bez niej nie odróżnisz granicy od odcięcia całego projektu.
 #
@@ -392,12 +399,23 @@ jobs:
               powody = [md.get("violationReason")] if md.get("violationReason") else []
               for klucz in ("ingressViolations", "egressViolations"):
                   powody += [v.get("violationReason") for v in md.get(klucz, []) if v.get("violationReason")]
+              # DWA MECHANIZMY ODMOWY, DWA WERDYKTY (DEC-31). „Odmowa VPC-SC" w odpowiedzi API wyglada tak
+              # samo, gdy granica odrzucila wywolanie z braku access levelu, i wtedy, gdy odrzucila je,
+              # bo dotknelo projektu ROZLICZENIOWEGO operatora (patrz naglowek). Drugi przypadek NIE JEST
+              # dowodem na regule ingress: sonda nie zmierzyla wtedy zadnego poziomu ani zadnej reguly.
+              # Rozpoznajemy go po tym samym, po czym rozpoznaje go raport — po uprawnieniu ZADANYM NA CELU.
+              artefakt = any(
+                  v.get("sourceType") == "Resource"
+                  and set(v.get("targetResourcePermissions") or []) == {"serviceusage.services.use"}
+                  for v in md.get("egressViolations", []) or []
+              )
+              znacznik = " · **ARTEFAKT PROJEKTU ROZLICZENIOWEGO — nie mierzy access levelu**" if artefakt else ""
               # `dryRun` wypisujemy JAWNIE — gdyby kiedykolwiek zaczelo przychodzic jako `False` zamiast
               # znikac, ten wypis pokaze to od razu, zamiast cicho zmienic znaczenie filtra wyzej.
               print(f"- `{p.get('methodName')}` · dryRun={md.get('dryRun', 'BRAK POLA')!r} · "
                     f"{powody or 'BRAK POWODU W WPISIE'} · "
                     f"principal `{p.get('authenticationInfo', {}).get('principalEmail')}` · "
-                    f"id `{md.get('vpcServiceControlsUniqueId')}`")
+                    f"id `{md.get('vpcServiceControlsUniqueId')}`{znacznik}")
           # WERDYKT PO IDENTYFIKATORACH, nie po liczbie wpisow. „Sa jakies odmowy w oknie" jest prawda takze
           # wtedy, gdy pochodza z poprzedniego przelotu sondy — zmierzone: 3 wpisy w logu, 2 identyfikatory
           # z odpowiedzi, ZERO wspolnych, a krok zaliczyl sie w 0 s. Pytamy wiec o TE wywolania.

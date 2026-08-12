@@ -27,6 +27,58 @@ Numer członka mieszka w rekordzie naruszenia i zależy od KIERUNKU:
 Kierunku nie wolno mylić: przy egressie `resourceNames`/`targetResource` wskazują zasób POZA perimetrem,
 więc przypisanie po nich obwinia stronę wołaną zamiast członka, którego dane wychodzą.
 
+TRZECIA KLASA NARUSZEŃ NIE MA ŻADNEJ Z TYCH DWÓCH TABLIC (`SERVICE_NOT_ALLOWED_FROM_VPC`, DEC-31)
+-------------------------------------------------------------------------------------------------
+Naruszenie z `vpcAccessibleServices` (`enableRestriction: true`) — wywołanie z sieci WEWNĄTRZ perimetru do
+usługi spoza `allowedServices` — nie ma ani `ingressViolations`, ani `egressViolations`. Nie jest ani
+wejściem, ani wyjściem: perimetr odmawia własnej sieci użycia usługi, której nie wpuścił na listę.
+
+Zmierzone na 865 wpisach z sinka (okno 2026-08-11T09:21 → 2026-08-12T16:33, org labu): 132 wpisy tej klasy,
+w tym 112 odmów EGZEKWOWANYCH (bez pola `dryRun`). Do liczby czytanej przez `promotion_gate` wchodziły —
+przez ścieżkę zapasową niżej, po `resource.labels.project_id` — i to jest jedyny powód, dla którego nie było
+tu cichego zera. Ścieżka zapasowa zbiera jednak WSZYSTKO, co wygląda na projekt, więc w 11 z tych 132 wpisów
+brała także numer projektu WOŁANEGO (u nas: projektu Google'a obsługującego usługę agentową); gdyby taki
+numer trafił kiedyś w numer INNEGO członka, wpis obciążyłby członka, który nie ma z wywołaniem nic wspólnego.
+
+Autorytatywnym polem dla tej klasy jest `protoPayload.resourceName` (nie `metadata.resourceNames`): niesie
+`projects/<numer>` projektu PO STRONIE PERIMETRU. Zmierzone na tych samych 865 wpisach: 132/132 wpisów bez
+rekordów naruszeń miało tam numer członka, a na 733 wpisach Z rekordami pole zgadzało się z członkiem
+wskazanym przez rekord w 733/733 — czyli nie jest to nowa heurystyka, tylko to samo źródło widziane z drugiej
+strony. Potwierdza to niezależnie `requestMetadata.callerNetwork` (`//compute.googleapis.com/projects/<id>/…`):
+dla tej klasy było obecne w 132/132 wpisach i wskazywało ten sam projekt.
+
+Ta klasa ZOSTAJE w liczbie bramki. Jej tryb awarii jest fałszywie uspokajający: workload członka używa usługi
+spoza `allowedServices`, po promocji przestaje działać, a naruszenie nie jest ani wejściem, ani wyjściem —
+więc licznik zbudowany na dwóch tablicach nie widziałby go z definicji.
+
+ARTEFAKT PROJEKTU ROZLICZENIOWEGO — naruszenie „egress", w którym nic nie wypływa (DEC-31)
+------------------------------------------------------------------------------------------
+Wywołanie wykonane z domyślnym `billing/quota_project` operatora dotyka DWÓCH projektów naraz: sondowanego
+(w perimetrze) i rozliczeniowego (poza nim). Granica odrzuca je jako `RESOURCES_NOT_IN_SAME_SERVICE_PERIMETER`
+i księguje jako naruszenie EGRESS, w którym `source` = członek, a `targetResource` = projekt rozliczeniowy.
+Raport czytał to jako „dane członka wychodzą na zewnątrz" i wysyłał właściciela po regułę egress — czyli po
+prawdziwą dziurę — za wywołanie, w którym nie wypłynął ani jeden bajt.
+
+Zmierzone na tym samym oknie: 160 wpisów tej klasy (152 na jednym członku, 8 na drugim), 159 od zredagowanej
+tożsamości CZŁOWIEKA z adresu domowego, wszystkie `google.storage.buckets.list`. Sygnaturą nie jest jednak ani
+tożsamość, ani metoda, tylko UPRAWNIENIE ŻĄDANE NA CELU:
+
+    sourceType == "Resource"                                   (nie ruch z sieci członka, tylko drugi zasób
+                                                                w tym samym żądaniu)
+    targetResourcePermissions == ["serviceusage.services.use"]  (dokładnie to jedno — zużycie kwoty)
+    targetResource            = projekt SPOZA listy członków
+
+`serviceusage.services.use` nie daje odczytu żadnych danych. Wpis, w którym na celu żądane jest COKOLWIEK
+ponad to (`storage.objects.list`, `bigquery.tables.getData`, …), przestaje pasować do sygnatury i wraca do
+liczby — dlatego to wykluczenie nie umie schować wypływu. Kontrola na tych samych danych: realny egress z
+sieci członka niesie `sourceType: "Network"` i uprawnienia danych (`storage.buckets.list` 243×,
+`storage.objects.list` 175×, `storage.buckets.get` 5×) i nie pasuje do sygnatury ani razu.
+
+Wykluczone wpisy NIE ZNIKAJĄ: idą do pliku wykluczeń obok dowodu (`--platform-json-out`) i do raportu,
+nad słowo „czysto". To jest ważne, bo kierunek tego błędu bywa odwrotny, niż wygląda: jeśli wśród wykluczonych
+tożsamości jest WORKLOAD, a nie człowiek przy laptopie, to jest realny przepływ do naprawy przed promocją —
+tyle że naprawia się go ustawieniem projektu rozliczeniowego, a nie regułą egress.
+
 CZEGO TEN RAPORT NIE MOŻE ZAWIERAĆ — i to nie jest usterka, tylko definicja (DEC-27). Ruch między dwoma
 członkami, którzy OBAJ są w dry-run, jest dla konfiguracji dry-run ruchem WEWNĄTRZ perimetru: nie narusza
 niczego, więc nie powstaje żaden wpis. Promocja przenosi jednego z nich do konfiguracji egzekwowanej i
@@ -93,33 +145,73 @@ import re
 import sys
 
 NUMER_PROJEKTU = re.compile(r"^projects/(\d+)$")
+SIEC_PROJEKTU = re.compile(r"^//compute\.googleapis\.com/projects/([^/]+)/")
+
+# Uprawnienie, którego obecność JAKO JEDYNEGO na celu oznacza „ten projekt jest tu tylko po to, żeby zapłacić
+# za kwotę". Nie daje odczytu żadnych danych, więc wpis o takim celu nie może być wypływem — patrz nagłówek.
+KWOTA = frozenset({"serviceusage.services.use"})
+
+# Nazwy kierunków wypisywane w raporcie. Trzecia pozycja istnieje, bo trzecia klasa naruszeń istnieje.
+WEJSCIE = "wejście"
+WYJSCIE = "wyjście"
+USLUGA_SPOZA_VPC = "usługa spoza allowedServices"
+KIERUNEK_NIEZNANY = "kierunek nierozpoznany"
 
 
-def numery_z_naruszen(meta: dict) -> set:
-    """Numery projektów-CZŁONKÓW implikowanych przez ten wpis, czytane po KIERUNKU naruszenia.
+def artefakt_projektu_rozliczeniowego(rekord: dict, jest_czlonkiem) -> bool:
+    """Czy ten rekord egress jest artefaktem projektu rozliczeniowego, a nie wypływem danych.
+
+    Sygnatura jest wąska CELOWO — ma nie umieć schować wypływu. Wymagamy naraz: źródła typu `Resource`
+    (a więc drugiego zasobu w tym samym żądaniu, nie ruchu z sieci członka), celu spoza listy członków
+    oraz zbioru uprawnień na celu równego DOKŁADNIE `{serviceusage.services.use}`. Cokolwiek, co czyta
+    dane, dokłada do tego zbioru własne uprawnienie i wpis wraca do liczby bramki.
+    """
+    if rekord.get("sourceType") != "Resource":
+        return False
+    if frozenset(rekord.get("targetResourcePermissions") or []) != KWOTA:
+        return False
+    cel = NUMER_PROJEKTU.match(str(rekord.get("targetResource", "")))
+    return bool(cel) and not jest_czlonkiem(cel.group(1))
+
+
+def przypisania_z_rekordow(meta: dict, jest_czlonkiem) -> list:
+    """(numer projektu, kierunek, czy artefakt) dla KAŻDEGO rekordu naruszenia w tym wpisie.
 
     Rekordy `ingressViolations`/`egressViolations` są źródłem autorytatywnym: mówią wprost, którego
-    członka dotyczy naruszenie. Dopiero ich brak uzasadnia sięganie po dane poglądowe (niżej).
+    członka dotyczy naruszenie. Dopiero ich brak uzasadnia sięganie po pola niżej.
     """
-    numery = set()
+    out = []
     for v in meta.get("ingressViolations", []) or []:
         m = NUMER_PROJEKTU.match(str(v.get("targetResource", "")))
         if m:
-            numery.add(m.group(1))
+            out.append((m.group(1), WEJSCIE, False))
     for v in meta.get("egressViolations", []) or []:
         m = NUMER_PROJEKTU.match(str(v.get("source", "")))
         if m:
-            numery.add(m.group(1))
-    return numery
+            out.append((m.group(1), WYJSCIE, artefakt_projektu_rozliczeniowego(v, jest_czlonkiem)))
+    return out
 
 
-def identyfikatory_zapasowe(meta: dict, entry: dict) -> set:
-    """Identyfikatory poglądowe — używane WYŁĄCZNIE, gdy wpis nie ma rekordów naruszeń.
+def przypisania_bez_rekordow(meta: dict, entry: dict) -> tuple:
+    """Przypisania dla wpisu, który NIE MA żadnej z dwóch tablic — plus nazwa użytego pola.
 
-    Nowa usługa albo nowy kształt wpisu nie może cicho wypaść z rachunku, więc bierzemy stąd wszystko,
-    co w ogóle wygląda na projekt: każdy `projects/<numer>` z `resourceNames` (nie tylko `[0]`) oraz
-    `project_id` z etykiet zasobu — mapa członków jest kluczowana i numerem, i identyfikatorem.
+    Kolejność jest wynikiem pomiaru, nie gustu. `protoPayload.resourceName` niesie `projects/<numer>`
+    projektu po stronie perimetru w 132/132 takich wpisów i zgadza się z rekordem naruszenia tam, gdzie
+    rekord w ogóle jest (733/733) — więc jest tym samym źródłem, nie nową heurystyką.
+
+    Stary zbiór poglądowy (`metadata.resourceNames` + `resource.labels.project_id`) zostaje jako OSTATNIA
+    deska: nowy kształt wpisu nie może cicho wypaść z rachunku. Jest jednak świadomie ostatni, bo zbiera
+    wszystko, co wygląda na projekt — łącznie z numerem projektu WOŁANEGO (zmierzone: 11 wpisów, w których
+    dokładał go obok właściwego członka).
     """
+    pp = entry.get("protoPayload", {})
+    reason = meta.get("violationReason") or ""
+    kierunek = USLUGA_SPOZA_VPC if "SERVICE_NOT_ALLOWED_FROM_VPC" in str(reason) else KIERUNEK_NIEZNANY
+
+    m = NUMER_PROJEKTU.match(str(pp.get("resourceName", "")))
+    if m:
+        return [(m.group(1), kierunek, False)], "protoPayload.resourceName"
+
     ident = set()
     for rn in meta.get("resourceNames", []) or []:
         m = NUMER_PROJEKTU.match(str(rn))
@@ -128,7 +220,19 @@ def identyfikatory_zapasowe(meta: dict, entry: dict) -> set:
     project_id = str(entry.get("resource", {}).get("labels", {}).get("project_id", ""))
     if project_id:
         ident.add(project_id)
-    return ident
+    if not ident:
+        return [], "brak"
+    return [(i, kierunek, False) for i in sorted(ident)], "zbiór poglądowy (resourceNames + project_id)"
+
+
+def siec_wolajaca(entry: dict) -> str:
+    """`project_id` sieci VPC, z której przyszło wywołanie — albo pusty string.
+
+    Dla klasy bez rekordów naruszeń to jedyne pole mówiące, CZYJ workload przestanie działać po promocji;
+    do raportu wchodzi jako namiar dla właściciela, nie jako podstawa przypisania.
+    """
+    m = SIEC_PROJEKTU.match(str(entry.get("protoPayload", {}).get("requestMetadata", {}).get("callerNetwork", "")))
+    return m.group(1) if m else ""
 
 
 def pokryte_przez_baseline(decl: dict, principal: str, service: str, method: str):
@@ -187,10 +291,18 @@ def main() -> int:
         po_identyfikatorze[str(m["project_number"])] = name
         po_identyfikatorze[str(m["project_id"])] = name
 
+    def jest_czlonkiem(ident: str) -> bool:
+        return ident in po_identyfikatorze
+
     counts = collections.Counter()
     detail = collections.defaultdict(collections.Counter)
     platforma = collections.Counter()
     platforma_detail = collections.defaultdict(collections.Counter)
+    rozliczeniowy = collections.Counter()
+    rozliczeniowy_detail = collections.defaultdict(collections.Counter)
+    klasy_wpisy = collections.Counter()          # violationReason → ile wpisów w oknie
+    klasy_zrodlo = collections.defaultdict(set)  # violationReason → z jakiego pola czytany członek
+    klasy_los = collections.defaultdict(collections.Counter)  # violationReason → co się z przypisaniem stało
     namiar = {}  # członek → jeden vpcServiceControlsUniqueId, gdy principal jest zredagowany
     obce = collections.Counter()
     nierozpoznane = []
@@ -205,28 +317,61 @@ def main() -> int:
         if isinstance(reason, list):
             reason = ", ".join(str(r) for r in reason if r)
         unikat = meta.get("vpcServiceControlsUniqueId", "")
+        siec = siec_wolajaca(entry)
 
-        identyfikatory = numery_z_naruszen(meta) or identyfikatory_zapasowe(meta, entry)
-        if not identyfikatory:
+        przypisania = przypisania_z_rekordow(meta, jest_czlonkiem)
+        zrodlo = "rekord naruszenia"
+        if not przypisania:
+            przypisania, zrodlo = przypisania_bez_rekordow(meta, entry)
+
+        klasy_wpisy[reason or "(bez violationReason)"] += 1
+        klasy_zrodlo[reason or "(bez violationReason)"].add(zrodlo)
+
+        if not przypisania:
             # Wpisu nie zrozumieliśmy. Policzenie go jako „nie nasz" jest dokładnie tym błędem, przez
             # który 26 naruszeń członka raportowało się jako czyste okno — więc raport pada, patrz niżej.
             nierozpoznane.append(f"{method} ({reason}) [{unikat or 'brak id'}]")
             continue
 
-        czlonkowie = {po_identyfikatorze[i] for i in identyfikatory if i in po_identyfikatorze}
-        if not czlonkowie:
+        # Jeden wpis może dotyczyć dwóch członków i nieść dla nich RÓŻNE rekordy. Wykluczamy członka
+        # dopiero wtedy, gdy KAŻDY rekord wskazujący na niego jest artefaktem — wpis mieszany (jeden
+        # rekord o kwocie, drugi o danych) ma zostać w liczbie.
+        trafienia = {}
+        for ident, kierunek, artefakt in przypisania:
+            name = po_identyfikatorze.get(ident)
+            if name is None:
+                continue
+            t = trafienia.setdefault(name, {"artefakt": True, "kierunki": set()})
+            t["kierunki"].add(kierunek)
+            t["artefakt"] = t["artefakt"] and artefakt
+
+        if not trafienia:
             obce[f"{principal} → {method} ({reason})"] += 1
+            klasy_los[reason or "(bez violationReason)"]["spoza listy członków"] += 1
             continue
+
         regula = pokryte_przez_baseline(decl, principal, service, method)
-        for member in czlonkowie:  # jeden wpis może dotyczyć dwóch członków — liczy się obu raz
+        opis_sieci = f", sieć: {siec}" if siec and zrodlo != "rekord naruszenia" else ""
+        for member, t in trafienia.items():
+            kierunki = "/".join(sorted(t["kierunki"]))
             if regula:
                 # Ruch platformy pokryty jawną regułą baseline. NIE znika — idzie do własnego licznika,
                 # do raportu i do osobnego artefaktu; nie wchodzi tylko do liczby, którą czyta bramka.
                 platforma[member] += 1
                 platforma_detail[member][f"{principal} → {method} (pokrywa baseline_ingress[{regula}])"] += 1
+                klasy_los[reason or "(bez violationReason)"]["wykluczone: ruch platformy"] += 1
+                continue
+            if t["artefakt"]:
+                # Artefakt projektu rozliczeniowego: „egress", w którym na celu żądane jest wyłącznie
+                # zużycie kwoty. Nie jest wypływem, więc nie blokuje promocji — ale jest wypisany
+                # z nazwiskiem wołającego, bo workload z takim wywołaniem naprawdę stanie po promocji.
+                rozliczeniowy[member] += 1
+                rozliczeniowy_detail[member][f"{principal} → {method} ({reason}, cel: tylko kwota)"] += 1
+                klasy_los[reason or "(bez violationReason)"]["wykluczone: projekt rozliczeniowy"] += 1
                 continue
             counts[member] += 1
-            detail[member][f"{principal} → {method} ({reason})"] += 1
+            detail[member][f"{principal} → {method} ({reason}, {kierunki}{opis_sieci})"] += 1
+            klasy_los[reason or "(bez violationReason)"]["do liczby bramki"] += 1
             if unikat:
                 namiar.setdefault(member, unikat)
 
@@ -248,10 +393,19 @@ def main() -> int:
     # Wykluczenia jadą OSOBNYM plikiem, a nie dodatkowym kluczem w `violations.json`: ten plik jest
     # wejściem OPA (`violations_last_window`), gdzie każdy klucz udaje nazwę członka. Osobny artefakt
     # zachowuje kontrakt dowodu i jednocześnie nie pozwala schować wykluczeń przed recenzentem.
+    # Kategorie są nazwane, bo wykluczają z RÓŻNYCH powodów i naprawia się je różnymi rzeczami:
+    # ruch platformy pokrywa reguła baseline, artefakt kwoty naprawia `CLOUDSDK_BILLING_QUOTA_PROJECT`.
     platform_out = {
         name: {
-            "razem": platforma.get(name, 0),
-            "wpisy": dict(platforma_detail.get(name, {})),
+            "razem": platforma.get(name, 0) + rozliczeniowy.get(name, 0),
+            "platforma": {
+                "razem": platforma.get(name, 0),
+                "wpisy": dict(platforma_detail.get(name, {})),
+            },
+            "projekt_rozliczeniowy": {
+                "razem": rozliczeniowy.get(name, 0),
+                "wpisy": dict(rozliczeniowy_detail.get(name, {})),
+            },
         }
         for name in decl["members"]
     }
@@ -293,6 +447,17 @@ def main() -> int:
                          f"**{platforma[name]}** — pełna lista w `{args.platform_json_out}`")
             for what, n in platforma_detail[name].most_common(10):
                 lines.append(f"- `{what}` × {n}")
+        if rozliczeniowy.get(name):
+            # Też NAD listą i też z nazwiskami: to jest wykluczenie, które trzeba umieć podważyć.
+            lines.append("")
+            lines.append(f"artefakt projektu rozliczeniowego wyłączony z liczby: **{rozliczeniowy[name]}** — "
+                         f"wywołanie dotknęło projektu spoza perimetru WYŁĄCZNIE po to, żeby zużyć jego kwotę "
+                         f"(`serviceusage.services.use`), więc nic z tego członka nie wypłynęło. Naprawa jest "
+                         f"po stronie wołającego: `CLOUDSDK_BILLING_QUOTA_PROJECT` = projekt sondowany, NIE "
+                         f"reguła egress. **Jeśli poniżej jest tożsamość workloadu, a nie człowieka — to jest "
+                         f"realny przepływ i po promocji stanie.** Pełna lista w `{args.platform_json_out}`")
+            for what, n in rozliczeniowy_detail[name].most_common(10):
+                lines.append(f"- `{what}` × {n}")
         if result[name]:
             lines.append("")
             lines.append("Te wywołania PRZESTANĄ działać po promocji do enforced:")
@@ -313,6 +478,21 @@ def main() -> int:
         lines.append("woła chroniony zasób z projektu, o którego dołączenie nikt nie wystąpił.")
         for what, n in obce.most_common(10):
             lines.append(f"- `{what}` × {n}")
+        lines.append("")
+
+    # KLASY NARUSZEŃ — po to, żeby nowa klasa nie weszła do raportu bezimiennie. Licznik bramki stoi na
+    # założeniu „każde naruszenie da się przypisać członkowi i wiadomo, którym polem"; ta tabela pokazuje
+    # to założenie wprost, klasa po klasie, na danych z TEGO okna. Klasa bez rekordów naruszeń
+    # (`SERVICE_NOT_ALLOWED_FROM_VPC`) jest widoczna tu jako osobny wiersz, a nie rozpuszczona w sumie.
+    lines.append("## Klasy naruszeń w tym oknie")
+    lines.append("")
+    lines.append("| violationReason | wpisów | członek czytany z | rozkład przypisań |")
+    lines.append("| --- | ---: | --- | --- |")
+    for reason in sorted(klasy_wpisy, key=lambda r: (-klasy_wpisy[r], r)):
+        zrodla = ", ".join(sorted(klasy_zrodlo[reason]))
+        los = ", ".join(f"{k}: {v}" for k, v in sorted(klasy_los[reason].items()))
+        lines.append(f"| `{reason}` | {klasy_wpisy[reason]} | {zrodla} | {los or '—'} |")
+    lines.append("")
 
     pathlib.Path(args.markdown_out).write_text("\n".join(lines) + "\n")
     print(f"zapisano {args.json_out}, {args.platform_json_out} i {args.markdown_out}")
@@ -320,6 +500,10 @@ def main() -> int:
         print(f"UWAGA: {sum(platforma.values())} naruszeń zaklasyfikowano jako ruch platformy "
               f"(pokryty regułą baseline_ingress) i NIE wchodzi do liczby czytanej przez promotion_gate — "
               f"rozpiska w {args.platform_json_out}", file=sys.stderr)
+    if sum(rozliczeniowy.values()):
+        print(f"UWAGA: {sum(rozliczeniowy.values())} naruszeń zaklasyfikowano jako artefakt projektu "
+              f"rozliczeniowego (cel żądany wyłącznie o `serviceusage.services.use`) i NIE wchodzi do liczby "
+              f"czytanej przez promotion_gate — rozpiska w {args.platform_json_out}", file=sys.stderr)
     return 0
 
 
