@@ -59,6 +59,27 @@ CZEGO ŚWIADOMIE NIE SPRAWDZAMY (żeby zielony wynik nie znaczył więcej, niż 
     także w sprawdzeniu zakresu, które porównuje wyłącznie KOŃCE (`min` i `max`), nigdy ciągłość.
   * TREŚCI deklaracji poza zakresem i licznikiem. „Kilkanaście decyzji" przejdzie, bo nie jest liczbą.
     Bramka domyka formę, w której to realnie gniło — zakres i liczebnik — a nie prozę w ogóle.
+  * CZY CYTOWANY NUMER WSKAZUJE TĘ decyzję, o której cytujące zdanie mówi. Sprawdzenie 1 pyta, czy sekcja
+    ISTNIEJE, nie czy jest NA TEMAT. Zmierzone: trzy niezmienniki w `AGENTS.md` (werdykt bramek treści,
+    dostarczanie narzędzi, `continue-on-error`) cytowały `DEC-28`, opisując co do zdania treść sekcji
+    `DEC-26`; obie sekcje istnieją, więc oba sprawdzenia świeciły na zielono, a błąd przejechał
+    synchronizacją do repozytorium perimetru. Powstał PRZENUMEROWANIEM PO SCALENIU: gałąź podbiła własny
+    numer globalną podmianą w tym samym commicie, w którym `merge origin/main` wniósł CUDZE cytowania na
+    tę samą liczbę — podmiana nie ma jak odróżnić numeru własnego od dopiero co wciągniętego, a zrobiła
+    to dwa razy pod rząd. Trzy warianty domknięcia zmierzone na tym materiale (20 par wiersz-cytat),
+    wszystkie odrzucone fałszywymi alarmami na treści POPRAWNEJ:
+      – KOTWICA (identyfikator w odwrotnych apostrofach z wiersza musi stać w cytowanej sekcji): łapie
+        wszystkie trzy, ale 4 fałszywe. Wiersz nazywa MIEJSCE egzekucji (`render_member.py`, `apply.yml`),
+        a decyzja tłumaczy POWÓD i nazwy pliku nieść nie musi. Bramka wymuszałaby wpisywanie nazw plików
+        do uzasadnień — czyli psucie rejestru pod bramkę.
+      – ARGMAX pokrycia tokenów (cytowana sekcja ma być najbliższa ze wszystkich): łapie wszystkie trzy,
+        2 fałszywe, i jeden z nich jest STRUKTURALNY — komórka wolno cytuje kilka decyzji naraz (dwie
+        takie), a argmax ma z definicji jednego zwycięzcę, więc pozostałe cytaty fałszuje z zasady.
+      – SEKCJA-SIEROTA (każda sekcja cytowana choć raz): nie łapie NICZEGO. Sekcja `DEC-26` jest cytowana
+        w ośmiu innych plikach, więc przestawiony cytat jej nie osierocił; do tego 4 fałszywe, bo sekcja
+        bez ani jednego cytatu jest legalna.
+    Wariant bez fałszywych alarmów musiałby WIĄZAĆ wiersz z sekcją stabilnym kluczem po obu stronach,
+    zamiast wnioskować z prozy — a to jest zmiana kształtu obu plików i własna decyzja, nie komentarz.
 
 GDZIE TE SPRAWDZENIA BIEGAJĄ — I DLACZEGO NIE WSZĘDZIE TAK SAMO (DEC-30). Sprawdzenie 1 pyta konsumenta
 rejestru: „czy cytujesz decyzję, której nie niesiesz". To pytanie do ROZPAKOWANEGO repozytorium, które
