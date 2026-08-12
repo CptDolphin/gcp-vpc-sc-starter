@@ -48,6 +48,7 @@ a nie HCL.
 | Zakaz komendy commitującej całą konfigurację dry-run | guard w `.github/actions/bramki-tresci` (oba tory: PR i apply) | promocja WSZYSTKICH członków jednym wywołaniem, bez czego cofnąć (`docs/3` §A) |
 | Apply, który zaczyna EGZEKWOWAĆ granicę wobec nowego członka, **zatrzymuje się** — zwalnia go wyłącznie ręczne uruchomienie z listą promowanych | `.github/actions/bramka-promocji` + `tools/promotion_hold.py` (porównanie `stage: enforced` z `status.resources` żywego perimetru), wołane WYŁĄCZNIE przez `apply.yml`; asercje w selfteście na zbiorach, nie na słowach | merge staje się egzekwowaniem: jednowyrazowy diff `stage: dry-run` → `enforced` odcina ruch bez kroku, na którym człowiek cokolwiek naciska. To jedyna zmiana w tym repo, której cofnięcie konfiguracji NIE jest natychmiastowym cofnięciem skutku (zmierzone: 46 s do apply, 78 s do powrotu ruchu). Wykrycie musi iść z porównania deklaracji ze stanem granicy — diff commitów znika przy `workflow_dispatch` i przy ponowieniu przebiegu, a etykieta i nazwa gałęzi są pod kontrolą autora zmiany (DEC-17) |
 | Akcje przypięte 40-znakowym SHA | guard w `.github/actions/bramki-tresci` (oba tory) + Dependabot | kto kontroluje tag, kontroluje pipeline mający prawo zmieniać granicę organizacji |
+| Każda decyzja CYTOWANA w repo ma sekcję w `docs/0-decyzje.md`, a zbiór decyzji pokrywa zbiór startera | `tools/decisions_check.py` — bez argumentu w `.github/actions/bramki-tresci` (oba tory), `--wzgledem` w `starter-drift.yml` + testy obu przypadków w selfteście | `starter-drift` porównuje świadomie sam WSKAŹNIK (`.starter-sync` kontra `main` startera), bo porównanie drzewa świeciłoby na czerwono zawsze — wartości środowiska są dokładnie tym, co repo wdrożone ma mieć. Wskaźnik odpowiada więc na pytanie „czy ktoś przeniósł commity", a nie „czy przeniósł całą ich treść". Zmierzone: wskaźnik wskazywał aktualny `main`, bramka była zielona, a rejestr nie miał DWÓCH decyzji — jednej cytowanej w DZIEWIĘCIU miejscach tego samego repo (`apply.yml`, `plan.yml`, `validate.yml`, `onboarding.rego`, bramka promocji). Porównujemy ZBIÓR NUMERÓW, nigdy treść: treść wdrożenia różni się od szablonu legalnie (DEC-19) |
 | Warstwa IAM Deny jest **odczytywana**, nie zakładana | rola `vpcScDenyReader` + `manage_deny_policy` w `iam-bootstrap`, `tools/deny_check.sh`, testy trzech werdyktów w selfteście | `iam.denypolicies.*` nie należy do żadnej roli org-admina, a API na brak uprawnienia odpowiada tym samym `403` co na brak zasobu — więc bez tej roli zdanie „guardrail stoi" jest nieweryfikowalne, a `terraform plan` pokazuje `1 to add` niezależnie od stanu faktycznego. Zapisu tej warstwy **nie da się** zawęzić: `create`/`update`/`delete` mają `customRolesSupportLevel = NOT_SUPPORTED` i niesie je wyłącznie `roles/iam.denyAdmin` |
 
 ## Placeholdery — wszystko, co trzeba podmienić
@@ -134,10 +135,10 @@ python3 selftest/selftest.py          # rozpakowuje starter do katalogu tymczaso
 ```
 
 Wymaga na PATH: `terraform` (1.15.5), `conftest`, `tflint`, `python3` z `pyyaml`; opcjonalnie `actionlint`
-i `check-jsonschema` (ich brak daje SKIP z nazwą, nigdy ciche zielone). Oczekiwany wynik: **270/270**.
+i `check-jsonschema` (ich brak daje SKIP z nazwą, nigdy ciche zielone). Oczekiwany wynik: **531/531**.
 
-Bez `tflint` na PATH przebieg kończy się na **267/267** i wypisuje SKIP z nazwą — trzy asercje
-(`--init` plus lint obu stacków) po prostu się nie wykonują. Liczba niższa niż 270 nie jest błędem
+Bez `tflint` na PATH przebieg kończy się na **528/528** i wypisuje SKIP z nazwą — trzy asercje
+(`--init` plus lint obu stacków) po prostu się nie wykonują. Liczba niższa niż 531 nie jest błędem
 startera, tylko informacją, czego w tym środowisku nie sprawdzono.
 
 Sam skan samodzielności (bez terraforma i conftesta, sam Python) da się uruchomić na dowolnej ścieżce —

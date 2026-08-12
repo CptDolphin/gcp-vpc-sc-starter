@@ -163,6 +163,27 @@ runs:
       shell: bash
       run: python3 tools/control_plane_check.py
 
+    # DECYZJA, NA KTÓRĄ POWOŁUJE SIĘ KOD, MUSI BYĆ W REPO — inaczej odsyłacz prowadzi w pustkę.
+    #
+    # To NIE jest dublet `starter-drift`. Tamta bramka porównuje świadomie sam WSKAŹNIK (commit startera
+    # kontra `main` startera), bo porównanie drzewa świeciłoby na czerwono zawsze i legalnie — wartości
+    # środowiska są dokładnie tym, co repo perimetru ma mieć, a szablon nie. Wskaźnik odpowiada więc na
+    # pytanie „czy ktoś przeniósł commity", a nie „czy przeniósł całą ich treść".
+    #
+    # ZMIERZONE, i stąd ten krok: wskaźnik wskazywał aktualny `main` startera — `starter-drift` zielony —
+    # a `docs/0-decyzje.md` we wdrożeniu nie miało DWÓCH całych decyzji. Jedna z nich była w tym samym
+    # repozytorium cytowana w DZIEWIĘCIU miejscach (`apply.yml`, `plan.yml`, `validate.yml`, reguły OPA,
+    # akcja bramki promocji). Kod odsyłał do uzasadnienia, którego nie było, i nic tego nie widziało.
+    #
+    # DLACZEGO TUTAJ, A NIE W `starter-drift`: to sprawdzenie nie potrzebuje startera ani sieci — pyta
+    # o wewnętrzną spójność repozytorium, więc może biec na KAŻDYM wniosku i na ścieżce apply, czyli tam,
+    # gdzie treść realnie wchodzi do repo. Druga połowa (decyzja, której NIKT nie cytuje, więc ten krok
+    # jej nie widzi) siedzi w `starter-drift` jako `--wzgledem`; obie są potrzebne i żadna nie zastępuje
+    # drugiej.
+    - name: guard - kazda cytowana decyzja ma swoje uzasadnienie
+      shell: bash
+      run: python3 tools/decisions_check.py
+
     # PLIK CZŁONKÓW MA BYĆ W POSTACI KANONICZNEJ — czyli dokładnie takiej, jaką zapisuje
     # `tools/projects_file.py`. To nie jest `fmt` dla estetyki, tylko warunek dwóch rzeczy naraz:
     #
