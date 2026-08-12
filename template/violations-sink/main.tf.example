@@ -53,10 +53,27 @@ locals {
   #    wyprowadzony (offboarding) NIE SĄ członkami, a ich naruszenia są dokładnie tym, co trzeba zobaczyć.
   #    Filtruje się przy RAPORTOWANIU (`violations_report.py` zna listę członków), nie przy zbieraniu —
   #    inaczej dowód znika w chwili, w której zmienia się konfiguracja.
-  sink_filter = "protoPayload.metadata.\"@type\"=\"type.googleapis.com/google.cloud.audit.VpcServiceControlAuditMetadata\""
+  #
+  # 4. DWA CZŁONY, NIE JEDEN — dołożony `accesscontextmanager`. Powód jest twardy i zmierzony (#2000):
+  #    wpis audytowy o zmianie GRANICY (`ServicePerimeter`/`AccessLevel`/`AccessPolicy`) nie leży ani
+  #    w projekcie administracyjnym, ani w projekcie członka — leży w logu ORGANIZACJI, w kubełku
+  #    `_Required`. A log-based metryki w Cloud Logging istnieją WYŁĄCZNIE na poziomie projektu
+  #    (`gcloud logging metrics` nie ma flagi `--organization`; API zna tylko `projects.metrics`), więc
+  #    detekcja „ktoś zmienił granicę w konsoli" nie da się zbudować jako metryka log-based W ŻADNYM
+  #    projekcie. Sink org-level jest jedyną drogą, którą ten wpis w ogóle opuszcza `_Required`.
+  sink_filter = join(" OR ", [
+    "protoPayload.metadata.\"@type\"=\"type.googleapis.com/google.cloud.audit.VpcServiceControlAuditMetadata\"",
+    "protoPayload.serviceName=\"accesscontextmanager.googleapis.com\"",
+  ])
 
   bucket_name = "projects/${var.sink_project_id}/locations/${var.bucket_location}/buckets/${var.bucket_id}"
   view_name   = "${local.bucket_name}/views/${var.bucket_id}"
+
+  # Widok zmian konfiguracji granicy. Nazwa CELOWO inna niż `var.bucket_id`: to jest drugi strumień
+  # o innej wrażliwości (kto zmienia granicę) i innym konsumencie (obserwator), więc dostaje własną
+  # jednostkę nadawania dostępu. Wspólny widok znaczyłby, że konto raportu naruszeń dostaje przy okazji
+  # historię zmian polityki dostępu, której do niczego nie potrzebuje.
+  config_view_name = "${var.bucket_id}-config"
 }
 
 # --- 1. kubełek docelowy ----------------------------------------------------------------------------
@@ -139,6 +156,24 @@ resource "google_logging_log_view" "violations" {
   filter      = "LOG_ID(\"cloudaudit.googleapis.com/policy\")"
 }
 
+# Widok 2: zmiany konfiguracji granicy. ROZŁĄCZNY z widokiem naruszeń — `policy` i `activity` to dwa różne
+# identyfikatory logu, więc żaden wpis nie pokazuje się w obu. To jest własność, na której stoi bezpieczeństwo
+# tego rozdziału: raport naruszeń czyta widok `violations` i po rozszerzeniu filtra sinka NIE zaczyna widzieć
+# historii zmian polityki dostępu (zmierzone: `violations-report.yml` czyta `--view=<bucket_id>`, nie `_AllLogs`).
+#
+# Ten sam powód, dla którego filtr widoku nie może powtórzyć filtra sinka (patrz wyżej, błąd 400), obowiązuje
+# tutaj: `protoPayload.serviceName` nie jest legalną restrykcją widoku, więc zawężamy identyfikatorem logu.
+# `activity` to Admin Activity — nadzbiór zmian ACM, ale w TYM kubełku leży wyłącznie to, co wpuścił filtr
+# sinka, czyli wyłącznie `accesscontextmanager`. Rozróżnienie „kto zmienił" robi konsument (`perimeter_watch.py`
+# wyklucza konto apply), a nie widok — bo tożsamość konta apply jest wartością środowiska, a widok jest
+# strukturą i nie ma się zmieniać przy rotacji konta.
+resource "google_logging_log_view" "config_changes" {
+  name        = local.config_view_name
+  bucket      = google_logging_project_bucket_config.violations.id
+  description = "Admin Activity zmian granicy (ACM) — wejście alertu „konfiguracja zmieniona poza pipeline'em”."
+  filter      = "LOG_ID(\"cloudaudit.googleapis.com/activity\")"
+}
+
 # --- 5. kto czyta ------------------------------------------------------------------------------------
 # DECYZJA: dostęp do KUBEŁKA jest węższy niż do RAPORTU, i to jest zamierzone.
 #
@@ -177,4 +212,38 @@ resource "google_logging_log_view_iam_member" "readers" {
 
   role   = "roles/logging.viewAccessor"
   member = each.value
+}
+
+# --- 6. obserwator: prawo ODCZYTU obu widoków -------------------------------------------------------
+# To jest para grantów, bez której alerty „ruch odrzucony w trybie egzekwowanym” i „konfiguracja zmieniona
+# poza pipeline'em” nie mają skąd wziąć liczby. DLACZEGO ODDZIELNIE OD `report`: to inne konto (krok
+# `measure` w `watch.yml` biegnie na koncie planu, read-only) i inny cel (liczba do metryki, nie treść do
+# raportu), więc wspólny grant zaciemniałby, kto czego realnie potrzebuje przy najbliższym audycie ról.
+
+resource "google_logging_log_view_iam_member" "watch_violations" {
+  # Pomijamy, gdy obserwator biegnie na TYM SAMYM koncie co raport (typowe: oba to konto planu). Dwa zasoby
+  # `iam_member` opisujace identyczna trojke (widok, rola, czlonek) to nie jest nadmiarowosc bez kosztu —
+  # przy `terraform destroy` jednego z nich drugi zostaje w stanie, a binding znika z chmury, wiec plan
+  # zaczyna dyndac miedzy „brak zmian" a „dodaj z powrotem". Jeden wlasciciel na binding.
+  count = var.watch_reader_service_account == "" || var.watch_reader_service_account == var.report_service_account ? 0 : 1
+
+  parent   = "projects/${var.sink_project_id}"
+  location = google_logging_project_bucket_config.violations.location
+  bucket   = google_logging_project_bucket_config.violations.bucket_id
+  name     = google_logging_log_view.violations.name
+
+  role   = "roles/logging.viewAccessor"
+  member = "serviceAccount:${var.watch_reader_service_account}"
+}
+
+resource "google_logging_log_view_iam_member" "watch_config_changes" {
+  count = var.watch_reader_service_account == "" ? 0 : 1
+
+  parent   = "projects/${var.sink_project_id}"
+  location = google_logging_project_bucket_config.violations.location
+  bucket   = google_logging_project_bucket_config.violations.bucket_id
+  name     = google_logging_log_view.config_changes.name
+
+  role   = "roles/logging.viewAccessor"
+  member = "serviceAccount:${var.watch_reader_service_account}"
 }

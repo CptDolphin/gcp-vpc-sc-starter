@@ -1,17 +1,61 @@
-# Monitoring perimetru — metryki i alerty.
+# Monitoring perimetru — alerty na to, co się psuje po cichu.
 #
 # DLACZEGO to jest w tym repo, a nie „w monitoringu": perimetr bez alertu jest granicą, o której dowiesz się
-# od użytkownika. Trzy rzeczy, które MUSZĄ mieć konsumenta:
+# od użytkownika. Dwie rzeczy, które MUSZĄ mieć konsumenta:
 #
 #   1. naruszenia ENFORCED — ktoś jest właśnie blokowany. Jeśli to legalny ruch, to jest incydent i liczy się
 #      każda minuta (break-glass). Alert page'ujący.
-#   2. naruszenia DRY-RUN — nikt nie jest blokowany, ale ktoś zobaczy blokadę po promocji. Alert informacyjny,
-#      bo bez niego raport tygodniowy jest jedynym sygnałem, a tydzień to długo przed promocją.
-#   3. zmiana perimetru POZA pipeline'em — ktoś klikał w konsoli albo użył gcloud. Drift detection złapie to
+#   2. zmiana perimetru POZA pipeline'em — ktoś klikał w konsoli albo użył gcloud. Drift detection złapie to
 #      w nocy; alert łapie od razu, a przy granicy bezpieczeństwa różnica ma znaczenie.
 #
-# ŚWIADOMY BRAK: alertu na „liczba członków spadła". Offboarding jest legalną operacją i wychodzi w PR-ze,
+# ŚWIADOMY BRAK 1: alertu na „liczba członków spadła". Offboarding jest legalną operacją i wychodzi w PR-ze,
 # a alert na normalną zmianę uczy tylko ignorowania alertów.
+#
+# ŚWIADOMY BRAK 2: alertu na naruszenia DRY-RUN. Metryka jest publikowana (widać ją na wykresie i czyta ją
+# bramka promocji), ale POLITYKI ALERTU nie ma i to jest decyzja, nie przeoczenie: naruszenie dry-run znaczy
+# „ktoś ZOSTAŁBY zablokowany po promocji", czyli nikt nie jest blokowany teraz. Jego konsumentem jest raport
+# tygodniowy i bramka promocji — obie ścieżki działają w tempie, w którym ta informacja jest użyteczna.
+# Alert budzący na to, co się nie dzieje, uczy ignorowania kategorii, w której siedzi punkt 1.
+#
+# ======================================================================================================
+# DLACZEGO TU NIE MA ANI JEDNEJ METRYKI LOG-BASED — ZMIERZONE, #2000
+# ======================================================================================================
+# Do 2026-08-12 punkty 1 i 2 stały na `google_logging_metric` w projekcie monitoringu. Obie metryki miały
+# poprawny filtr (pułapka `dryRun="false"` z #1941 była już naprawiona), obie ISTNIAŁY jako deskryptor,
+# obie były podpięte pod polityki alertu — i obie miały ZERO serii przy realnych zdarzeniach. Alert „ruch
+# odrzucony w trybie egzekwowanym" nie odpalił ani razu przy czterech realnych odmowach egzekwowanych.
+#
+# Przyczyna, rozstrzygnięta parą kontrolną, a nie dokumentacją:
+#
+#   KONTROLA A (czy maszyneria w tym projekcie w ogóle działa): metryka log-based w projekcie
+#   administracyjnym + 5 wpisów ZAPISANYCH do tego projektu (`gcloud logging write`)
+#     -> 1 seria, 5 punktów, widoczne po ~6 minutach.
+#
+#   KONTROLA B (czy liczy wpisy przyniesione przez sink): ta sama maszyneria, ta sama chwila, realna odmowa
+#   egzekwowana na projekcie członkowskim, potwierdzona w kubełku sinka tego samego projektu
+#   (`vpcServiceControlsUniqueIdentifier` zgodny z komunikatem błędu API)
+#     -> 0 serii, 0 punktów.
+#
+# WNIOSEK: metryka log-based liczy wyłącznie wpisy PRZYJĘTE (ingest) przez Log Router swojego projektu.
+# Sink jest MAGAZYNEM, nie wejściem — wpis dostarczony do kubełka w tym samym projekcie NIE jest liczony,
+# i żadne przeniesienie kubełka tego nie zmieni. Naruszenia VPC-SC powstają w logu projektu-właściciela
+# zasobu (członka), a zmiany ACM — w logu ORGANIZACJI (`_Required`). Metryki log-based istnieją zaś
+# WYŁĄCZNIE per projekt: `gcloud logging metrics` nie ma flagi `--organization`, a API zna tylko
+# `projects.metrics`. Dla obu tych sygnałów log-based metryka jest więc STRUKTURALNIE niezdolna do
+# liczenia, w każdym projekcie i przy każdej konfiguracji sinka.
+#
+# Dlatego oba sygnały jadą torem, o którym WIADOMO, że działa (cztery metryki `watch.yml` mają dane od
+# pierwszego dnia): obserwator czyta widoki sinka i publikuje `custom.googleapis.com/vpcsc/*`.
+#
+# CENA, POWIEDZIANA WPROST: producent chodzi z kadencją `watch.yml` (domyślnie godzinną), więc wykrycie
+# odmowy trwa do jednego cyklu zamiast ~minuty. To jest realna strata MTTD i akceptujemy ją świadomie,
+# bo alternatywą nie jest szybszy alert, tylko BRAK alertu — metryka, która nie może policzyć, nie ma
+# czasu reakcji, ma zero. Kto chce minut, musi zbudować konsumenta zdarzeniowego (sink -> Pub/Sub ->
+# funkcja); to jest osobna decyzja i osobny koszt, nie efekt uboczny tej poprawki.
+#
+# CZEGO NIE WOLNO TU PRZYWRÓCIĆ: `google_logging_metric` na naruszenia albo na ACM. Wygląda poprawnie,
+# przechodzi `validate`, tworzy się bez błędu i NIE LICZY NIGDY. Pusta metryka jest gorsza od jej braku:
+# brak widać, a pustą bierze się za spokój.
 
 locals {
   monitoring_enabled = contains(keys(local.policy), "monitoring")
@@ -24,94 +68,22 @@ locals {
     notification_channels = []
     apply_service_account = ""
   }
-
-  # Filtr wspólny dla obu metryk. `VpcServiceControlAuditMetadata` to typ, którym Google oznacza KAŻDE
-  # naruszenie perimetru — niezależnie od usługi, której dotyczyło.
-  vpcsc_audit_filter = join(" AND ", [
-    "protoPayload.metadata.@type=\"type.googleapis.com/google.cloud.audit.VpcServiceControlAuditMetadata\"",
-    "protoPayload.metadata.violationReason!=\"\"",
-  ])
 }
 
-# --- 1. Metryka: naruszenia EGZEKWOWANE (ktoś jest blokowany TERAZ) ---------------------------------
-
-resource "google_logging_metric" "vpcsc_violations_enforced" {
-  count = local.monitoring_enabled ? 1 : 0
-
-  project     = local.monitoring.project_id
-  name        = "vpcsc/violations_enforced"
-  description = "Naruszenia perimetru VPC-SC w trybie egzekwowanym — każde z nich to odrzucone wywołanie API."
-
-  # NEGACJA, NIE `dryRun="false"` — pole `dryRun` w wpisie o odmowie EGZEKWOWANEJ NIE ISTNIEJE. Pojawia się
-  # wyłącznie dla naruszeń dry-run, i wtedy ma wartość `true`. Zmierzone na żywej organizacji tuż po
-  # pierwszej realnej odmowie: `google.storage.buckets.list` z `RESOURCES_NOT_IN_SAME_SERVICE_PERIMETER`
-  # przyszedł BEZ pola `dryRun`, a to samo wywołanie sprzed promocji miało `dryRun=true`.
-  #
-  # `dryRun="false"` nie dopasowuje więc NICZEGO — nigdy, w żadnej organizacji. Metryka „ktoś jest blokowany
-  # TERAZ" zostawała pusta dokładnie wtedy, gdy miała rosnąć, a alert zbudowany na niej nie odpalił ani razu.
-  # Metryka, która nie liczy, jest gorsza od jej braku: brak widać, pustą metrykę bierze się za spokój.
-  #
-  # To jest jedyna metryka w tym pliku, która oznacza „coś się właśnie psuje".
-  filter = "${local.vpcsc_audit_filter} AND NOT protoPayload.metadata.dryRun=\"true\""
-
-  metric_descriptor {
-    metric_kind = "DELTA"
-    value_type  = "INT64"
-
-    # Etykiety pozwalają zawęzić alert do jednej dywizji bez tworzenia N metryk. Bez nich alert mówi
-    # „coś jest blokowane w organizacji", co przy trzydziestu dywizjach jest bezużyteczne.
-    labels {
-      key         = "principal"
-      description = "Tożsamość, której odmówiono (zwykle konto serwisowe)."
-    }
-    labels {
-      key         = "method"
-      description = "Metoda API, której dotyczyła odmowa."
-    }
-    labels {
-      key         = "violation_reason"
-      description = "NO_MATCHING_ACCESS_LEVEL / RESOURCES_NOT_IN_SAME_SERVICE_PERIMETER / …"
-    }
-  }
-
-  label_extractors = {
-    principal        = "EXTRACT(protoPayload.authenticationInfo.principalEmail)"
-    method           = "EXTRACT(protoPayload.methodName)"
-    violation_reason = "EXTRACT(protoPayload.metadata.violationReason)"
-  }
-}
-
-# --- 2. Metryka: naruszenia DRY-RUN (zapowiedź problemu, nie problem) ------------------------------
-
-resource "google_logging_metric" "vpcsc_violations_dry_run" {
-  count = local.monitoring_enabled ? 1 : 0
-
-  project     = local.monitoring.project_id
-  name        = "vpcsc/violations_dry_run"
-  description = "Naruszenia w trybie dry-run — wywołania, które przestaną działać po promocji do enforced."
-
-  filter = "${local.vpcsc_audit_filter} AND protoPayload.metadata.dryRun=\"true\""
-
-  metric_descriptor {
-    metric_kind = "DELTA"
-    value_type  = "INT64"
-
-    labels {
-      key         = "principal"
-      description = "Tożsamość, która naruszyłaby perimetr po promocji."
-    }
-  }
-
-  label_extractors = {
-    principal = "EXTRACT(protoPayload.authenticationInfo.principalEmail)"
-  }
-}
-
-# --- 3. Alert: ruch produkcyjny jest blokowany -----------------------------------------------------
+# --- 1. Alert: ruch produkcyjny jest blokowany -----------------------------------------------------
 # To jedyny alert w tym pliku, który powinien budzić człowieka.
 
 resource "google_monitoring_alert_policy" "vpcsc_enforced_denials" {
-  count = local.monitoring_enabled ? 1 : 0
+  # NIE `monitoring_enabled`: bez `violations_source` nie ma producenta, a polityka bez producenta
+  # chodzi wiecznie na martwym-czlowieku. Uzasadnienie przy `naruszenia_count` w `alerts.tf`.
+  count = local.naruszenia_count
+
+  # Deskryptor metryki nie jest widoczny dla walidacji polityki od razu po utworzeniu (Error 404
+  # `Cannot find metric(s)` na deskryptorze z TEGO SAMEGO przebiegu), a samo `depends_on` na
+  # deskryptorze tego nie rozwiazuje: zaleznosc jest spelniona, a zasob jeszcze nie istnieje dla
+  # konsumenta. Bez tego czekania wdrozenie OD ZERA konczy sie czesciowo, a ponowiony apply swieci
+  # zielono i nikt sie nie dowiaduje, ze pierwszy raz nie zadzialal. Pomiar przy `time_sleep`.
+  depends_on = [time_sleep.deskryptory_widoczne]
 
   project      = local.monitoring.project_id
   display_name = "VPC-SC: ruch odrzucony w trybie egzekwowanym"
@@ -119,33 +91,61 @@ resource "google_monitoring_alert_policy" "vpcsc_enforced_denials" {
   severity     = "CRITICAL"
 
   conditions {
-    display_name = "naruszenia enforced w ostatnich 5 minutach"
+    display_name = "odmowy egzekwowane w ostatnim oknie obserwatora"
 
     condition_threshold {
       filter = join(" AND ", [
-        "metric.type=\"logging.googleapis.com/user/vpcsc/violations_enforced\"",
+        "metric.type=\"${local.metryka.naruszenia_enforced}\"",
         "resource.type=\"global\"",
       ])
       comparison = "COMPARISON_GT"
-      # Próg 0 z oknem 5 min: przy granicy bezpieczeństwa JEDNA odmowa legalnego ruchu jest już incydentem.
-      # Nie uśredniamy — chcemy wiedzieć o pierwszej, nie o dwudziestej.
+      # Próg 0: przy granicy bezpieczeństwa JEDNA odmowa legalnego ruchu jest już incydentem. Nie
+      # uśredniamy — chcemy wiedzieć o pierwszej, nie o dwudziestej.
       threshold_value = 0
       duration        = "0s"
 
       aggregations {
-        alignment_period   = "300s"
-        per_series_aligner = "ALIGN_DELTA"
-        # Grupujemy po tożsamości: jedna dywizja z problemem nie zalewa alertem całej organizacji,
-        # a przy okazji widać w tytule, kogo dotyczy.
-        cross_series_reducer = "REDUCE_SUM"
-        group_by_fields      = ["metric.label.principal"]
+        # `3600s` + `ALIGN_MAX`, a nie `300s`: producent publikuje JEDEN punkt na przebieg `watch.yml`.
+        # Okno krótsze od kadencji producenta daje przedziały bez punktu, czyli warunek, który gaśnie
+        # i zapala się w rytm crona zamiast w rytm zdarzeń.
+        alignment_period   = "3600s"
+        per_series_aligner = "ALIGN_MAX"
+      }
+      # ŚWIADOMA STRATA: nie ma tu `group_by_fields = ["metric.label.principal"]`, które stało przy metryce
+      # log-based. Metryka jest CELOWO bez etykiet i publikuje `0`, gdy odmów nie było — bo tylko wtedy
+      # `condition_absent` niżej znaczy „producent padł". Z etykietą `principal` seria POWSTAJE i ZNIKA
+      # razem z ruchem danej tożsamości, więc zdrowa cisza (brak odmów) byłaby nieodróżnialna od awarii
+      # obserwatora i martwy-człowiek strzelałby non stop. Wybór jest więc między „alert mówi OD RAZU,
+      # kogo dotyczy" a „cisza jest wiarygodna" — i drugie jest warte więcej, bo pierwsze odzyskuje się
+      # jednym odczytem z runbooka, a wiarygodności ciszy nie odzyskuje się niczym.
+    }
+  }
+
+  # MARTWY-CZŁOWIEK NA WŁASNYM PRODUCENCIE, a nie oparcie się o watchdoga `apply_pending_seconds`.
+  # Powód jest konkretny: obie liczby publikuje ten sam job, ale z RÓŻNYCH źródeł — `apply_pending`
+  # z API GitHuba, ta metryka z widoku sinka, za którym stoi osobny grant `logging.viewAccessor`.
+  # Odebranie tego jednego grantu (albo skasowanie widoku) zatrzymuje WYŁĄCZNIE tę metrykę, a watchdog
+  # oparty o `apply_pending` milczy dalej, bo jego własne źródło działa. Cisza znaczyłaby wtedy „brak
+  # odmów", czyli dokładnie to, co ten alert ma wykluczyć.
+  conditions {
+    display_name = "obserwator przestał publikować liczbę odmów"
+
+    condition_absent {
+      filter = join(" AND ", [
+        "metric.type=\"${local.metryka.naruszenia_enforced}\"",
+        "resource.type=\"global\"",
+      ])
+      duration = "${local.progi.watchdog_absent_seconds}s"
+
+      aggregations {
+        alignment_period   = "3600s"
+        per_series_aligner = "ALIGN_MAX"
       }
     }
   }
 
   # OBA KANAŁY (`alerts.tf`), bo w chwili odpalenia nie wiadomo, czy to awaria, czy zadziałała kontrola —
-  # a pierwszym krokiem runbooka jest właśnie to rozstrzygnąć. Wcześniej stała tu goła lista z `policy.yaml`,
-  # która na żywym wdrożeniu była PUSTA: polityka istniała, incydent się otwierał, i nie szedł do nikogo.
+  # a pierwszym krokiem runbooka jest właśnie to rozstrzygnąć.
   notification_channels = local.kanal_oba
 
   # Każdy alert critical MUSI nieść procedurę — inaczej o 3:00 ktoś zgaduje. Alert bez runbooka to
@@ -158,19 +158,23 @@ resource "google_monitoring_alert_policy" "vpcsc_enforced_denials" {
       działa — albo że ktoś próbował wynieść dane i granica zadziałała. Rozstrzygnięcie, które to z tych
       dwóch, jest treścią tego alertu.
 
-      **1. Ustal, co zostało odrzucone**
+      **Jeśli alert mówi „obserwator przestał publikować"** — to nie jest odmowa, to jest UTRATA WZROKU.
+      Sprawdź ostatni przebieg `watch.yml` i grant `logging.viewAccessor` konta planu na widoku naruszeń.
+      Dopóki to trwa, „brak odmów" nie jest stwierdzeniem o świecie.
+
+      **1. Ustal, co zostało odrzucone** — czytaj z WIDOKU SINKA, nie z projektu członka: po promocji log
+      członka sam leży za granicą i odczyt z laptopa bywa odrzucany.
 
       ```
-      gcloud logging read 'protoPayload.metadata."@type"="type.googleapis.com/google.cloud.audit.VpcServiceControlAuditMetadata"
-        AND NOT protoPayload.metadata.dryRun="true"' --project=PROJEKT_CZLONKA --freshness=1h \
+      gcloud logging read 'protoPayload.metadata."@type"="type.googleapis.com/google.cloud.audit.VpcServiceControlAuditMetadata"' \
+        --project=<PROJEKT_ADM> --bucket=<KUBELEK> --location=<LOKALIZACJA> --view=<KUBELEK> --freshness=1h \
         --format='table(protoPayload.authenticationInfo.principalEmail, protoPayload.methodName,
                         protoPayload.metadata.violationReason, resource.labels.project_id)'
       ```
 
-      Dwie rzeczy, na ktorych ten odczyt lamie sie najczesciej — obie ZMIERZONE:
-      wpis o odmowie EGZEKWOWANEJ **nie ma pola `dryRun`** (pojawia sie tylko przy dry-run, z wartoscia
-      `true`), wiec filtr `dryRun="false"` nie zwraca nigdy niczego; oraz wpis lezy w logu **projektu
-      czlonkowskiego**, a nie organizacji — `--organization` na tym samym filtrze zwraca 0.
+      Pułapka ZMIERZONA, nie wprowadzaj jej z powrotem: wpis o odmowie EGZEKWOWANEJ **nie ma pola
+      `dryRun`** (pojawia się tylko przy dry-run, z wartością `true`), więc filtr `dryRun="false"` nie
+      zwraca nigdy niczego. Odmowy egzekwowane to wpisy BEZ tego pola.
 
       **2. Zinterpretuj `violationReason`**
 
@@ -195,66 +199,37 @@ resource "google_monitoring_alert_policy" "vpcsc_enforced_denials" {
   }
 }
 
-# --- 4. Alert: perimetr zmieniony poza pipeline'em --------------------------------------------------
+# --- 2. Alert: perimetr zmieniony poza pipeline'em --------------------------------------------------
 # Drift detection (nightly) i tak to złapie. Ten alert łapie od razu — bo między „ktoś kliknął w konsoli"
 # a „dowiadujemy się o tym rano" mieści się cała noc, a to jest granica bezpieczeństwa organizacji.
 
-resource "google_logging_metric" "vpcsc_config_changed_outside_pipeline" {
-  count = local.monitoring_enabled ? 1 : 0
-
-  project     = local.monitoring.project_id
-  name        = "vpcsc/config_changed_outside_pipeline"
-  description = "Zmiany konfiguracji perimetru wykonane przez tożsamość INNĄ niż konto apply pipeline'u."
-
-  # Wykluczamy WŁASNE konto apply — jego zmiany są oczekiwane. Wszystko inne jest sygnałem.
-  filter = join(" AND ", [
-    "protoPayload.serviceName=\"accesscontextmanager.googleapis.com\"",
-    "protoPayload.methodName:(\"ServicePerimeter\" OR \"AccessLevel\" OR \"AccessPolicy\")",
-    "NOT protoPayload.methodName:(\"Get\" OR \"List\")",
-    "protoPayload.authenticationInfo.principalEmail!=\"${local.monitoring.apply_service_account}\"",
-  ])
-
-  metric_descriptor {
-    metric_kind = "DELTA"
-    value_type  = "INT64"
-
-    labels {
-      key         = "principal"
-      description = "Kto zmienił konfigurację poza pipeline'em."
-    }
-    labels {
-      key         = "method"
-      description = "Jaka operacja (patch / create / delete)."
-    }
-  }
-
-  label_extractors = {
-    principal = "EXTRACT(protoPayload.authenticationInfo.principalEmail)"
-    method    = "EXTRACT(protoPayload.methodName)"
-  }
-}
-
 resource "google_monitoring_alert_policy" "vpcsc_out_of_band_change" {
-  count = local.monitoring_enabled ? 1 : 0
+  count = local.naruszenia_count
+
+  # Deskryptor metryki nie jest widoczny dla walidacji polityki od razu po utworzeniu (Error 404
+  # `Cannot find metric(s)` na deskryptorze z TEGO SAMEGO przebiegu), a samo `depends_on` na
+  # deskryptorze tego nie rozwiazuje: zaleznosc jest spelniona, a zasob jeszcze nie istnieje dla
+  # konsumenta. Bez tego czekania wdrozenie OD ZERA konczy sie czesciowo, a ponowiony apply swieci
+  # zielono i nikt sie nie dowiaduje, ze pierwszy raz nie zadzialal. Pomiar przy `time_sleep`.
+  depends_on = [time_sleep.deskryptory_widoczne]
 
   project      = local.monitoring.project_id
   display_name = "VPC-SC: konfiguracja zmieniona poza pipeline'em"
   combiner     = "OR"
 
-  # PODNIESIONE Z `WARNING` DO `CRITICAL`. Powód nie jest kosmetyczny: `WARNING` znaczy „obejrzyj w godzinach
-  # pracy", a to jest jedyny sygnał, który odróżnia zmianę granicy bezpieczeństwa wykonaną przez PROCES od
-  # wykonanej przez CZŁOWIEKA z konsoli. Jeśli to drugie jest nieautoryzowane, każda godzina zwłoki to
-  # godzina z otwartą granicą i skasowanym śladem. Wyjątkiem, którego ta zmiana nie psuje, jest szum:
-  # własne konto apply jest z filtru metryki wykluczone, więc normalna praca pipeline'u nie odpala tego
-  # alertu ANI RAZU (potwierdzone na wdrożeniu: metryka pusta przez cały okres, w którym apply chodził).
+  # `CRITICAL`, nie `WARNING`: `WARNING` znaczy „obejrzyj w godzinach pracy", a to jest jedyny sygnał,
+  # który odróżnia zmianę granicy bezpieczeństwa wykonaną przez PROCES od wykonanej przez CZŁOWIEKA
+  # z konsoli. Jeśli to drugie jest nieautoryzowane, każda godzina zwłoki to godzina z otwartą granicą.
+  # Szumu to nie robi: konto apply jest z liczenia wykluczone, więc normalna praca pipeline'u nie
+  # podbija tej metryki ANI RAZU.
   severity = "CRITICAL"
 
   conditions {
-    display_name = "zmiana przez tożsamość inną niż apply-SA"
+    display_name = "zmiana ACM przez tożsamość inną niż apply-SA"
 
     condition_threshold {
       filter = join(" AND ", [
-        "metric.type=\"logging.googleapis.com/user/vpcsc/config_changed_outside_pipeline\"",
+        "metric.type=\"${local.metryka.zmiany_poza_pipelinem}\"",
         "resource.type=\"global\"",
       ])
       comparison      = "COMPARISON_GT"
@@ -262,10 +237,27 @@ resource "google_monitoring_alert_policy" "vpcsc_out_of_band_change" {
       duration        = "0s"
 
       aggregations {
-        alignment_period     = "300s"
-        per_series_aligner   = "ALIGN_DELTA"
-        cross_series_reducer = "REDUCE_SUM"
-        group_by_fields      = ["metric.label.principal"]
+        alignment_period   = "3600s"
+        per_series_aligner = "ALIGN_MAX"
+      }
+    }
+  }
+
+  # Własny martwy-człowiek, z tego samego powodu co przy odmowach: ta metryka ma WŁASNY widok i WŁASNY
+  # grant, więc może zamilknąć w pojedynkę. Cisza po cichu znaczyłaby „nikt nie tknął granicy".
+  conditions {
+    display_name = "obserwator przestał publikować zmiany konfiguracji"
+
+    condition_absent {
+      filter = join(" AND ", [
+        "metric.type=\"${local.metryka.zmiany_poza_pipelinem}\"",
+        "resource.type=\"global\"",
+      ])
+      duration = "${local.progi.watchdog_absent_seconds}s"
+
+      aggregations {
+        alignment_period   = "3600s"
+        per_series_aligner = "ALIGN_MAX"
       }
     }
   }
@@ -286,11 +278,14 @@ resource "google_monitoring_alert_policy" "vpcsc_out_of_band_change" {
          istnieje drift detection: git przestał opisywać rzeczywistość;
       3. **nieautoryzowana zmiana** — traktuj jako incydent bezpieczeństwa.
 
-      **Nie „naprawiaj" tego przez apply.** Najpierw ustal, KTO i CO zmienił:
+      **Nie „naprawiaj" tego przez apply.** Najpierw ustal, KTO i CO zmienił. Czytaj z WIDOKU SINKA —
+      wpis leży w logu ORGANIZACJI (`_Required`), do którego zwykły operator nie ma dostępu, a sink jest
+      jedyną drogą, którą ten wpis stamtąd wychodzi:
 
       ```
-      gcloud logging read 'protoPayload.serviceName="accesscontextmanager.googleapis.com"
-        AND NOT protoPayload.methodName:("Get" OR "List")' --organization=ORG_ID --freshness=2h \
+      gcloud logging read 'protoPayload.serviceName="accesscontextmanager.googleapis.com"' \
+        --project=<PROJEKT_ADM> --bucket=<KUBELEK> --location=<LOKALIZACJA> --view=<KUBELEK>-config \
+        --freshness=2h \
         --format='table(timestamp, protoPayload.authenticationInfo.principalEmail, protoPayload.methodName)'
       ```
 

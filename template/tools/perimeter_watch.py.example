@@ -13,6 +13,15 @@ CO MIERZY (kazda liczba = jeden objaw z `docs/7-alerty.md`):
   attribute_budget_days_to_limit  (limit - uzyte) / nachylenie z 30 dni. Sentynela 3650 = nie prognozuje.
   drift_resources         ile zasobow `terraform plan` chce zmienic przy NIETKNIETYM repozytorium.
   members_expired         ile wpisow ma `review_by` w przeszlosci.
+  violations_enforced     ile odmow EGZEKWOWANYCH w oknie — jedyna liczba mowiaca „ktos jest blokowany TERAZ”.
+  violations_dry_run      ile naruszen dry-run w oknie (zapowiedz problemu po promocji, nie problem).
+  config_changed_outside_pipeline  ile zmian ACM tozsamoscia INNA niz konto apply.
+
+TRZY OSTATNIE DOLOZONO W #2000 I NIE JEST TO ROZSZERZENIE ZAKRESU, TYLKO NAPRAWA. Stały wczesniej na
+metrykach log-based, ktore mialy ZERO serii przy realnych zdarzeniach: metryka log-based liczy wylacznie
+wpisy PRZYJETE przez Log Router swojego projektu, a te wpisy powstaja w projekcie czlonka albo w logu
+organizacji i docieraja do nas SINKIEM, czyli do magazynu — nie na wejscie. Uzasadnienie z para kontrolna
+stoi w `terraform/monitoring.tf`; tutaj wystarczy wiedziec, ze zrodlem jest WIDOK SINKA, nie audit-log.
 
 DWA TRYBY, DWIE TOZSAMOSCI — I TO JEST KONSTRUKCJA, NIE WYGODA. `measure` czyta i liczy; uruchamia go
 konto `plan`, ktore jest read-only i ktore moze impersonowac KAZDY pull request. `publish` pisze do Cloud
@@ -42,7 +51,17 @@ METRYKI = {
     "budzet_dni": "custom.googleapis.com/vpcsc/attribute_budget_days_to_limit",
     "dryf": "custom.googleapis.com/vpcsc/drift_resources",
     "wygasli": "custom.googleapis.com/vpcsc/members_expired",
+    # Trzy ponizsze opisuja to, co dzieje sie NA granicy, a nie w naszym pipelinie — i stoja tutaj
+    # dlatego, ze metryka log-based ich policzyc NIE MOZE (#2000, uzasadnienie w `terraform/monitoring.tf`).
+    "naruszenia_enforced": "custom.googleapis.com/vpcsc/violations_enforced",
+    "naruszenia_dry_run": "custom.googleapis.com/vpcsc/violations_dry_run",
+    "zmiany_poza_pipelinem": "custom.googleapis.com/vpcsc/config_changed_outside_pipeline",
 }
+
+# Metody ACM, ktore ZMIENIAJA granice. Odczyty (`Get*`, `List*`) sa szumem: konto planu czyta granice przy
+# kazdym pull requescie, wiec bez tego wykluczenia metryka „ktos zmienil granice” rosla by przy kazdym PR-ze.
+ACM_ZMIANA = ("ServicePerimeter", "AccessLevel", "AccessPolicy")
+ACM_ODCZYT = ("Get", "List")
 
 # Sentynela „nie da sie prognozowac". SWIADOMIE po BEZPIECZNEJ stronie (10 lat, nie 0): prognoza policzona
 # z trzech punktow pomiarowych swiezego wdrozenia bylaby szumem, a alert na szumie uczy ignorowania alertow.
@@ -204,6 +223,55 @@ def wygasli_czlonkowie(projects_doc: dict, dzis: datetime.date) -> int:
     return ile
 
 
+def policz_naruszenia(wpisy: list[dict]) -> dict:
+    """Dzieli wpisy o naruszeniu VPC-SC na EGZEKWOWANE i DRY-RUN.
+
+    PULAPKA, KTORA JUZ RAZ KOSZTOWALA NAS BRAMKE (#1941, powtorzona w #2000). Odmowa EGZEKWOWANA
+    NIE MA pola `dryRun` — ono istnieje WYLACZNIE przy naruszeniu dry-run i ma wtedy wartosc `true`.
+    Rozroznienie musi wiec isc po OBECNOSCI pola, nie po jego wartosci: predykat `dryRun == "false"`
+    (albo `.get("dryRun") == False`) nie dopasuje NIGDY NICZEGO, w zadnej organizacji, i zostawi
+    metryke „ktos jest blokowany TERAZ” pusta dokladnie wtedy, gdy ma rosnac.
+
+    Wartosc bywa bool `True` albo string `"true"` zaleznie od tego, czy wpis przyszedl przez
+    `entries.list` (JSON) czy przez `gcloud --format=json` — dlatego porownujemy po znormalizowanym
+    napisie, a nie po typie.
+    """
+    licznik = {"enforced": 0, "dry_run": 0}
+    for w in wpisy:
+        meta = (w.get("protoPayload") or {}).get("metadata") or {}
+        if "dryRun" not in meta:
+            licznik["enforced"] += 1
+        elif str(meta["dryRun"]).lower() == "true":
+            licznik["dry_run"] += 1
+        else:
+            # Ksztalt nieznany: pole JEST, ale nie jest `true`. Google takiego wpisu dzis nie produkuje.
+            # Liczymy go jako EGZEKWOWANY — fail-closed: falszywy alarm jest tanszy niz przeoczona odmowa.
+            licznik["enforced"] += 1
+    return licznik
+
+
+def policz_zmiany_konfiguracji(wpisy: list[dict], konto_apply: str) -> int:
+    """Ile razy granice zmienila tozsamosc INNA niz konto apply pipeline'u.
+
+    Odtwarza semantyke filtra, ktory stal wczesniej w metryce log-based — z jedna roznica: konto apply
+    wyklucza sie TUTAJ, a nie w filtrze widoku. Widok jest struktura i nie ma sie zmieniac przy rotacji
+    konta serwisowego; tozsamosc jest wartoscia srodowiska i nalezy do konsumenta.
+    """
+    ile = 0
+    for w in wpisy:
+        pp = w.get("protoPayload") or {}
+        metoda = pp.get("methodName") or ""
+        if not any(z in metoda for z in ACM_ZMIANA):
+            continue
+        if any(o in metoda for o in ACM_ODCZYT):
+            continue
+        kto = ((pp.get("authenticationInfo") or {}).get("principalEmail") or "")
+        if konto_apply and kto == konto_apply:
+            continue
+        ile += 1
+    return ile
+
+
 # --- wejscie/wyjscie ---------------------------------------------------------------------------------
 
 def _git(*args: str) -> str:
@@ -265,6 +333,34 @@ def sekundy_zalegania(repo: str, workflow: str, galaz: str, token: str, sciezki:
         return 0, f"od ostatniego udanego apply ({sha[:8]}) nic nie dotknelo granicy"
     najstarszy = int(czasy[-1])
     return max(0, teraz - najstarszy), f"zmiana z {sha[:8]}..{head[:8]} czeka na apply"
+
+
+def czytaj_widok(widok: str, filtr: str, od_epoch: int, token: str, limit_stron: int = 10) -> list[dict]:
+    """Wpisy z JEDNEGO widoku kubelka logow, od `od_epoch` do teraz.
+
+    DLACZEGO WIDOK, A NIE PROJEKT CZLONKA. Naruszenie powstaje w logu projektu-wlasciciela zasobu,
+    a po promocji ten log sam lezy ZA GRANICA — odczyt z zewnatrz bywa odrzucany przez VPC-SC, czyli
+    producent metryki „ile bylo odmow” sam generowalby odmowy. Widok sinka stoi w projekcie
+    administracyjnym POZA perimetrem, wiec ten tryb awarii nie istnieje.
+
+    STRONICOWANIE JEST OBOWIAZKOWE, nie optymalizacja: `entries.list` oddaje domyslnie strone, a incydent
+    to setki wpisow w minutach. Bez petli metryka pokazywalaby sufit strony zamiast liczby odmow —
+    czyli mylilaby „duzo” z „bardzo duzo” dokladnie wtedy, gdy ta roznica decyduje o eskalacji.
+    """
+    od = datetime.datetime.fromtimestamp(od_epoch, datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    pelny_filtr = f'{filtr} AND timestamp>="{od}"' if filtr else f'timestamp>="{od}"'
+    wpisy: list[dict] = []
+    strona = None
+    for _ in range(limit_stron):
+        cialo = {"resourceNames": [widok], "filter": pelny_filtr, "pageSize": 1000}
+        if strona:
+            cialo["pageToken"] = strona
+        odp = _http("https://logging.googleapis.com/v2/entries:list", token, metoda="POST", cialo=cialo)
+        wpisy.extend(odp.get("entries") or [])
+        strona = odp.get("nextPageToken")
+        if not strona:
+            break
+    return wpisy
 
 
 def pobierz_perimetr(policy_id: str, nazwa: str, token: str) -> dict:
@@ -377,6 +473,59 @@ def zmierz(args) -> int:
     plan = json.load(open(args.plan_json)) if os.path.exists(args.plan_json) else {}
     dryf = dryf_z_planu(plan, zaleganie > 0)
 
+    # --- to, co dzieje sie NA granicy (naruszenia + zmiany konfiguracji) ---------------------------
+    #
+    # ZRODLEM JEST WIDOK SINKA, a nie metryka log-based — bo log-based liczy tylko wpisy przyjete przez
+    # Log Router WLASNEGO projektu, a te powstaja w projekcie czlonka (naruszenia) albo w organizacji
+    # (zmiany ACM). Zmierzone para kontrolna w #2000; pelne uzasadnienie w `terraform/monitoring.tf`.
+    #
+    # FAIL-CLOSED: gdy odczyt padnie, NIE publikujemy zera. Zero znaczyloby „nie bylo odmow”, czyli
+    # zamienialoby slepote w cisze, a cisze w spokoj — dokladnie ten tryb awarii, ktory ten plik tropi.
+    # Brak punktu zapala `condition_absent` obu polityk, czyli awarie obserwatora widac JAKO awarie.
+    punkty_granicy = []
+    zrodlo = (yaml.safe_load(open(args.alerting)) or {}).get("violations_source") if \
+        os.path.exists(args.alerting) else None
+    if not zrodlo:
+        print("::warning::brak sekcji `violations_source` w alerting.yaml — metryki naruszen i zmian "
+              "konfiguracji NIE beda publikowane (polityki alertu tez sie wtedy nie tworza)", file=sys.stderr)
+        naruszenia, zmiany_acm = None, None
+    else:
+        okno = int(zrodlo.get("window_seconds", 5400))
+        baza = (f"projects/{zrodlo['project_id']}/locations/{zrodlo['location']}"
+                f"/buckets/{zrodlo['bucket']}/views")
+        # Ta sama tozsamosc, ktora wykluczal filtr metryki log-based — czytana z `policy.yaml`, bo tam
+        # mieszka konfiguracja monitoringu i tam zmienia sie przy rotacji konta.
+        konto_apply = (polityka.get("monitoring") or {}).get("apply_service_account", "")
+        naruszenia, zmiany_acm = None, None
+        try:
+            wpisy = czytaj_widok(
+                f"{baza}/{zrodlo['view']}",
+                'protoPayload.metadata."@type"="type.googleapis.com/google.cloud.audit.'
+                'VpcServiceControlAuditMetadata"',
+                teraz - okno, g_token)
+            naruszenia = policz_naruszenia(wpisy)
+        except (urllib.error.HTTPError, urllib.error.URLError, KeyError) as e:
+            print(f"::warning::nie udalo sie odczytac widoku naruszen ({e}) — metryki odmow NIE zostana "
+                  f"opublikowane, martwy-czlowiek alertu je przejmie", file=sys.stderr)
+        try:
+            wpisy_acm = czytaj_widok(
+                f"{baza}/{zrodlo['config_view']}",
+                'protoPayload.serviceName="accesscontextmanager.googleapis.com"',
+                teraz - okno, g_token)
+            zmiany_acm = policz_zmiany_konfiguracji(wpisy_acm, konto_apply)
+        except (urllib.error.HTTPError, urllib.error.URLError, KeyError) as e:
+            print(f"::warning::nie udalo sie odczytac widoku zmian konfiguracji ({e}) — metryka zmian "
+                  f"poza pipeline'em NIE zostanie opublikowana", file=sys.stderr)
+
+        if naruszenia is not None:
+            punkty_granicy += [
+                punkt(METRYKI["naruszenia_enforced"], naruszenia["enforced"], None, args.project, teraz, True),
+                punkt(METRYKI["naruszenia_dry_run"], naruszenia["dry_run"], None, args.project, teraz, True),
+            ]
+        if zmiany_acm is not None:
+            punkty_granicy.append(
+                punkt(METRYKI["zmiany_poza_pipelinem"], zmiany_acm, None, args.project, teraz, True))
+
     projects_doc = yaml.safe_load(open(args.projects))
     # Data w UTC, nie lokalna: `review_by` jest datą kalendarzową bez strefy, a runner i laptop operatora
     # bywają w różnych strefach — wtedy ta sama konfiguracja daje dwa różne wyniki w oknie kilku godzin.
@@ -395,7 +544,7 @@ def zmierz(args) -> int:
         ] + [
             punkt(METRYKI["budzet_dni"], prognoza[c], {"config": c}, args.project, teraz, False)
             for c in sorted(prognoza)
-        ],
+        ] + punkty_granicy,
         # Czytelne podsumowanie dla `$GITHUB_STEP_SUMMARY` — to jest DOWOD, ze producent liczy realne
         # wartosci, niezalezny od tego, czy alert akurat odpalil. `zadeklarowane` stoi obok `zywe`
         # celowo: te dwie liczby maja byc rowne, a ich rozjazd jest sam w sobie informacja.
@@ -409,6 +558,11 @@ def zmierz(args) -> int:
             "drift_resources": dryf,
             "members_expired": wygasli,
             "blad_odczytu_granicy": blad_odczytu,
+            # `null` znaczy NIE ODCZYTANO (awaria albo brak konfiguracji), a `0` znaczy ODCZYTANO ZERO.
+            # Te dwie rzeczy MUSZA byc rozroznialne w podsumowaniu, bo tylko druga jest zdaniem o swiecie.
+            "violations_enforced": (naruszenia or {}).get("enforced") if naruszenia else None,
+            "violations_dry_run": (naruszenia or {}).get("dry_run") if naruszenia else None,
+            "config_changed_outside_pipeline": zmiany_acm,
         },
     }
     json.dump(wynik, sys.stdout, indent=2, sort_keys=True, ensure_ascii=False)
@@ -450,6 +604,9 @@ def main() -> int:
                    help="stad bierze sie nazwa polityki dostepu, nazwa perimetru i limit atrybutow")
     m.add_argument("--plan-json", default="terraform/plan.json")
     m.add_argument("--projects", default="perimeter/projects.yaml")
+    m.add_argument("--alerting", default="perimeter/alerting.yaml",
+                   help="stad bierze sie sekcja `violations_source` — wspolrzedne widokow sinka, z ktorych "
+                        "licza sie metryki odmow i zmian konfiguracji. Brak sekcji = te metryki nie powstaja")
     m.add_argument("--history-days", type=int, default=30)
     m.add_argument("--teraz", type=int, default=None, help="epoch do testow")
     m.set_defaults(func=zmierz)

@@ -47,19 +47,29 @@ locals {
   # także wtedy, gdy `count = 0` i nie powstanie ani jedna instancja.
   alerting_enabled = local.monitoring_enabled && fileexists(local.alerting_path)
 
-  # KOMPLET kluczy znaczy KOMPLET — łącznie z `schema_version`, którego żadne wyrażenie niżej nie czyta.
-  # Terraform wymaga, żeby obie gałęzie `?:` miały ten sam typ obiektu; atrapa uboższa o jedno pole daje
-  # `Inconsistent conditional result types` i wywraca `validate` NAWET przy `alerting_enabled = true`
-  # (zmierzone). Czyli: brak pola, którego nikt nie używa, psuje wdrożenie, które ten plik ma
-  # obsługiwać — i psuje je w miejscu bez związku z przyczyną.
-  alerting = local.alerting_enabled ? yamldecode(file(local.alerting_path)) : {
+  # `merge(ATRAPA, PLIK)`, A NIE `warunek ? PLIK : ATRAPA` — i to jest poprawka wymuszona pomiarem.
+  #
+  # Konstrukcja warunkowa wymagała, żeby OBIE gałęzie miały IDENTYCZNY zestaw kluczy najwyższego poziomu.
+  # Dopóki plik miał dokładnie te klucze co atrapa, działało. Ale klucz OPCJONALNY łamie to w OBIE strony
+  # naraz i nie da się tego uratować doborem atrapy — zmierzone na `violations_source`:
+  #   * jest w pliku, nie ma w atrapie  -> „Inconsistent conditional result types"
+  #   * jest w atrapie, nie ma w pliku  -> ten sam błąd, tylko z odwróconymi rolami
+  # Do tego komunikat wskazuje `channels`/`machine`, czyli miejsce bez związku z przyczyną, więc następna
+  # osoba szuka błędu w kanale maszynowym.
+  #
+  # `merge` bierze SUMĘ kluczy i nie żąda zgodności typów, a `try` wokół `file()` załatwia brak pliku.
+  # Wartości z pliku wygrywają z atrapą, więc zachowanie przy włączonych alertach jest bez zmian; przy
+  # wyłączonych zostaje komplet pustych kluczy, dokładnie jak dotąd. Klucz opcjonalny wolno teraz dodać
+  # do schematu bez dotykania tego wyrażenia — a to była dotąd mina na każdą kolejną zmianę.
+  alerting = merge({
     schema_version = 1
     channels = {
       capacity = { email = "" }
       security = { email = "" }
     }
-    # `machine` NIE wchodzi do atrapy: jest OPCJONALNY, a `lookup` niżej i tak go nie wymaga. Atrapa
-    # opisuje klucze OBOWIĄZKOWE — dołożenie tu opcjonalnego zmusiłoby każde wdrożenie do jego posiadania.
+    # `machine` NIE wchodzi do atrapy: jest OPCJONALNY, a `try` niżej i tak go nie wymaga. Atrapa opisuje
+    # klucze OBOWIĄZKOWE. Od czasu `merge` nie jest to już wymóg techniczny, tylko dokumentacyjny: atrapa
+    # ma czytać się jak lista tego, bez czego alerting nie ma sensu.
     thresholds = {
       attribute_budget_percent = 70
       days_to_limit_warning    = 90
@@ -69,10 +79,31 @@ locals {
       drift_persist_seconds    = 3600
     }
     runbook_base_url = ""
-  }
+    # Atrapa `violations_source` jest tu po to, żeby `local.zrodlo_naruszen` miał co czytać, gdy pliku
+    # nie ma w ogóle. Pusty `project_id` znaczy „brak źródła" i zeruje `naruszenia_count`.
+    violations_source = {
+      project_id = ""
+    }
+    # BEZ `warunek ? ... : {}` wokół dekodu — to był ten sam błąd w nowym przebraniu: gałąź `{}` też jest
+    # obiektem o INNYM zestawie kluczy niż zdekodowany plik. `try` sam w sobie nie uzgadnia typów (zwraca
+    # to, co się powiodło), więc wystarcza i za brak pliku, i za jego niepoprawność. Bramką „czy alerty
+    # w ogóle powstają" jest `alert_count`, a nie kształt tego wyrażenia.
+  }, try(yamldecode(file(local.alerting_path)), {}))
 
   alert_count = local.alerting_enabled ? 1 : 0
   progi       = local.alerting.thresholds
+
+  # ŹRÓDŁO ODMÓW I ZMIAN KONFIGURACJI. Dzięki `merge` wyżej czyta się to zwyczajnie: brak sekcji w pliku
+  # znaczy pusty `project_id` z atrapy, czyli „brak źródła".
+  #
+  # Ten jeden `!= ""` decyduje o istnieniu DWÓCH polityk alertu, i to jest wybór między dwoma złami.
+  # Bez sekcji `violations_source` nie ma kto publikować metryk odmów i zmian ACM — a polityka bez
+  # producenta nie milczy, tylko chodzi WIECZNIE na martwym-człowieku. Stały fałszywy alarm uczy
+  # dyżurnego klikać „potwierdź” na całej kategorii, w której siedzi jedyny alert mówiący „ktoś jest
+  # blokowany TERAZ”. Brak alertu jest gorszy niż alert, ale LEPSZY niż alert, który zawsze kłamie —
+  # i jest widoczny: `docs/7-alerty.md` nazywa wtedy oba sygnały jako niewdrożone.
+  zrodlo_naruszen  = try(local.alerting.violations_source.project_id, "")
+  naruszenia_count = local.alerting_enabled && local.zrodlo_naruszen != "" ? 1 : 0
 
   # Runbook jest KONFIGURACJĄ, bo docelowe repozytorium ma inny adres niż starter. Kotwice (`#…`) są stałe
   # i pilnuje ich selftest — alert wskazujący na nieistniejącą kotwicę ląduje na początku dokumentu, czyli
@@ -88,6 +119,16 @@ locals {
     budzet_dni     = "custom.googleapis.com/vpcsc/attribute_budget_days_to_limit"
     dryf           = "custom.googleapis.com/vpcsc/drift_resources"
     wygasli        = "custom.googleapis.com/vpcsc/members_expired"
+
+    # TRZY PONIŻSZE SĄ `custom.`, A NIE `logging.googleapis.com/user/` — I TO JEST ISTOTA POPRAWKI #2000.
+    # Stały tu wcześniej metryki log-based i miały ZERO serii przy realnych zdarzeniach, bo metryka
+    # log-based liczy wyłącznie wpisy PRZYJĘTE przez Log Router swojego projektu, a te wpisy powstają
+    # w logu projektu członkowskiego (naruszenia) albo organizacji (zmiany ACM) i docierają tutaj
+    # SINKIEM — czyli do magazynu, nie na wejście. Zmierzone parą kontrolną, szczegóły w `monitoring.tf`.
+    # Producentem jest `watch.yml`, ten sam, który od pierwszego dnia ma dane na czterech metrykach wyżej.
+    naruszenia_enforced   = "custom.googleapis.com/vpcsc/violations_enforced"
+    naruszenia_dry_run    = "custom.googleapis.com/vpcsc/violations_dry_run"
+    zmiany_poza_pipelinem = "custom.googleapis.com/vpcsc/config_changed_outside_pipeline"
   }
 
   # Kanały: lista z `policy.yaml` (kanały założone poza tym repo) PLUS kanał zarządzany tutaj. Konkatenacja,
@@ -268,6 +309,50 @@ resource "google_monitoring_metric_descriptor" "wygasli" {
   unit         = "1"
 }
 
+# --- deskryptory metryk liczonych z WIDOKÓW SINKA (#2000) -------------------------------------------
+# Powstają razem z politykami (`naruszenia_count`), a nie z całym alertingiem: bez sekcji `violations_source`
+# nie ma producenta, więc deskryptor byłby pustym obiektem sugerującym pomiar, którego nikt nie robi.
+#
+# `GAUGE`, a nie `DELTA`: producent publikuje LICZBĘ ZDARZEŃ W OKNIE odczytaną wstecz z widoku, a nie
+# przyrost od poprzedniego punktu. `DELTA` znaczyłoby, że Monitoring może te punkty sumować między sobą —
+# a one się NAKŁADAJĄ (okno 5400 s przy kadencji 3600 s), więc suma zawyżałaby o część wspólną.
+
+resource "google_monitoring_metric_descriptor" "naruszenia_enforced" {
+  count = local.naruszenia_count
+
+  project      = local.monitoring.project_id
+  type         = local.metryka.naruszenia_enforced
+  display_name = "VPC-SC: odmowy w trybie egzekwowanym"
+  description  = "Liczba odmów EGZEKWOWANYCH w oknie obserwatora, liczona z widoku sinka. Publikowana także jako 0 — brak punktu znaczy awarię obserwatora, nie brak odmów."
+  metric_kind  = "GAUGE"
+  value_type   = "INT64"
+  unit         = "1"
+}
+
+resource "google_monitoring_metric_descriptor" "naruszenia_dry_run" {
+  count = local.naruszenia_count
+
+  project      = local.monitoring.project_id
+  type         = local.metryka.naruszenia_dry_run
+  display_name = "VPC-SC: naruszenia dry-run"
+  description  = "Liczba naruszeń dry-run w oknie obserwatora — wywołania, które przestaną działać po promocji. ŚWIADOMIE bez polityki alertu: konsumentem jest raport tygodniowy i bramka promocji."
+  metric_kind  = "GAUGE"
+  value_type   = "INT64"
+  unit         = "1"
+}
+
+resource "google_monitoring_metric_descriptor" "zmiany_poza_pipelinem" {
+  count = local.naruszenia_count
+
+  project      = local.monitoring.project_id
+  type         = local.metryka.zmiany_poza_pipelinem
+  display_name = "VPC-SC: zmiany granicy poza pipeline'em"
+  description  = "Liczba operacji ACM zmieniających granicę, wykonanych tożsamością INNĄ niż konto apply. Liczona z widoku Admin Activity w kubełku sinka — w logu organizacji, którego metryka log-based zobaczyć nie może."
+  metric_kind  = "GAUGE"
+  value_type   = "INT64"
+  unit         = "1"
+}
+
 # --- PROPAGACJA DESKRYPTORÓW ---------------------------------------------------------------------
 #
 # ZMIERZONE NA PIERWSZYM APPLY, nie przewidziane: dwie polityki odbiły się od API komunikatem
@@ -298,6 +383,12 @@ resource "time_sleep" "deskryptory_widoczne" {
     google_monitoring_metric_descriptor.budzet_dni,
     google_monitoring_metric_descriptor.dryf,
     google_monitoring_metric_descriptor.wygasli,
+    # Trzy deskryptory z widoków sinka. Listy `count = 0` są tu legalne i nic nie wnoszą, więc wdrożenie
+    # bez `violations_source` czeka dokładnie tyle samo — a to jest właściwe: 120 s raz, przy pierwszym
+    # apply, jest tańsze niż rozgałęzianie tego bloku.
+    google_monitoring_metric_descriptor.naruszenia_enforced,
+    google_monitoring_metric_descriptor.naruszenia_dry_run,
+    google_monitoring_metric_descriptor.zmiany_poza_pipelinem,
   ]
 }
 
