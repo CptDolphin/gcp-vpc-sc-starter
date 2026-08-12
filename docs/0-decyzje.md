@@ -927,3 +927,98 @@ API). Płacony raz na apply, nie raz na pull request.
   testowej i bez ryzyka zatrzymania wdrożenia. Odrzucone: bramka pytałaby innym kontem niż to, które
   zmienia granicę, więc jej zielony wynik nie byłby zdaniem o mutatorze. Testowalność kupujemy inaczej —
   bramki treści (w tym ta, która motywowała całą zmianę) stoją w jobie bez poświadczeń i bez environment.
+
+## DEC-17 — Promocja do `enforced` zatrzymuje apply; zgodą jest ręczne uruchomienie z listą promowanych
+
+**Decyzja.** `apply.yml` porównuje na ścieżce mutatora dwie rzeczy: kto jest **zadeklarowany** jako
+`stage: enforced` w `perimeter/projects.yaml` i kto jest **realnie egzekwowany** w żywym perimetrze
+(`status.resources` z API). Różnica — członkowie, których ten apply zacząłby egzekwować — **zatrzymuje
+przebieg przed `terraform plan`**. Jedyne, co go zwalnia, to ręczne uruchomienie workflowa
+(`workflow_dispatch`) z polem `promocje` wypełnionym listą kluczy członków **równą** tej różnicy.
+Zdejmowanie egzekwowania (`enforced` → `dry-run`, rewert, offboarding, break-glass) **nie jest bramkowane**
+i jedzie automatem. Kod: `tools/promotion_hold.py` + akcja `.github/actions/bramka-promocji`.
+
+**Problem, który to zamyka.** Bez tego merge JEST egzekwowaniem. Pull request z jednowyrazowym diffem
+(`stage: dry-run` → `stage: enforced`) po scaleniu wyzwala `apply.yml` na push do gałęzi domyślnej
+i granica zaczyna odmawiać — bez kroku, na którym człowiek cokolwiek naciska. `promotion_gate` (reguły
+OPA) sprawdza warunki merytoryczne promocji: minimum dni w dry-run, czyste okno obserwacji, istniejący
+raport naruszeń — ale sprawdza je **automatem**. Zgoda człowieka istniała wyłącznie w dokumentacji.
+
+**Dlaczego akurat ta zmiana zasługuje na bramkę, skoro reszta repozytorium jedzie automatem.** Bo jest
+jedyną, której skutkiem jest **odmowa ruchu**, i jedyną, w której cofnięcie konfiguracji nie równa się
+cofnięciu skutku. **Zmierzone przy rollbacku pierwszej promocji: 46 s do zakończenia `apply`, ale 78 s do
+powrotu ruchu** — konfiguracja wraca natychmiast, skutek propaguje się ~20 s dłużej i w tym oknie
+wywołujący dostają odmowę. Nowy członek w dry-run, reguła ingress, access level ani zmiana budżetu nie
+odbierają nikomu dostępu. Promocja tak — i robi to na podstawie diffa, który w review wygląda na kosmetykę.
+
+**Ograniczenie, którego nie da się ominąć ustawieniem — zmierzone, nie założone.** Naturalny mechanizm
+(required reviewers na environment `perimeter-apply`) jest **funkcją płatną dla repozytoriów prywatnych**.
+Na planie bez niej API przyjmuje `PUT` i zostawia environment **bez ani jednej reguły ochrony** — dlatego
+`tools/bootstrap_github.sh` odczytuje stan z powrotem i odmawia zameldowania sukcesu przy braku bramki
+(`--no-human-gate "<powód>"` jako świadome odstępstwo). Ta sama granica planu odpowiada `403 Upgrade to
+GitHub Pro or make this repository public to enable this feature` na ochronie gałęzi **i** na regułach
+repozytorium (rulesets) — zmierzone na obu endpointach. Bramka opisana tutaj jest więc jedyną warstwą
+ludzką, która działa **na każdym planie**, i celowo nie wymaga żadnego ustawienia repozytorium.
+
+**Dlaczego porównanie ze stanem świata, a nie diff commitów.** Diff (`before..after` przy push,
+`base..head` na pull requeście) opisuje ZDARZENIE i znika razem z nim. Trzy przebiegi stosują dokładnie tę
+samą treść, nie mając żadnego diffa: ręczne `workflow_dispatch`, ponowienie przebiegu (`gh run rerun`)
+i apply po apply, który padł. Bramka na diffie byłaby więc nieobecna dokładnie tam, gdzie nikt nie patrzy
+na treść. Porównanie deklaracji ze stanem granicy jest prawdziwe przy każdym wyzwalaczu — także wtedy, gdy
+ktoś rozbije promocję na dwa commity albo wypchnie ją prosto na gałąź domyślną z pominięciem review.
+Jest to nadal wykrycie **po treści deklaracji** (`stage:`), a nie po nazwie gałęzi ani po etykiecie:
+nazwa i etykieta są pod kontrolą autora zmiany.
+
+**Dlaczego równość zbiorów, a nie flaga „zatwierdzam".** Pole `promocje` wymaga wypisania, KOGO ten
+przebieg zacznie odcinać — „zatwierdzam wszystko" nie jest w tym języku wyrażalne. Gdy między spojrzeniem
+na repozytorium a uruchomieniem dojdzie druga promocja, zbiory przestają być równe i bramka staje ponownie,
+zamiast przepuścić przy okazji coś, czego zatwierdzający nie widział. Zatwierdzenie wskazujące członka
+spoza zbioru oczekujących też jest błędem: opisuje inny stan repozytorium niż stosowany.
+
+**Dlaczego bramka jest asymetryczna.** Zatrzymujemy wyłącznie ruch w stronę `enforced`. Bramka na drodze
+powrotnej wydłużałaby każdą awarię o czas szukania człowieka — a to jest ta sama pomyłka, co procedura
+awaryjna wymagająca zatwierdzenia. Rewert promocji jedzie więc automatem i jest pełnoprawną drugą drogą
+wyjścia z zatrzymanego apply (obok naciśnięcia bramki).
+
+**Zgoda ma jedno źródło i jest to własność wykonywalna, nie konwencja.** `promotion_hold.py` odrzuca
+zatwierdzenie przyniesione przez zdarzenie inne niż `workflow_dispatch`. Wpisanie listy na stałe w plik
+workflowa (albo doklejenie jej do wyzwalacza `push`) nie jest więc obejściem: byłaby to zgoda, której nikt
+nie wyraża w momencie skutku, zdejmowalna jednym commitem wyglądającym w diffie na konfigurację.
+
+**Perimetr, którego nie ma, znaczy „nikt nie jest egzekwowany" — a nie awarię.** Przy pierwszym apply na
+świeżej organizacji perimetr powstaje w tym samym przebiegu; gdyby brak obiektu był błędem, bramka
+zatrzymywałaby wdrożenie idące dokumentowaną ścieżką (wszyscy członkowie w `dry-run`). **Każdy inny błąd
+odczytu przerywa apply**: „nie wiem, kto jest egzekwowany" nie może zdegradować się do „pewnie nikt".
+
+**Skutek uboczny, nazwany wprost.** Wstrzymana promocja leży na gałęzi domyślnej jako zmiana
+NIEZASTOSOWANA, więc po `apply_pending_seconds` odpala alert wieku niezastosowanej zmiany (DEC-13). Jest to
+zamierzone: bramka nie jest miejscem parkowania. Promocja albo zostaje naciśnięta, albo zrewertowana —
+trzeciego stanu nie ma, a alert jest tym, co go nie pozwala udawać.
+
+**Koszt.** Jedno wywołanie API na apply, przed wzięciem zamka stanu — przebieg wstrzymany nie blokuje
+niczyjego apply i nie zostawia po sobie zablokowanego stanu.
+
+**Odrzucone.**
+- *Required reviewers na environment jako jedyna warstwa.* Nie istnieje na planie bez niej, a jej brak
+  jest cichy (API przyjmuje żądanie, environment zostaje bez reguł). Warstwy się nie wykluczają: tam,
+  gdzie plan ją ma, zostaje włączona i **dokłada** rozdział tożsamości, którego ta bramka nie daje.
+- *Drugi workflow („promote.yml") z własnym `terraform apply`.* Druga kopia mutatora: własny checkout,
+  własna wymiana tokenu WIF, własna publikacja kontraktu. Rozjedzie się z pierwszą przy pierwszej zmianie,
+  a rozjazd mutatora jest awarią, o której dowiadujesz się na żywej granicy. Zamiast tego jeden workflow
+  ma dwa tryby, rozróżniane wejściem, którego GitHub nie wyprodukuje sam.
+- *Wspólna akcja z wejściem `blokuj: true|false`.* Bramka zdejmowalna przestawieniem jednej flagi
+  w jednym miejscu, nadal wyglądająca w drzewie na obecną. Osobna akcja czyni asymetrię (mutator tak,
+  pull request nie) widoczną w układzie plików.
+- *Bramka „dwóch kluczy": zatwierdzenie tożsamością inną niż autor zmiany.* Właściwy kierunek i realny
+  rozdział obowiązków — odrzucony jako **mechanizm podstawowy**, bo w repozytorium z jedną tożsamością
+  z prawem zapisu jest niespełnialny, a bramka niespełnialna zostaje wyłączona przy pierwszej potrzebie
+  i wraca stan wyjściowy. Rozdział tożsamości należy do warstwy ustawień repozytorium (required reviewers),
+  gdzie jest egzekwowany przez GitHuba, a nie do skryptu, który tę samą tożsamość porównuje sam ze sobą.
+- *Wykrycie po etykiecie pull requesta albo po nazwie gałęzi (`promocja/*`).* Jedno i drugie jest pod
+  kontrolą autora zmiany i znika przy push prosto na gałąź domyślną — czyli bramka nie działa dokładnie
+  w tym przypadku, dla którego powstała.
+- *Przeniesienie repozytorium na plan płatny.* Rozwiązuje inne zadanie (ochrona gałęzi, rozdział
+  tożsamości) i warto je rozważyć osobno — ale samo w sobie nie stawia punktu zatrzymania **na wykonaniu**:
+  required reviewers wstrzymują deploy do environment niezależnie od tego, czy zmiana jest promocją, czy
+  literówką w komentarzu. Bramka, która pyta o zgodę przy każdym apply, jest bramką, która przestaje być
+  czytana.
