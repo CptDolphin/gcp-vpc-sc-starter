@@ -713,3 +713,108 @@ obserwatora poza organizacją i świadomie nie wchodzi tutaj.
   minut Actions bez zysku, bo objawy, o których mowa, trwają godzinami. Kadencja jest za to ZWIĄZANA
   z `alignment_period` w politykach — okno krótsze od kadencji daje puste kubełki, w których żaden warunek
   nie utrzyma się przez wymagany czas.
+
+---
+
+## DEC-14 — Bramka należy do MUTATORA, nie do zdarzenia `pull_request`
+
+**Decyzja.** Wszystkie bramki treści (schematy JSON, reguły `vpcsc.onboarding` wraz z
+`control_plane_projects`, testy jednostkowe reguł, budżet atrybutów, guardy repozytorium) oraz obie bramki
+żywe (lista usług wspieranych przez VPC-SC, właściciel bucketa stanu) mają **jedną definicję** — akcje
+złożone `.github/actions/bramki-tresci` i `.github/actions/bramki-zywe` — wołaną przez **oba tory**:
+`validate.yml`/`plan.yml` na pull requeście oraz `apply.yml` na ścieżce mutatora. W `apply.yml` podział
+idzie po TOŻSAMOŚCI: bramki treści w osobnym jobie `bramki` (zero poświadczeń, brak `environment`, job
+applikujący zależy od niego przez `needs:`), bramki żywe w jobie applikującym, **tożsamością `apply`**.
+
+**Problem, który to zamyka.** `apply.yml` wyzwala się na push do gałęzi domyślnej i wykonywał: `plan` →
+reguły `vpcsc.perimeter` na plan-JSON → `apply`. **Ani jednej bramki treści.** Gałąź domyślna repozytorium
+perimetru bywa bez ochrony — na darmowym planie dla repo prywatnego API odpowiada `403 Upgrade to GitHub
+Pro`, więc jest to odstępstwo zapisane, nie przeoczone (patrz niezmiennik o ochronie gałęzi w `AGENTS.md`).
+Commit wypchnięty prosto na tę gałąź omijał więc **cały** tor `pull_request` i szedł do apply.
+
+**Zmierzone.** Bramka `control_plane_projects` — jedyna kontrola przed awarią, której `git revert` NIE
+cofa (konto apply odcięte od własnego stanu, wyjście wymaga człowieka z uprawnieniami org-level na żywej
+polityce) — istniała **wyłącznie** w `validate.yml`. `terraform plan` przepuszczał tę samą zmianę na
+zielono, bo reguły `vpcsc.perimeter` nie wiedzą nic o płaszczyźnie sterowania: opisują kształt reguł
+ingress/egress, nie to, czyj projekt wchodzi do granicy. Kontrola stojąca **obok** ścieżki, którą realnie
+zmienia się granicę, jest kontrolą celującą w pustkę.
+
+**Dlaczego jedna definicja, a nie skopiowane kroki.** Kopia rozjeżdża się przy pierwszej zmianie —
+i wtedy wraca dokładnie ten defekt, tylko ciszej, bo „te same bramki" przestają być te same, a nic tego
+nie mierzy. Nowa deklaracja (`perimeter/alerting.yaml` przyszła tydzień po poprzedniej) dopisana do
+jednego z dwóch zestawów odtworzyłaby lukę dzień po jej zasypaniu. Selftest mierzy **zawieranie zbiorów**:
+każda akcja bramkowa wołana przez tor pull requesta musi być wołana także przez mutatora, z premisą
+odrzucającą zbiór pusty.
+
+**Dlaczego akcja złożona, a nie `workflow_call`.** Reusable workflow to osobny JOB: własny runner, własny
+checkout, własna wymiana tokenu WIF i własna przestrzeń robocza. Kroki bramek muszą widzieć drzewo
+wywołującego (`declarations.json`, pobrany artefakt dowodu naruszeń), a na ścieżce apply — wykonać się
+przed wejściem w environment. Akcja złożona działa **wewnątrz** joba wywołującego: dzieli katalog roboczy
+i nie dokłada ani jednego uwierzytelnienia.
+
+**Dlaczego bramki są osobnym JOBEM, a nie krokami przed `terraform apply`.** Job `apply` deklaruje
+`environment: perimeter-apply` z polityką gałęzi. Na gałęzi spoza tej polityki GitHub odrzuca **cały job**,
+zanim ruszy pierwszy krok — bramki umieszczone tam byłyby więc **nietestowalne inaczej niż na żywej
+granicy**. Osobny job bez `environment` uruchamia się `workflow_dispatch`-em z gałęzi testowej, więc da się
+ZOBACZYĆ, że odrzuca, zamiast twierdzić, że odrzuci. Dodatkowo czerwona bramka zatrzymuje przebieg przed
+wymianą tokenu na tożsamość zapisującą, a `needs:` jest twarde: job applikujący nie startuje wcale.
+
+**Dlaczego bramki żywe pytają kontem `apply`, mimo że to KOSZTUJE.** Bramka żywa opisuje stan świata,
+który za moment zostanie zmieniony. Zapytana kontem `plan` opisywałaby świat widziany przez KOGOŚ INNEGO
+niż mutator, a różnica między tymi dwoma widokami wyszłaby dopiero jako czerwony apply — czyli tam, gdzie
+nie ma już czego sprawdzać. `terraform apply` zaczyna od REFRESHU, więc jest nadzbiorem planu: konto
+`apply` musi umieć przeczytać wszystko, czym zarządza, i to samo dotyczy teraz obu bramek żywych.
+
+Cena jest realna i nazywamy ją wprost: **uprawnienie, którego kontu `apply` zabraknie, nie osłabia granicy
+— ZATRZYMUJE jedyną drogę wdrożenia.** Ten tryb awarii już tu wystąpił (rola org-wide niosła uprawnienie,
+bez którego refresh monitoringu padał `403` przy KAŻDEJ zmianie). Dlatego warunek konieczny jest sprawdzony
+w kodzie, nie założony: `iam-bootstrap/main.tf` nadaje `roles/storage.legacyBucketReader` na buckecie stanu
+**obu** kontom tym samym `for_each` — a to jest dokładnie `storage.buckets.get`, z którego żyje
+`control_plane_check.py --live`. Odwrotna strona tej zależności jest zdrowa: zdjęcie tego grantu zatrzymuje
+apply niezależnie od bramki, bo apply przestaje widzieć własny stan.
+
+**Ryzyko szczątkowe tej decyzji, zmierzone i nazwane.** Drugiej bramki żywej
+(`gcloud access-context-manager supported-services list`) NIE dało się przed wdrożeniem sprawdzić kontem
+`apply` inaczej niż uruchomieniem na gałęzi domyślnej: wiązanie WIF wydaje tę tożsamość WYŁĄCZNIE tokenowi
+z roszczeniem `attribute.environment/perimeter-apply`, a polityka gałęzi tego environment dopuszcza samą
+gałąź domyślną. Nie istnieje więc gałąź testowa, na której dałoby się to zmierzyć — pierwszy przebieg na
+gałęzi domyślnej JEST pomiarem. Konsekwencja przyjęta świadomie: pierwszy apply po tej zmianie ogląda się
+na żywo, a wycofanie to jedno cofnięcie kroku.
+
+**Dowód naruszeń idzie tą samą drogą — i to nie jest detal.** `promotion_gate` jest fail-closed: bez mapy
+`violations_last_window` odrzuca KAŻDEGO członka `enforced`. Gdyby artefakt raportu pobierał wyłącznie tor
+pull requesta, bramki przed apply byłyby OSTRZEJSZE niż te, które przepuściły review — zmergowana promocja
+z kompletnym dowodem nie zostałaby zastosowana **nigdy**, a przebieg wyglądałby na „bramka zadziałała".
+Dlatego `apply.yml` ma `actions: read` i pobiera ten sam artefakt.
+
+**Czego to NIE zastępuje.** Ochrona gałęzi domyślnej zostaje prerekwizytem wdrożenia. Bramki na ścieżce
+mutatora sprawiają, że zła treść nie zostanie **zastosowana**; ochrona gałęzi sprawia, że w ogóle nie
+**wyląduje** na gałęzi domyślnej — czyli że historia repozytorium nadal opisuje to, co przeszło review.
+To dwie różne własności i jedna nie kupuje drugiej.
+
+**Ryzyko szczątkowe nazwane wprost.** Wyzwalacz `apply.yml` obejmuje `perimeter/**` i `terraform/**`
+(i musi być zgodny z tym, co obserwuje `watch.yml` — patrz DEC-13). Push zmieniający SAME reguły
+(`policy/**`) nie uruchamia więc apply w tej samej chwili; rozbrojenie reguły wychodzi dopiero przy
+NASTĘPNYM apply, gdzie łapią je testy jednostkowe `conftest verify` w tym samym jobie bramek. Poszerzenie
+wyzwalacza oznaczałoby apply przy zmianie, która nie zmienia granicy — koszt bez zysku, bo okno zamyka
+się przy pierwszej realnej zmianie.
+
+**Koszt.** Jeden dodatkowy job na apply: ~60-90 s (instalacja narzędzi, wymiana tokenu, dwa wywołania
+API). Płacony raz na apply, nie raz na pull request.
+
+**Odrzucone.**
+- *Włączyć ochronę gałęzi zamiast przenosić bramki.* Funkcja płatna na repo prywatnym (`403 Upgrade to
+  GitHub Pro`), a upublicznienie repozytorium nie jest obejściem — jego treść to mapa dostępów. Nawet
+  z ochroną gałęzi rozwiązaniem właściwym jest bramka na mutatorze: ochrona gałęzi wymusza review, a nie
+  wykonanie kontroli.
+- *Skopiować kroki z `validate.yml` do `apply.yml`.* Najkrótszy diff, najkrótsza żywotność: pierwsza
+  bramka dopisana po jednej stronie odtwarza lukę, a zielony przebieg wygląda identycznie.
+- *Reusable workflow (`workflow_call`).* Osobna przestrzeń robocza i osobne uwierzytelnienie dla kroków,
+  które muszą czytać drzewo wywołującego; wymagałby przenoszenia artefaktów między jobami tylko po to,
+  żeby bramki zobaczyły to, co i tak leży obok.
+- *Bramki jako kroki w jobie `apply`.* Nietestowalne poza gałęzią domyślną (polityka gałęzi environment
+  odrzuca cały job), czyli jedyny dowód działania pochodziłby z żywej granicy.
+- *Bramki żywe tożsamością `plan` (read-only) w jobie bez environment.* Kuszące, bo testowalne z gałęzi
+  testowej i bez ryzyka zatrzymania wdrożenia. Odrzucone: bramka pytałaby innym kontem niż to, które
+  zmienia granicę, więc jej zielony wynik nie byłby zdaniem o mutatorze. Testowalność kupujemy inaczej —
+  bramki treści (w tym ta, która motywowała całą zmianę) stoją w jobie bez poświadczeń i bez environment.
