@@ -188,8 +188,13 @@ jobs:
       # a pull request opened with GITHUB_TOKEN collects no check at all (the runs are created and then
       # park unexecuted; measured, see the pull-request step below). A channel whose gates live entirely
       # on the other side of a step that may not happen is not gated.
+      # WERDYKT DLA WNIOSKODAWCY, NIE SAM KOD WYJSCIA — ten sam powod, co w `external-intake.yml`:
+      # czerwien kanalu wejsciowego czyta ktos, kto zglosil wniosek, wiec „bramka odrzucila" i „bramki
+      # nie wykonaly sie" (adnotacja z `./.github/actions/narzedzia`) musza brzmiec inaczej (DEC-26).
       - name: schema
-        run: check-jsonschema --schemafile schemas/projects.schema.json perimeter/projects.yaml
+        run: |
+          trap 'echo "::error title=WNIOSEK ODRZUCONY PRZEZ BRAMKE TRESCI::Narzedzia powstaly i bramka odrzucila TRESC tego zgloszenia. Powtorzenie niczego nie zmieni - poprawka jest po stronie wniosku."; echo "## ❌ WERDYKT: ODRZUCONY — treść zgłoszenia nie przeszła bramki" >> "$GITHUB_STEP_SUMMARY"' ERR
+          check-jsonschema --schemafile schemas/projects.schema.json perimeter/projects.yaml
 
       # `--contract` PODAJEMY TU Z TEGO SAMEGO POWODU, CO NA TORZE PULL REQUESTA — i pominięcie go było
       # drugą, cichszą twarzą tego samego defektu. Reguły promocji pytają o PRZEJŚCIE do `enforced`, a bez
@@ -207,6 +212,7 @@ jobs:
 
       - name: ownership and onboarding rules
         run: |
+          trap 'echo "::error title=WNIOSEK ODRZUCONY PRZEZ BRAMKE TRESCI::Narzedzia powstaly i bramka odrzucila TRESC tego zgloszenia. Powtorzenie niczego nie zmieni - poprawka jest po stronie wniosku."; echo "## ❌ WERDYKT: ODRZUCONY — treść zgłoszenia nie przeszła bramki" >> "$GITHUB_STEP_SUMMARY"' ERR
           if [ -f stan/contract.json ]; then
             python3 tools/collect_declarations.py --contract stan/contract.json > declarations.json
           else
