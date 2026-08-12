@@ -2197,3 +2197,76 @@ dostępu, więc taka zmiana nie może przejść „przy okazji".
   przy klawiaturze. Zamiast tego procedura mówi wprost, że timera NIE MA, i pisze to w issue postmortem.
 * **Zostawienie `dry_run_since` bez zmian i dopisanie zdania do runbooka.** Dokument nie jest bramką;
   ta sama obietnica „świeżego okna" stała w runbooku od początku i nie była egzekwowana przez nic.
+
+---
+
+## DEC-30 — Kierunków naruszenia są trzy, a wykluczenie stoi na uprawnieniu żądanym na celu, nie na tożsamości
+
+**Decyzja.** `tools/violations_report.py` czyta członka trzema źródłami w ustalonej kolejności i nazywa klasę
+naruszenia w raporcie:
+
+1. **rekord naruszenia** — `ingressViolations[].targetResource` / `egressViolations[].source` (bez zmian);
+2. **`protoPayload.resourceName`** — dla wpisów, które NIE MAJĄ żadnej z tych dwóch tablic;
+3. **zbiór poglądowy** (`metadata.resourceNames` + `resource.labels.project_id`) — ostatnia deska, żeby nowy
+   kształt wpisu nie wypadł z rachunku po cichu; brak wszystkich trzech = raport PADA (fail-closed).
+
+`SERVICE_NOT_ALLOWED_FROM_VPC` (naruszenie z `vpcAccessibleServices`) jest **trzecim kierunkiem** — ani
+wejściem, ani wyjściem — i **wchodzi do liczby czytanej przez `promotion_gate`**.
+
+Z liczby wypada natomiast **artefakt projektu rozliczeniowego**: rekord egress, w którym naraz
+`sourceType == "Resource"`, cel jest projektem spoza listy członków, a zbiór uprawnień żądanych na celu jest
+równy DOKŁADNIE `{serviceusage.services.use}`. Wykluczone wpisy idą do pliku wykluczeń obok dowodu i do
+raportu — nad słowo „czysto", z tożsamością wołającego. Raport zamyka tabela **wszystkich** klas
+`violationReason` z tego okna: ile wpisów, z jakiego pola czytany członek, gdzie poszły przypisania.
+
+**Dlaczego.** Raport nie jest dokumentem informacyjnym, tylko wejściem bramki promocji, a te dwie klasy myliły
+się w **przeciwne** strony — obie kończąc złą decyzją o włączeniu egzekwowania.
+
+*Fałszywie alarmujące.* Wywołanie z domyślnym `billing/quota_project` operatora dotyka dwóch projektów naraz:
+sondowanego (w perimetrze) i rozliczeniowego (poza nim). Granica księguje to jako `egressViolations` ze
+źródłem w członku, więc raport mówił właścicielowi „twoje dane wychodzą" i wysyłał go po regułę egress — po
+prawdziwą dziurę — za wywołanie, w którym nie wypłynął ani jeden bajt. Zmierzone na 865 wpisach z sinka
+(okno 2026‑08‑11 09:21 → 2026‑08‑12 16:33): **160 takich wpisów**, 159 od zredagowanej tożsamości człowieka,
+wszystkie z `targetResourcePermissions == ["serviceusage.services.use"]`. Licznik członka spadł z 714 do 562
+i z 19 do 11; dwóm pozostałym członkom nie zmienił się ani o jeden.
+
+*Fałszywie uspokajające.* `SERVICE_NOT_ALLOWED_FROM_VPC` nie ma żadnej z dwóch tablic naruszeń. Licznik
+zbudowany na nich jest na tę klasę ślepy **z definicji**, a jej tryb awarii to workload członka, który po
+promocji przestaje działać. W tym samym oknie było jej **132 wpisy**, w tym 112 odmów już egzekwowanych.
+
+Sygnaturą wykluczenia jest **uprawnienie żądane na celu**, bo `serviceusage.services.use` nie daje odczytu
+żadnych danych — wpis, na którego celu żądane jest cokolwiek ponad to, przestaje pasować i wraca do liczby.
+Wykluczenie zbudowane w ten sposób **nie umie schować wypływu**, i to jest jego cała wartość. Kontrola na tych
+samych danych: cały realny egress w oknie miał `sourceType: "Network"` i uprawnienia danych
+(`storage.buckets.list` 243×, `storage.objects.list` 175×, `storage.buckets.get` 5×) — sygnatura nie objęła
+go ani razu.
+
+Kolejność źródeł też jest wynikiem pomiaru: `protoPayload.resourceName` niósł numer projektu po stronie
+perimetru w **132/132** wpisów bez rekordów i zgadzał się z rekordem tam, gdzie rekord był (**733/733**).
+Zbiór poglądowy zbiera natomiast wszystko, co wygląda na projekt — w 11 wpisach dokładał numer projektu
+WOŁANEGO obok właściwego członka. Gdy takim numerem jest inny członek, wpis obciąża promocję kogoś, kto tego
+wywołania nie wykonał; test na tym kształcie pokazuje 2 przypisania przed zmianą i 1 po.
+
+**Co odrzucono i dlaczego.**
+
+* **Zostawienie artefaktu w liczbie „dla bezpieczeństwa".** Kuszące, bo kierunek błędu jest alarmujący, a nie
+  uspokajający. Odrzucone: to jest ten sam sygnał, po którym poznaje się realną eksfiltrację, a zaśmiecony
+  przestaje być czytany. Po ćwiczeniu drogi awaryjnej jeden członek miał 636 wpisów w oknie 14 dni i powrót
+  do `enforced` wymagał waivera — każdy fałszywy wpis kosztuje decyzję, nie tylko miejsce w raporcie.
+* **Wykluczanie po tożsamości wołającego** („to tylko człowiek przy laptopie"). To byłaby lista wymówek:
+  rośnie, nikt jej nie rewiduje, a workload z tym samym błędem konfiguracji przestaje być widoczny. Dlatego
+  wykluczamy po własności DANYCH, a tożsamość zostaje **wypisana** — raport mówi wprost, że tożsamość
+  workloadu na tej liście oznacza realny przepływ do naprawy przed promocją.
+* **Wykluczanie po `violationReason`** (`RESOURCES_NOT_IN_SAME_SERVICE_PERIMETER` w całości). Jedna linijka
+  mniej i dziura: ta sama klasa powstaje przy każdym wywołaniu dotykającym dwóch perimetrów, także takim,
+  które naprawdę czyta dane po drugiej stronie.
+* **Osobny klucz w `violations.json`.** Ten plik jest wejściem OPA, gdzie każdy klucz udaje nazwę członka;
+  dodatkowy klucz albo psuje kontrakt dowodu, albo chowa wykluczenia przed recenzentem. Wykluczenia jadą
+  osobnym plikiem — tą samą drogą, co ruch platformy.
+* **Filtr `dryRun` w sinku albo w raporcie, żeby uciszyć odmowy egzekwowane.** Odrzucone dwa razy i tu też:
+  pole istnieje WYŁĄCZNIE przy naruszeniu dry-run, więc `dryRun="false"` nie łapie nigdy niczego, a odmowa
+  egzekwowana znaczy „ktoś jest blokowany teraz" i ma być widoczna.
+* **Podnoszenie `protoPayload.resourceName` do roli kontroli krzyżowej rekordu.** Sprawdzone na żywych
+  danych: zgodność 733/733, więc kontrola nic by dziś nie złapała, a na wpisie obcego projektu w fixturze
+  (gdzie anonimizacja podstawiła numer członka) fałszywie by krzyczała. Rekord zostaje autorytatywny,
+  `resourceName` używamy tam, gdzie rekordu nie ma.

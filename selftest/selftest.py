@@ -3687,13 +3687,18 @@ def test_tools() -> None:
     # ---- PRZYPISANIE DO CZŁONKA na REALNYM kształcie wpisu ------------------------------------------
     # Powyższy test na pustym wejściu przechodził także wtedy, gdy funkcja przypisująca była całkowicie
     # zepsuta — bo dla `[]` każdy członek ma 0 niezależnie od tego, jak liczymy. Fixture pochodzi
-    # z ANONIMIZOWANYCH wpisów zdjętych z żywej organizacji i zawiera cztery kształty, na których stara
+    # z ANONIMIZOWANYCH wpisów zdjętych z żywej organizacji i zawiera sześć kształtów, na których stara
     # wersja rozjeżdżała się inaczej: `resourceNames[0]` dawał nazwę regionu, `project_id` zamiast numeru,
     # numer OBCEGO projektu (egress) i `_` z aliasu `projects/_`. Członka było na żywo widać w 0 z 26 wpisów.
+    #
+    # Do liczby bramki mają wejść DOKŁADNIE trzy z sześciu: dwa `NO_MATCHING_ACCESS_LEVEL` (wejście) i jeden
+    # `SERVICE_NOT_ALLOWED_FROM_VPC` z sieci członka. Pozostałe trzy to: artefakt projektu rozliczeniowego
+    # (wykluczenie, niżej), naruszenie obcego projektu i wywołanie z projektu-kandydata, które NIESIE numer
+    # członka w `metadata.resourceNames`. Stara wersja liczyła 5 z 6 — dwie pomyłki w przeciwne strony naraz.
     (ROOT / "violations.json").unlink(missing_ok=True)
     p = sh([sys.executable, "tools/violations_report.py", "--logs", "tests/vpcsc-violation-dryrun.json",
             "--declarations", "declarations.json", "--json-out", "violations.json",
-            "--markdown-out", "violations.md"], cwd=ROOT)
+            "--markdown-out", "violations.md", "--platform-json-out", "violations-platform.json"], cwd=ROOT)
     viol = json.loads((ROOT / "violations.json").read_text()) if (ROOT / "violations.json").exists() else {}
     nazwa_czlonka = "example-division-prj-example-vertex-dev"
     check("violations_report.py PRZYPISUJE naruszenia do wlasciwego czlonka (3 z realnego ksztaltu)",
@@ -3707,12 +3712,105 @@ def test_tools() -> None:
           viol.get(nazwa_czlonka) == 3 and "Naruszenia spoza listy" in md,
           json.dumps(viol) + md[-400:])
 
+    # ---- TRZECIA KLASA NARUSZEŃ: ani wejście, ani wyjście --------------------------------------------
+    # `SERVICE_NOT_ALLOWED_FROM_VPC` (z `vpcAccessibleServices`) nie ma ANI `ingressViolations`, ANI
+    # `egressViolations` — ma sam `violationReason`. Licznik zbudowany na tych dwóch tablicach nie widzi tej
+    # klasy z definicji, a jej tryb awarii jest fałszywie uspokajający: workload członka używa usługi spoza
+    # `allowedServices`, po promocji przestaje działać, a raport melduje czyste okno. Zmierzone na żywej
+    # organizacji: 132 wpisy tej klasy w oknie 865 wpisów, w tym 112 odmów EGZEKWOWANYCH.
+    #
+    # Test jest anty-tautologiczny: DODANIE wpisu tej klasy ma zmienić wynik raportu, a nie tylko nie
+    # wywrócić przebiegu. Bez tego „obsługa klasy" mogłaby polegać na cichym pominięciu.
+    wszystkie = json.loads((ROOT / "tests/vpcsc-violation-dryrun.json").read_text())
+    bez_klasy = [e for e in wszystkie
+                 if e["protoPayload"]["metadata"].get("violationReason") != "SERVICE_NOT_ALLOWED_FROM_VPC"]
+    (ROOT / "raw-bez-klasy.json").write_text(json.dumps(bez_klasy))
+    p = sh([sys.executable, "tools/violations_report.py", "--logs", "raw-bez-klasy.json",
+            "--declarations", "declarations.json", "--json-out", "violations-bez.json",
+            "--markdown-out", "violations-bez.md"], cwd=ROOT)
+    viol_bez = json.loads((ROOT / "violations-bez.json").read_text()) if p.returncode == 0 else {}
+    check("violations_report.py LICZY SERVICE_NOT_ALLOWED_FROM_VPC (usuniecie klasy zmienia wynik: 3 -> 2)",
+          viol.get(nazwa_czlonka) == 3 and viol_bez.get(nazwa_czlonka) == 2,
+          f"z klasa={viol.get(nazwa_czlonka)} bez klasy={viol_bez.get(nazwa_czlonka)} " + p.stderr[-300:])
+
+    # Klasa ma być NAZWANA, nie rozpuszczona w sumie: tabela klas pokazuje, ile wpisów każdej klasy było
+    # w oknie, z jakiego pola czytany jest członek i gdzie te przypisania poszły. Nowa klasa naruszeń nie
+    # ma prawa wejść do raportu bezimiennie — inaczej następna taka rozpłynie się tak samo jak ta.
+    check("violations_report.py NAZYWA klasy naruszen w tabeli (z ta bez tablic naruszen)",
+          "Klasy naruszeń w tym oknie" in md and "SERVICE_NOT_ALLOWED_FROM_VPC" in md
+          and "protoPayload.resourceName" in md, md[-900:])
+
+    # ATRYBUCJA tej klasy stoi na `protoPayload.resourceName`, nie na zbiorze poglądowym. Szósty wpis
+    # fixture'a to wywołanie z projektu-KANDYDATA (spoza listy członków), które niesie numer członka
+    # w `metadata.resourceNames`, bo to jego projekt był wołany. Zbiór poglądowy dokładał ten wpis
+    # członkowi — czyli obciążał promocję ruchem, którego członek nie wykonał. Kształt jest realny:
+    # na żywej organizacji 11 z 132 wpisów tej klasy miało w `resourceNames` numer projektu wołanego.
+    check("violations_report.py przypisuje klase bez tablic WOLAJACEMU, nie wolanemu",
+          "prj-example-candidate" in md.split("## Naruszenia spoza listy")[-1],
+          md[-900:])
+
+    # ---- ARTEFAKT PROJEKTU ROZLICZENIOWEGO: „egress", w którym nic nie wypływa -----------------------
+    # Wywołanie z domyślnym `billing/quota_project` operatora dotyka projektu spoza perimetru WYŁĄCZNIE po
+    # to, żeby zużyć jego kwotę. Granica księguje to jako `RESOURCES_NOT_IN_SAME_SERVICE_PERIMETER` z
+    # `egressViolations[source=członek]`, więc raport czytał to jako wypływ danych i wysyłał właściciela po
+    # regułę egress — za wywołanie, w którym nie wypłynął ani jeden bajt. Na żywej organizacji: 160 wpisów.
+    wykluczenia = json.loads((ROOT / "violations-platform.json").read_text())
+    rozliczeniowy = wykluczenia.get(nazwa_czlonka, {}).get("projekt_rozliczeniowy", {})
+    check("violations_report.py WYKLUCZA artefakt projektu rozliczeniowego z liczby bramki",
+          rozliczeniowy.get("razem") == 1 and "RESOURCES_NOT_IN_SAME_SERVICE_PERIMETER" in
+          " ".join(rozliczeniowy.get("wpisy", {})),
+          json.dumps(wykluczenia, ensure_ascii=False)[:500])
+
+    # ...i pokazuje je RECENZENTOWI, nad słowem „czysto". Wykluczenie, którego nie widać w raporcie, jest
+    # nieodróżnialne od braku naruszenia — a to jest dokładnie ten stan, przed którym bramka ma chronić.
+    check("violations_report.py POKAZUJE wykluczenie rozliczeniowe w raporcie, nie tylko w pliku",
+          "artefakt projektu rozliczeniowego" in md and "CLOUDSDK_BILLING_QUOTA_PROJECT" in md,
+          md[:1500])
+
+    # KONTROLA, KTÓRA PILNUJE, ŻE TO WYKLUCZENIE NIE UMIE SCHOWAĆ WYPŁYWU. Sygnatura wymaga, żeby na celu
+    # żądane było DOKŁADNIE `serviceusage.services.use` (zużycie kwoty, zero odczytu danych). Ten sam wpis
+    # z jakimkolwiek uprawnieniem do danych na celu ma wrócić do liczby bramki. Bez tej kontroli „artefakt"
+    # byłby listą wymówek, a nie własnością danych.
+    wyplyw = [e for e in wszystkie
+              if e["protoPayload"]["metadata"].get("violationReason") == "RESOURCES_NOT_IN_SAME_SERVICE_PERIMETER"]
+    wyplyw = json.loads(json.dumps(wyplyw))  # kopia, żeby nie mutować fixture'a
+    wyplyw[0]["protoPayload"]["metadata"]["egressViolations"][0]["targetResourcePermissions"] = [
+        "serviceusage.services.use", "storage.objects.get"]
+    (ROOT / "raw-wyplyw.json").write_text(json.dumps(wyplyw))
+    p = sh([sys.executable, "tools/violations_report.py", "--logs", "raw-wyplyw.json",
+            "--declarations", "declarations.json", "--json-out", "violations-wyplyw.json",
+            "--markdown-out", "violations-wyplyw.md", "--platform-json-out", "platform-wyplyw.json"], cwd=ROOT)
+    viol_w = json.loads((ROOT / "violations-wyplyw.json").read_text()) if p.returncode == 0 else {}
+    plat_w = json.loads((ROOT / "platform-wyplyw.json").read_text()) if p.returncode == 0 else {}
+    check("violations_report.py NIE wyklucza wpisu, ktory na celu zada TAKZE odczytu danych",
+          viol_w.get(nazwa_czlonka) == 1
+          and plat_w.get(nazwa_czlonka, {}).get("projekt_rozliczeniowy", {}).get("razem") == 0,
+          json.dumps(viol_w) + json.dumps(plat_w, ensure_ascii=False)[:300])
+
+    # Druga kontrola tej samej sygnatury: ruch Z SIECI członka (`sourceType: Network`) nigdy nie jest
+    # artefaktem kwoty, choćby uprawnienie się zgadzało. Na żywej organizacji cały realny egress miał
+    # `Network` i uprawnienia danych — te dwa wymiary rozdzielają klasy niezależnie od siebie.
+    siec = json.loads(json.dumps(wyplyw))
+    siec[0]["protoPayload"]["metadata"]["egressViolations"][0]["targetResourcePermissions"] = [
+        "serviceusage.services.use"]
+    siec[0]["protoPayload"]["metadata"]["egressViolations"][0]["sourceType"] = "Network"
+    (ROOT / "raw-siec.json").write_text(json.dumps(siec))
+    p = sh([sys.executable, "tools/violations_report.py", "--logs", "raw-siec.json",
+            "--declarations", "declarations.json", "--json-out", "violations-siec.json",
+            "--markdown-out", "violations-siec.md", "--platform-json-out", "platform-siec.json"], cwd=ROOT)
+    viol_s = json.loads((ROOT / "violations-siec.json").read_text()) if p.returncode == 0 else {}
+    check("violations_report.py NIE wyklucza egressu Z SIECI czlonka (sourceType: Network)",
+          viol_s.get(nazwa_czlonka) == 1, json.dumps(viol_s) + p.stderr[-300:])
+
     # ---- FAIL-CLOSED: wpis, którego nie umiemy przypisać, NIE MOŻE dać zielonego raportu -------------
     # `violations.json` jest DOWODEM dla promotion_gate. Wpis bez rozpoznanego projektu policzony jako
     # „nie nasz" to dokładnie ten mechanizm, przez który raport meldował czyste okno przy 26 naruszeniach.
+    # Zdejmujemy WSZYSTKIE cztery pola, z których raport umie odczytać projekt — łącznie z
+    # `protoPayload.resourceName`, bo od jego dołożenia „brak rekordów naruszeń" nie znaczy już „nie wiem".
     nieznany = json.loads((ROOT / "tests/vpcsc-violation-dryrun.json").read_text())[:1]
     for klucz in ("ingressViolations", "egressViolations", "resourceNames"):
         nieznany[0]["protoPayload"]["metadata"].pop(klucz, None)
+    nieznany[0]["protoPayload"].pop("resourceName", None)
     nieznany[0]["resource"]["labels"].pop("project_id", None)
     (ROOT / "raw-nieznany.json").write_text(json.dumps(nieznany))
     (ROOT / "violations.json").unlink(missing_ok=True)

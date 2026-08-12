@@ -325,5 +325,159 @@
     },
     "severity": "ERROR",
     "timestamp": "2026-08-10T07:43:31.795674446Z"
+  },
+  {
+    "insertId": "id4vpcaccessible",
+    "logName": "projects/prj-example-vertex-dev/logs/cloudaudit.googleapis.com%2Fpolicy",
+    "protoPayload": {
+      "@type": "type.googleapis.com/google.cloud.audit.AuditLog",
+      "authenticationInfo": {
+        "principalEmail": "sa-example-workload@prj-example-vertex-dev.iam.gserviceaccount.com",
+        "serviceAccountDelegationInfo": [
+          {
+            "firstPartyPrincipal": {
+              "principalEmail": "sa-example-workload@prj-example-vertex-dev.iam.gserviceaccount.com"
+            }
+          }
+        ]
+      },
+      "metadata": {
+        "@type": "type.googleapis.com/google.cloud.audit.VpcServiceControlAuditMetadata",
+        "deviceState": "Unknown",
+        "dryRun": true,
+        "resourceNames": [
+          "prj-not-a-member"
+        ],
+        "securityPolicyInfo": {
+          "organizationId": "210987654321",
+          "servicePerimeterName": "accessPolicies/123456789012/servicePerimeters/example_perimeter"
+        },
+        "violationReason": "SERVICE_NOT_ALLOWED_FROM_VPC",
+        "vpcServiceControlsTroubleshootToken": "EXAMPLE-TROUBLESHOOT-TOKEN",
+        "vpcServiceControlsUniqueId": "EXAMPLE-UNIQUE-ID-5"
+      },
+      "methodName": "google.cloudresourcemanager.v1.Projects.GetProject",
+      "requestMetadata": {
+        "callerIp": "10.10.0.2",
+        "callerNetwork": "//compute.googleapis.com/projects/prj-example-vertex-dev/global/networks/__unknown__",
+        "destinationAttributes": {},
+        "requestAttributes": {}
+      },
+      "resourceName": "projects/000000000000",
+      "serviceName": "cloudresourcemanager.googleapis.com",
+      "status": {
+        "code": 7,
+        "details": [
+          {
+            "@type": "type.googleapis.com/google.rpc.PreconditionFailure",
+            "violations": [
+              {
+                "description": "EXAMPLE-UNIQUE-ID-5",
+                "type": "VPC_SERVICE_CONTROLS"
+              }
+            ]
+          },
+          {
+            "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+            "domain": "googleapis.com",
+            "metadata": {
+              "service": "cloudresourcemanager.googleapis.com",
+              "troubleshootToken": "Ab-f5IX4SFBTfBcySoPzOMt7uxvwv0_DBws6ETtIFb_h2QQDUh2fJoQHmUUA_7CCun7vCrZFbCNwA5Vq7GsJYTMvYRbjR18LNxGOnW_hTFwxopE2CYwTh-OGEkZzGDNkSbv6JKkqgrNY55p7_te4XcYNDVQPFAuaPXFwH7BY7plxfTSdsdyAdpg1_SDqRzHF89xSz3Lrdq9JlIjDLB50ELM2gKS6DbOwI4Z4vWDQghNlrdwUNQBdPTBtuEtDaqcH9uojw4MsiUdEuEMcyHiwS9DgDrgJIwjgDlq4WEOCpJk4ruM-VkV2pB19SJLDTnQSFgFhhguzfKZ-5X3dNl5ZxOSJpKc5vDmLF2ooAKz1d9Q7t8oc6QlERhXrKr_11mhA7tdZguakzraocAhzLzpt",
+              "uid": "EXAMPLE-UNIQUE-ID-5"
+            },
+            "reason": "SECURITY_POLICY_VIOLATED"
+          }
+        ],
+        "message": "Request is prohibited by organization's policy. vpcServiceControlsUniqueIdentifier: EXAMPLE"
+      }
+    },
+    "receiveTimestamp": "2026-08-10T07:44:12.202003004Z",
+    "resource": {
+      "labels": {
+        "method": "google.cloudresourcemanager.v1.Projects.GetProject",
+        "project_id": "prj-example-vertex-dev",
+        "service": "cloudresourcemanager.googleapis.com"
+      },
+      "type": "audited_resource"
+    },
+    "severity": "ERROR",
+    "timestamp": "2026-08-10T07:44:11.101002003Z"
+  },
+  {
+    "insertId": "id5candidatevpc",
+    "logName": "projects/prj-example-candidate/logs/cloudaudit.googleapis.com%2Fpolicy",
+    "protoPayload": {
+      "@type": "type.googleapis.com/google.cloud.audit.AuditLog",
+      "authenticationInfo": {
+        "principalEmail": "sa-example-candidate@prj-example-candidate.iam.gserviceaccount.com",
+        "serviceAccountDelegationInfo": [
+          {
+            "firstPartyPrincipal": {
+              "principalEmail": "sa-example-candidate@prj-example-candidate.iam.gserviceaccount.com"
+            }
+          }
+        ]
+      },
+      "metadata": {
+        "@type": "type.googleapis.com/google.cloud.audit.VpcServiceControlAuditMetadata",
+        "deviceState": "Unknown",
+        "dryRun": true,
+        "resourceNames": [
+          "projects/000000000000"
+        ],
+        "securityPolicyInfo": {
+          "organizationId": "210987654321",
+          "servicePerimeterName": "accessPolicies/123456789012/servicePerimeters/example_perimeter"
+        },
+        "violationReason": "SERVICE_NOT_ALLOWED_FROM_VPC",
+        "vpcServiceControlsTroubleshootToken": "EXAMPLE-TROUBLESHOOT-TOKEN",
+        "vpcServiceControlsUniqueId": "EXAMPLE-UNIQUE-ID-6"
+      },
+      "methodName": "google.cloudresourcemanager.v1.Projects.GetProject",
+      "requestMetadata": {
+        "callerIp": "10.30.0.2",
+        "callerNetwork": "//compute.googleapis.com/projects/prj-example-candidate/global/networks/__unknown__",
+        "destinationAttributes": {},
+        "requestAttributes": {}
+      },
+      "resourceName": "projects/333333333333",
+      "serviceName": "cloudresourcemanager.googleapis.com",
+      "status": {
+        "code": 7,
+        "details": [
+          {
+            "@type": "type.googleapis.com/google.rpc.PreconditionFailure",
+            "violations": [
+              {
+                "description": "EXAMPLE-UNIQUE-ID-6",
+                "type": "VPC_SERVICE_CONTROLS"
+              }
+            ]
+          },
+          {
+            "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+            "domain": "googleapis.com",
+            "metadata": {
+              "service": "cloudresourcemanager.googleapis.com",
+              "troubleshootToken": "Ab-f5IX4SFBTfBcySoPzOMt7uxvwv0_DBws6ETtIFb_h2QQDUh2fJoQHmUUA_7CCun7vCrZFbCNwA5Vq7GsJYTMvYRbjR18LNxGOnW_hTFwxopE2CYwTh-OGEkZzGDNkSbv6JKkqgrNY55p7_te4XcYNDVQPFAuaPXFwH7BY7plxfTSdsdyAdpg1_SDqRzHF89xSz3Lrdq9JlIjDLB50ELM2gKS6DbOwI4Z4vWDQghNlrdwUNQBdPTBtuEtDaqcH9uojw4MsiUdEuEMcyHiwS9DgDrgJIwjgDlq4WEOCpJk4ruM-VkV2pB19SJLDTnQSFgFhhguzfKZ-5X3dNl5ZxOSJpKc5vDmLF2ooAKz1d9Q7t8oc6QlERhXrKr_11mhA7tdZguakzraocAhzLzpt",
+              "uid": "EXAMPLE-UNIQUE-ID-6"
+            },
+            "reason": "SECURITY_POLICY_VIOLATED"
+          }
+        ],
+        "message": "Request is prohibited by organization's policy. vpcServiceControlsUniqueIdentifier: EXAMPLE"
+      }
+    },
+    "receiveTimestamp": "2026-08-10T07:44:12.202003004Z",
+    "resource": {
+      "labels": {
+        "method": "google.cloudresourcemanager.v1.Projects.GetProject",
+        "project_id": "prj-example-candidate",
+        "service": "cloudresourcemanager.googleapis.com"
+      },
+      "type": "audited_resource"
+    },
+    "severity": "ERROR",
+    "timestamp": "2026-08-10T07:44:11.101002003Z"
   }
 ]
