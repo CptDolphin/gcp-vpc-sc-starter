@@ -7,7 +7,15 @@
 schema_version: 1
 name: vertex-online-serving
 summary: "Callers outside the perimeter invoke Vertex online prediction on the member project."
-risk: low # low | medium | high — steruje ścieżką review (validate.yml)
+# `risk` NIE jest etykietą opisową — jest wejściem bramki i jest sprawdzane wobec kształtu profilu
+# (reguły `vpcsc.onboarding`, uruchamiane przez `bramki-tresci` w validate.yml i w apply.yml):
+#   high   — profil ma regułę egress z `to_external_from`, czyli dane opuszczają Google Cloud. Każdy
+#            członek, który go wybierze i poda cel, wymaga zgody Security w `policy.yaml` §egress_approvals;
+#   medium — profil ma regułę egress w granicach Google Cloud. `low` jest tu odrzucane przez bramkę;
+#   low    — profil bez egressu, jak ten. Zwykły onboarding, bez dodatkowej zgody.
+# Etykieta nie może być niższa, niż pozwala kształt: „risk: low" dopisane do profilu z egressem to
+# obejście bramki jedną linią, więc zgodność etykiety z kształtem jest osobną regułą.
+risk: low
 
 # Parametry, które MUSI podać członek w members/*.yaml (profiles[].params).
 parameters:

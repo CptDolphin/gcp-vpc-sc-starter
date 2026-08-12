@@ -29,7 +29,6 @@ healthy_member := {
 	"dry_run_since": "2026-07-01",
 	"review_by": "2027-01-01",
 	"profiles": [{"name": "vertex-online-serving", "params": {"caller_identities": ["serviceAccount:a@b.iam.gserviceaccount.com"], "access_levels": ["corp_network"]}}],
-	"exceptions": [],
 }
 
 contributors := [{
@@ -398,11 +397,10 @@ test_expired_review_denied if {
 	count(deny) > 0 with input as bad
 }
 
-test_exception_without_justification_denied if {
-	m := object.union(healthy_member, {"exceptions": [{"title": "temp", "justification": "bo tak"}]})
-	bad := object.union(healthy_input, {"members": {"example-prj-example-vertex-dev": m}})
-	count(deny) > 0 with input as bad
-}
+# Testu `exceptions:` tu nie ma, bo nie ma już pola (DEC-23). Sprawdzał on długość uzasadnienia reguły,
+# której renderer nigdy nie tworzył — czyli był testem zielonym na bramce mierzącej opis niebytu.
+# Wpis niosący dziś `exceptions:` odrzuca `additionalProperties: false` w `schemas/member.schema.json`,
+# a selftest startera ma na to osobny przypadek negatywny (schema, nie rego).
 
 # --- projekty płaszczyzny sterowania (anty-samo-zablokowanie) ---------------------------------------
 #
@@ -548,6 +546,11 @@ test_baseline_wildcard_method_denied if {
 
 omni_profile := {"bq-omni-external-read": {
 	"name": "bq-omni-external-read",
+	# `risk: high` NIE JEST tu ozdobą fixture'a — od DEC-23 jest wejściem bramki (profil z celem poza
+	# Google Cloud wymaga zgody Security) i zarazem przedmiotem osobnej reguły, która nie pozwala tej
+	# etykiecie zaniżyć kształtu. Fixture bez `risk` odpalałby tę drugą regułę i każdy test w tej sekcji
+	# padałby z powodu, o który nie pyta.
+	"risk": "high",
 	"parameters": [{"name": "query_identities", "description": "x"}, {"name": "external_resources", "description": "y"}],
 	"egress": [{
 		"title": "read-external-omni-tables",
@@ -559,13 +562,31 @@ omni_profile := {"bq-omni-external-read": {
 	}],
 }}
 
-omni_input(resources) := object.union(healthy_input, {
+zgoda_na(resources) := {
+	"member": "example-prj-example-vertex-dev",
+	"profile": "bq-omni-external-read",
+	"destinations": resources,
+	"approved_by": "sec@example.com",
+	"expires": "2027-01-01",
+	"justification": "hurtownia dywizji stoi w S3, wyplywaja wylacznie wyniki zapytan",
+}
+
+# Wejście BEZ zgody Security — czyli dokładnie to, co repozytorium przyjmowało do DEC-23.
+omni_input_bez_zgody(resources) := object.union(healthy_input, {
 	"profiles": object.union(base_profiles, omni_profile),
 	"members": {"example-prj-example-vertex-dev": object.union(healthy_member, {"profiles": [{
 		"name": "bq-omni-external-read",
 		"params": {"query_identities": ["serviceAccount:a@b.iam.gserviceaccount.com"], "external_resources": resources},
 	}]})},
 })
+
+# Wejście ZE zgodą pokrywającą dokładnie te cele. Wszystkie testy tej sekcji, które badają coś innego niż
+# samą zgodę, jadą na tym wariancie — inaczej każdy z nich przechodziłby na braku zgody i nie mówiłby nic
+# o tym, co miał zbadać.
+omni_input(resources) := object.union(
+	omni_input_bez_zgody(resources),
+	{"policy": object.union(base_policy, {"egress_approvals": [zgoda_na(resources)]})},
+)
 
 test_external_resource_s3_passes if {
 	count(deny) == 0 with input as omni_input(["s3://approved-bucket"])
@@ -730,4 +751,177 @@ test_kompozycja_bez_wlasnego_warunku_passes if {
 		"required_access_levels": ["corp_network", "corp_managed_device"],
 	}
 	count(deny) == 0 with input as poziomy({"corp_network_and_device": dobry})
+}
+
+# --- zgoda Security na profil wypuszczający dane poza Google Cloud (DEC-23) --------------------------
+#
+# PARA ANTY-TAUTOLOGICZNA JEST TU WARUNKIEM SENSU, a nie dobrym zwyczajem. Bramka odrzucająca każdy
+# wniosek z profilem `risk: high` byłaby zakazem tego profilu (i przeszłaby wszystkie negatywy niżej);
+# bramka odrzucająca każdy wniosek w ogóle przeszłaby je tym bardziej. Dlatego każdemu „czerwono"
+# odpowiada tu „zielono" różniące się DOKŁADNIE jednym elementem wejścia.
+
+# NEGATYW — to jest stan, w którym repozytorium było do 2026-08-12: profil wypuszczający dane poza Google
+# Cloud, cel podany, zero śladu Security. Przechodziło.
+test_high_risk_bez_zgody_denied if {
+	count(deny) > 0 with input as omni_input_bez_zgody(["s3://approved-bucket"])
+}
+
+# POZYTYW — ten sam wpis, jedna zmiana: zgoda w policy.yaml. Bez tego testu poprzedni dowodziłby tylko,
+# że coś jest czerwone.
+test_high_risk_ze_zgoda_passes if {
+	count(deny) == 0 with input as omni_input(["s3://approved-bucket"])
+}
+
+# POZYTYW SZEROKI — rutyna nie może płacić za tę bramkę. Wniosek bez egressu (`vertex-online-serving`,
+# `risk` nieustawione w fixture, czyli na pewno nie `high`) przechodzi bez ani jednej zgody. To jest ten
+# test, który odróżnia „bramka na wąską klasę" od „Security recenzuje 50 wniosków miesięcznie".
+test_onboarding_bez_egressu_nie_wymaga_zgody if {
+	count(deny) == 0 with input as healthy_input
+}
+
+# NEGATYW — zgoda jest, ale na inny cel. Bez tej reguły podmiana bucketa byłaby rutynowym diffem w pliku
+# członka, przechodzącym pod zgodą wydaną na coś zupełnie innego: zgoda opisywałaby zdolność wysyłania,
+# a nie kierunek wypływu, który jest całym przedmiotem decyzji.
+test_zgoda_na_inny_cel_denied if {
+	zle := object.union(
+		omni_input_bez_zgody(["s3://approved-bucket"]),
+		{"policy": object.union(base_policy, {"egress_approvals": [zgoda_na(["s3://zupelnie-inny-bucket"])]})},
+	)
+	count(deny) > 0 with input as zle
+}
+
+# NEGATYW — zgoda wygasła. `expires` jest obowiązkowe właśnie po to, żeby ten przypadek istniał: zgoda
+# bezterminowa na wyprowadzanie danych poza Google Cloud to obniżenie baseline pod inną nazwą.
+test_zgoda_wygasla_denied if {
+	wygasla := object.union(zgoda_na(["s3://approved-bucket"]), {"expires": "2026-07-19"})
+	zle := object.union(
+		omni_input_bez_zgody(["s3://approved-bucket"]),
+		{"policy": object.union(base_policy, {"egress_approvals": [wygasla]})},
+	)
+	count(deny) > 0 with input as zle
+}
+
+# NEGATYW — zgoda bez uzasadnienia. Próg 40 znaków ten sam co przy `promotion_waivers`: bez niego pole
+# degeneruje się do „ok" i jedyna bramka przed nieodwracalnym wypływem przechodzi na skrót klawiszowy.
+test_zgoda_bez_uzasadnienia_denied if {
+	pusta := object.union(zgoda_na(["s3://approved-bucket"]), {"justification": "bo tak"})
+	zle := object.union(
+		omni_input_bez_zgody(["s3://approved-bucket"]),
+		{"policy": object.union(base_policy, {"egress_approvals": [pusta]})},
+	)
+	count(deny) > 0 with input as zle
+}
+
+# NEGATYW — zgoda na członka, którego nie ma. Zwykle literówka w kluczu; cichy no-op wyglądałby jak
+# działająca zgoda do dnia, w którym ktoś zdziwi się, czemu wniosek stoi.
+test_zgoda_na_nieistniejacego_czlonka_denied if {
+	widmo := object.union(zgoda_na(["s3://approved-bucket"]), {"member": "nie-ma-takiego"})
+	zle := object.union(
+		omni_input(["s3://approved-bucket"]),
+		{"policy": object.union(base_policy, {"egress_approvals": [zgoda_na(["s3://approved-bucket"]), widmo]})},
+	)
+	count(deny) > 0 with input as zle
+}
+
+# NEGATYW — zgoda „na zapas": członek istnieje, ale dziś nie renderuje żadnego celu dla tego profilu.
+# Gdyby wolno ją było trzymać, ktoś mógłby wydać zgody dla wszystkich członków z góry, a późniejsze
+# dopisanie bucketa przeszłoby bez ani jednej bramki. Ta sama pułapka co `control_plane_exception`
+# trzymany na projekcie spoza listy.
+test_zgoda_na_zapas_denied if {
+	zle := object.union(healthy_input, {"policy": object.union(base_policy, {"egress_approvals": [zgoda_na(["s3://approved-bucket"])]})})
+	count(deny) > 0 with input as zle
+}
+
+# NEGATYW — pusty cel NIE wymaga zgody, a zgoda wydana na taki wpis jest wpisem-widmem. To jest para do
+# testu wyżej i zarazem asercja o bezpiecznej degradacji: profil bez wartości parametru nie renderuje
+# reguły, więc nie ma czego zatwierdzać.
+test_high_risk_bez_celu_nie_wymaga_zgody if {
+	count(deny) == 0 with input as omni_input_bez_zgody([])
+}
+
+# --- `risk` musi opisywać KSZTAŁT profilu ------------------------------------------------------------
+#
+# Bez tych dwóch reguł obejściem całej sekcji wyżej byłaby jedna linia w profilu.
+
+# NEGATYW — profil wypuszcza dane poza Google Cloud i nazywa się `low`. Zgoda Security przestałaby być
+# wymagana, a reguła nadal wypuszczałaby dane. To jest najtańsze możliwe obejście i dlatego ma własny test.
+test_external_egress_z_risk_low_denied if {
+	zly := {"bq-omni-external-read": object.union(omni_profile["bq-omni-external-read"], {"risk": "low"})}
+	zle := object.union(omni_input(["s3://approved-bucket"]), {"profiles": object.union(base_profiles, zly)})
+	count(deny) > 0 with input as zle
+}
+
+# NEGATYW — ten sam profil nazwany `medium`. Osobno od testu wyżej, bo `medium` jest etykietą LEGALNĄ dla
+# egressu wewnątrz Google Cloud: reguła musi rozróżniać kształt, a nie tylko odrzucać `low`.
+test_external_egress_z_risk_medium_denied if {
+	zly := {"bq-omni-external-read": object.union(omni_profile["bq-omni-external-read"], {"risk": "medium"})}
+	zle := object.union(omni_input(["s3://approved-bucket"]), {"profiles": object.union(base_profiles, zly)})
+	count(deny) > 0 with input as zle
+}
+
+# POZYTYW — egress W GRANICACH Google Cloud (`to_projects_from`) z etykietą `medium` przechodzi i NIE
+# wymaga zgody Security. To jest granica wąskiej klasy: gdyby ta bramka obejmowała każdy egress, objęłaby
+# profil treningowy, czyli rutynę, i zostałaby wyłączona przy pierwszym pośpiechu.
+test_egress_wewnatrz_gcp_medium_passes if {
+	batch := {"vertex-batch-training": {
+		"name": "vertex-batch-training",
+		"risk": "medium",
+		"parameters": [{"name": "training_identities", "description": "x"}, {"name": "data_source_projects", "description": "y"}],
+		"egress": [{
+			"title": "read-approved-dataset",
+			"identities_from": "training_identities",
+			"to_projects_from": "data_source_projects",
+			"operations": [{"service": "storage.googleapis.com", "methods": ["google.storage.objects.get"]}],
+		}],
+	}}
+	dobre := object.union(healthy_input, {
+		"profiles": object.union(base_profiles, batch),
+		"members": {"example-prj-example-vertex-dev": object.union(healthy_member, {"profiles": [{
+			"name": "vertex-batch-training",
+			"params": {"training_identities": ["serviceAccount:a@b.iam.gserviceaccount.com"], "data_source_projects": ["222222222222"]},
+		}]})},
+	})
+	count(deny) == 0 with input as dobre
+}
+
+# NEGATYW — ten sam profil treningowy nazwany `low`. Etykieta ma nie móc kłamać także tam, gdzie nie
+# uruchamia zgody Security: `risk` jedzie do kontraktu, który dywizje czytają, wybierając profil.
+test_egress_wewnatrz_gcp_z_risk_low_denied if {
+	batch := {"vertex-batch-training": {
+		"name": "vertex-batch-training",
+		"risk": "low",
+		"parameters": [{"name": "training_identities", "description": "x"}, {"name": "data_source_projects", "description": "y"}],
+		"egress": [{
+			"title": "read-approved-dataset",
+			"identities_from": "training_identities",
+			"to_projects_from": "data_source_projects",
+			"operations": [{"service": "storage.googleapis.com", "methods": ["google.storage.objects.get"]}],
+		}],
+	}}
+	zle := object.union(healthy_input, {
+		"profiles": object.union(base_profiles, batch),
+		"members": {"example-prj-example-vertex-dev": object.union(healthy_member, {"profiles": [{
+			"name": "vertex-batch-training",
+			"params": {"training_identities": ["serviceAccount:a@b.iam.gserviceaccount.com"], "data_source_projects": ["222222222222"]},
+		}]})},
+	})
+	count(deny) > 0 with input as zle
+}
+
+# NEGATYW — PROFIL ZMIENIA `risk` PÓŹNIEJ, BEZ ANI JEDNEGO PULL REQUESTA U CZŁONKA. To jest edge case,
+# dla którego reguła siedzi na DEKLARACJACH, a nie jednorazowo przy onboardingu: profil dostaje regułę
+# egress poza Google Cloud w osobnym PR-ze, a członkowie, którzy go już mają, w tej samej sekundzie
+# stają się wnioskami wysokiego ryzyka. Wejście różni się od `healthy_input` wyłącznie treścią KATALOGU.
+test_profil_dostaje_egress_pozniej_denied if {
+	byl_bez_egressu := {"vertex-online-serving": object.union(base_profiles["vertex-online-serving"], {
+		"risk": "high",
+		"egress": [{
+			"title": "swiezy-egress",
+			"identities_from": "caller_identities",
+			"to_external_from": "caller_identities",
+			"operations": [{"service": "bigquery.googleapis.com", "permissions": ["externalResource.read"]}],
+		}],
+	})}
+	zle := object.union(healthy_input, {"profiles": byl_bez_egressu})
+	count(deny) > 0 with input as zle
 }

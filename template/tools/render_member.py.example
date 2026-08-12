@@ -48,7 +48,11 @@ def main() -> int:
         "dry_run_since": today.isoformat(),
         "review_by": (today + datetime.timedelta(days=REVIEW_AFTER_DAYS)).isoformat(),
         "profiles": json.loads(args.profiles_json),
-        "exceptions": [],
+        # `exceptions: []` STALO TU DO DEC-23 i zniknelo razem z polem. Renderer wypisywal je w kazdym
+        # wpisie, wiec pole wygladalo na czesc normalnego formatu — a `grep -rn "exceptions" terraform/`
+        # dawal zero, czyli nie renderowalo ani jednej reguly. Teraz `additionalProperties: false`
+        # w member.schema.json odrzuca wpis, ktory je niesie; regula spoza katalogu wchodzi jako nowy
+        # profil, pod CODEOWNERS Security.
     }
 
     doc = projects_file.wczytaj(args.root)

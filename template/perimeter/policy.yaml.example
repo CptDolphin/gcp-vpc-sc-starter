@@ -109,6 +109,51 @@ onboarding:
   dry_run_min_days: 14 # minimum od dry_run_since do promocji
   clean_window_days: 7 # ostatnie N dni muszą być bez naruszeń
 
+# ZGODY SECURITY NA PROFILE WYPUSZCZAJĄCE DANE POZA GOOGLE CLOUD (DEC-23).
+#
+# DLACZEGO TA SEKCJA JEST TUTAJ, A NIE W PLIKU CZŁONKA. Profil `risk: high` (dziś `bq-omni-external-read`)
+# to jedyna droga, którą dane mogą LEGALNIE opuścić Google Cloud. Wybiera go wpis w
+# `perimeter/projects.yaml`, a ten plik ma w CODEOWNERS wyłącznie zespół sieciowy — więc do 2026-08-12
+# zespół sieciowy zatwierdzał sam sobie ścieżkę eksfiltracji, a materiał w czterech miejscach twierdził,
+# że wymaga to zgody Security. Zgoda w pliku wnioskodawcy jest zgodą wystawianą samemu sobie; ten plik
+# jest jedynym, w którym Security stoi w CODEOWNERS po obu stronach każdej zmiany.
+#
+# CZEGO TO NIE ZAŁATWIA I DLACZEGO NIE SZKODZI. Bez ochrony gałęzi (`403 Upgrade to GitHub Pro` na repo
+# prywatnym w darmowym planie) CODEOWNERS nie jest egzekwowany przez GitHuba w ogóle. Egzekwuje to reguła
+# OPA `vpcsc.onboarding`, uruchamiana przez `bramki-tresci` na OBU torach — pull request i apply (DEC-16) —
+# więc commit wypchnięty prosto na gałąź domyślną zatrzymuje się u mutatora. CODEOWNERS mówi, KTO ma
+# przeczytać; bramka mówi, że BEZ TEGO WPISU nie pojedzie.
+#
+# KSZTAŁT (pełny opis pól: `schemas/policy.schema.json`):
+#   - member: <dywizja>-<project_id>       # klucz wpisu, ten sam co w promotion_waivers
+#     profile: bq-omni-external-read       # zgoda dotyczy PARY (członek, profil)
+#     destinations: ["s3://hurtownia-eu"]  # DOKŁADNE cele; cel spoza listy jest odrzucany osobną regułą
+#     approved_by: security@example.com
+#     expires: "2026-11-30"                # obowiązkowe — bezterminowa zgoda na eksfiltrację to obniżenie
+#                                          # baseline pod inną nazwą
+#     justification: "min. 40 znaków: jakie dane, dokąd i dlaczego to jest akceptowalne"
+#
+# PUSTA LISTA NIE JEST WYŁĄCZNIKIEM. Reguły czytają tę sekcję przez `object.get` z domyślną pustą listą,
+# więc jej usunięcie odrzuca WSZYSTKIE takie wnioski, a nie przepuszcza ich. Usunięcie zgody, która coś
+# pokrywała, zatrzymuje repozytorium — świadomie, tak samo jak minięty `review_by`.
+#
+# Wpis niżej pokrywa przykładowego członka z `perimeter/projects.yaml` i jest CZĘŚCIĄ SZABLONU, a nie
+# przykładem w komentarzu: bez niego selftest startera świeciłby na czerwono, czyli droga zgody byłaby
+# opisana i nieprzetestowana — dokładnie ta klasa defektu, którą ta sekcja zamyka.
+egress_approvals:
+  - member: example-division-prj-example-vertex-dev
+    profile: bq-omni-external-read
+    destinations:
+      - s3://example-approved-dataset
+    approved_by: security-approver@example.com
+    # Data równa `review_by` członka, i to jest wzorzec do naśladowania: uprawnienie do wyprowadzania
+    # danych nie ma prawa przeżyć przeglądu wpisu, który je nosi. Dwie różne daty znaczą, że po przeglądzie
+    # zostaje zgoda, której nikt przy tym przeglądzie nie oglądał.
+    expires: "2027-01-28"
+    justification: >-
+      Hurtownia dywizji stoi w S3 i jest czytana z BigQuery Omni; wypływają wyłącznie wyniki zapytań
+      do jednego zatwierdzonego bucketa, bez danych osobowych.
+
 # Budżet atrybutów: perimetr ma limit 6000 atrybutów NA KONFIGURACJĘ, liczony osobno dla enforced i dry-run
 # (docs: VPC SC quotas). Guard CI liczy zachowawczo i pada powyżej progu — próg, nie limit, żeby zapchanie
 # było wykryte z zapasem na reakcję (nowy profil / konsolidacja / decyzja o drugim perimetrze, DEC-1).

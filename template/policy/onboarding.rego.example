@@ -663,6 +663,181 @@ valid_external_resource(res) if startswith(res, "s3://")
 
 valid_external_resource(res) if startswith(res, "azure://")
 
+# --- zgoda Security na profil, który wypuszcza dane poza Google Cloud -------------------------------
+#
+# CO TA BRAMKA ZAMYKA. Jedyna droga, którą dane mogą LEGALNIE opuścić Google Cloud, prowadzi przez profil
+# `risk: high` (dziś `bq-omni-external-read`) wybrany we WPISIE CZŁONKA. Wpisy żyją w
+# `perimeter/projects.yaml`, a ten plik ma w CODEOWNERS wyłącznie zespół sieciowy — Security nie jest
+# w tej ścieżce w ogóle. Materiał twierdził co innego w czterech miejscach (komentarz w profilu,
+# nagłówek `bq-omni-external-read`, `docs/5-servicenow-intake.md`, DEC-3), a mechanicznie nie robiło tego
+# NIC: `grep -rn "risk" terraform/ policy/ .github/` dawał publikację w kontrakcie, enum w schemacie
+# i asercję w tftest. Zero bramek. Zadeklarowana kontrola, której nie ma, jest gorsza od jej braku.
+#
+# DLACZEGO REGUŁA, A NIE CODEOWNERS. Trzy powody, każdy wystarczający osobno:
+#   * ROZDZIELENIE PO ZAWARTOŚCI, NIE PO ŚCIEŻCE. Wniosek o profil zewnętrzny i wniosek o zwykły serving
+#     to ta sama linia w tym samym pliku. CODEOWNERS dopasowuje ŚCIEŻKI, więc albo Security recenzuje
+#     wszystkie ~50 wniosków miesięcznie, albo żaden. Pierwsze zostanie wyłączone przy pierwszym pośpiechu.
+#   * CODEOWNERS BEZ OCHRONY GAŁĘZI NIE JEST EGZEKWOWANY. Na prywatnym repo w darmowym planie
+#     `branches/main/protection` i `rulesets` odpowiadają `403 Upgrade to GitHub Pro`, więc
+#     `require_code_owner_reviews` nie ma gdzie zadziałać, a commit wypchnięty prosto na gałąź domyślną
+#     omija cały tor pull requesta. Ta reguła biegnie w `bramki-tresci`, czyli na OBU torach — także na
+#     ścieżce apply (DEC-16). Zatrzymanie następuje u MUTATORA, nie przy przycisku w GitHubie.
+#   * ZGODA MA BYĆ ARTEFAKTEM, NIE KLIKNIĘCIEM. Approval w GitHubie znika z historii przy pierwszym
+#     force-pushu i nie ma daty ważności. Wpis w `policy.yaml` jest diffowalny, wygasa sam i mieszka
+#     w pliku, którego Security JEST właścicielem.
+#
+# DLACZEGO NIE ROZSZERZENIE `bramka-promocji` (DEC-17), choć problem wygląda podobnie. Tamta bramka pyta
+# o MOMENT („czy wykonanie tego apply, teraz, zacznie komuś odmawiać") i zwalnia ją pole formularza
+# `workflow_dispatch`, wpisywane przez osobę uruchamiającą apply — czyli zespół sieciowy. Zgoda Security
+# przeniesiona do tamtego pola byłaby zgodą wpisywaną przez zatwierdzanego. To jest pytanie o TREŚĆ
+# deklaracji, więc mieszka tam, gdzie reszta pytań o treść, i wykonuje się na obu torach.
+#
+# KSZTAŁT ZGODY JEST ZŻYNANY Z `promotion_waivers` I TO JEST ŚWIADOME — tamten wzorzec przeszedł już
+# jeden cykl życia (założony, zmierzony, zdjęty), więc znamy jego tryby awarii:
+#   * ZAKRES — jedna para (członek, profil) po nazwie, nigdy „dla wszystkich";
+#   * CZAS — `expires` obowiązkowe; bezterminowa zgoda na eksfiltrację to obniżenie baseline pod inną nazwą;
+#   * WŁASNOŚĆ — `policy.yaml`, czyli plik pod CODEOWNERS Security. W pliku członka dywizja zwalniałaby
+#     się z bramki własnym pull requestem;
+#   * TREŚĆ — `destinations` to ZBIÓR CELÓW, nie flaga „wolno mu". Zgoda na `s3://hurtownia` nie pokrywa
+#     `s3://cokolwiek-innego`: cel jest całym ryzykiem, a jego podmiana byłaby rutynowym diffem w pliku,
+#     którego Security nie ogląda.
+#
+# BRAMKA PYTA O STAN, A NIE O PRZEJŚCIE — I TO JEST RÓŻNICA WOBEC DEC-18, NIE JEGO NARUSZENIE. Tamta
+# bramka musiała pytać o przejście, bo jej dowód (naruszenia w oknie) po promocji ZMIENIA ZNACZENIE:
+# te same liczby stają się miarą sukcesu. Tu nic się nie odwraca — „ta dywizja może wysyłać dane do
+# s3://X" jest uprawnieniem STOJĄCYM i musi być pokryte tak długo, jak długo reguła stoi w granicy.
+# To jest klasa `review_by`, nie klasa dowodu naruszeń: wygaśnięcie ma zatrzymać repozytorium, bo
+# zatrzymanie jest tańsze niż niepokryta droga wyjścia danych.
+#
+# ŹRÓDŁO PRAWDY NIEDOSTĘPNE = ODRZUCENIE, na każdej ścieżce:
+#   * brak sekcji `egress_approvals` w `policy.yaml` → `object.get` daje pustą listę → każdy członek
+#     z profilem `high` i niepustym celem odpada. Wyłącznikiem tej bramki NIE jest usunięcie sekcji;
+#   * brak `perimeter/profiles/` → `input.profiles[…]` niezdefiniowane → te reguły nie odpalą, ale
+#     odpala reguła „profil nie istnieje w katalogu" wyżej i PR staje tak samo;
+#   * brak `policy.yaml` → `collect_declarations.py` kończy się błędem przed wypisaniem czegokolwiek,
+#     więc conftest nie dostaje okrojonego dokumentu, na którym świeciłby na zielono.
+egress_approvals := object.get(input.policy, "egress_approvals", [])
+
+# Zgoda WAŻNA = dotyczy tej pary, nie wygasła i niesie uzasadnienie. Każdy warunek osobno: zgoda wygasła
+# z dobrym uzasadnieniem jest tak samo nieważna jak świeża bez uzasadnienia. Próg 40 znaków ten sam co przy
+# `promotion_waivers` — obie zwalniają z warunku chroniącego coś większego niż jeden wniosek.
+wazne_zgody(name, profile) := [w |
+	some w in egress_approvals
+	w.member == name
+	w.profile == profile
+	w.expires >= input.today # ISO YYYY-MM-DD porównuje się leksykograficznie
+	count(object.get(w, "justification", "")) >= 40
+]
+
+# CELE, KTÓRE DEKLARACJA CZŁONKA REALNIE ODDAJE RENDEREROWI. Liczymy je z pary (profil × params), a nie
+# z samego wyboru profilu, bo profil bez wartości parametru nie renderuje ani jednej reguły egress —
+# pusta lista celów to udokumentowana bezpieczna degradacja (`to_projects_from` / `to_external_from`).
+# Bramka żądająca zgody dla członka, który nic nie wysyła, byłaby dokładnie tym szumem, przez który
+# bramki się wyłącza.
+cele_egress(prof) := {cel |
+	some rule in object.get(input.profiles[prof.name], "egress", [])
+	some klucz in [object.get(rule, "to_projects_from", ""), object.get(rule, "to_external_from", "")]
+	klucz != ""
+	some cel in object.get(prof.params, klucz, [])
+}
+
+cel_pokryty(name, profile, cel) if {
+	some w in wazne_zgody(name, profile)
+	cel in object.get(w, "destinations", [])
+}
+
+# BRAMKA. Profil `risk: high` z realnym celem wymaga ważnej zgody Security. To jest ta reguła, o którą
+# chodzi w całej sekcji, i jedyna, która odrzuca wniosek za sam brak podpisu.
+deny contains msg if {
+	some name, m in input.members
+	some prof in m.profiles
+	input.profiles[prof.name].risk == "high"
+	count(cele_egress(prof)) > 0
+	count(wazne_zgody(name, prof.name)) == 0
+	msg := sprintf(
+		"projects.yaml[%s]: profil %q ma risk: high (dane opuszczają Google Cloud) i renderuje cele %v — wymagana zgoda Security w perimeter/policy.yaml §egress_approvals (member, profile, destinations, approved_by, expires, justification min. 40 znaków). CODEOWNERS tego nie załatwia: ten plik jest wspólny dla wszystkich wniosków",
+		[name, prof.name, sort(cele_egress(prof))],
+	)
+}
+
+# ZGODA POKRYWA CELE, NIE ZDOLNOŚĆ. Bez tej reguły podmiana `s3://hurtownia` na `s3://gdziekolwiek`
+# byłaby rutynowym diffem w pliku członka, przechodzącym pod zgodą wydaną na coś innego — czyli zgoda
+# opisywałaby uprawnienie, a nie kierunek wypływu, który jest całym przedmiotem decyzji.
+deny contains msg if {
+	some name, m in input.members
+	some prof in m.profiles
+	input.profiles[prof.name].risk == "high"
+	count(wazne_zgody(name, prof.name)) > 0
+	some cel in cele_egress(prof)
+	not cel_pokryty(name, prof.name, cel)
+	msg := sprintf(
+		"projects.yaml[%s]: cel %q profilu %q nie jest wymieniony w zgodzie Security (policy.yaml §egress_approvals.destinations) — zgoda dotyczy KIERUNKU wypływu, nie samej zdolności wysyłania",
+		[name, cel, prof.name],
+	)
+}
+
+# Zgoda na członka, którego nie ma — zwykle literówka w kluczu. Cichy no-op wyglądałby jak działająca
+# zgoda; ta sama reguła i ten sam powód co przy `promotion_waivers`.
+deny contains msg if {
+	some w in egress_approvals
+	not input.members[w.member]
+	msg := sprintf(
+		"policy.yaml egress_approvals: zgoda wskazuje członka %q, którego nie ma w perimeter/projects.yaml",
+		[w.member],
+	)
+}
+
+# Zgoda „na zapas" — para (członek, profil), która dziś nie renderuje ani jednego celu. Gdyby wolno ją
+# było trzymać, ktoś mógłby wydać zgody dla wszystkich członków z góry, a późniejsze dopisanie zasobu
+# zewnętrznego przeszłoby bez ani jednej bramki. To jest dokładnie ta sama pułapka co
+# `control_plane_exception` trzymany na projekcie spoza listy — i to samo rozstrzygnięcie.
+deny contains msg if {
+	some w in egress_approvals
+	m := input.members[w.member]
+	not para_renderuje_cel(m, w.profile)
+	msg := sprintf(
+		"policy.yaml egress_approvals[%s/%s]: zgoda nie pokrywa niczego — ten członek nie renderuje dziś celu egress dla tego profilu. Zgoda wydana „na zapas\" cicho rozbroi bramkę w dniu, w którym cel się pojawi. Usuń ją",
+		[w.member, w.profile],
+	)
+}
+
+para_renderuje_cel(m, profile) if {
+	some prof in m.profiles
+	prof.name == profile
+	count(cele_egress(prof)) > 0
+}
+
+# --- `risk` musi opisywać KSZTAŁT profilu, a nie intencję autora --------------------------------------
+#
+# Bramka wyżej pyta o `risk` z katalogu profili, więc etykieta jest teraz wejściem kontroli. Bez dwóch
+# reguł niżej obejściem byłaby jedna linia w profilu: „risk: low" i cała zgoda Security znika, choć
+# reguła nadal wypuszcza dane. Etykieta ma być KONSEKWENCJĄ kształtu, nie deklaracją o nim.
+#
+# Odwrotna asercja („risk: high wymaga egressu") świadomie NIE istnieje: profil czysto ingressowy może
+# być wysokiego ryzyka z powodów, których ten plik nie zna, a bramka zabraniająca ostrożniejszej
+# etykiety uczyłaby jej zaniżania.
+
+deny contains msg if {
+	some pname, prof in input.profiles
+	some rule in object.get(prof, "egress", [])
+	object.get(rule, "to_external_from", "") != ""
+	object.get(prof, "risk", "") != "high"
+	msg := sprintf(
+		"profiles/%s: reguła %q wypuszcza dane POZA Google Cloud (`to_external_from`), a profil deklaruje risk: %q — to jedyna klasa reguł wymagająca zgody Security, więc etykieta musi brzmieć `high`",
+		[pname, rule.title, object.get(prof, "risk", "")],
+	)
+}
+
+deny contains msg if {
+	some pname, prof in input.profiles
+	count(object.get(prof, "egress", [])) > 0
+	object.get(prof, "risk", "") == "low"
+	msg := sprintf(
+		"profiles/%s: profil ma regułę egress i deklaruje risk: low — egress kieruje dane POZA perimetr, więc najniższa etykieta jest nieprawdziwa (minimum `medium`, a przy celach poza Google Cloud `high`)",
+		[pname],
+	)
+}
+
 # --- higiena wpisów ---------------------------------------------------------------------------------
 
 # Data przeglądu w przeszłości = wpis, którego nikt nie potwierdził. Sweeper otwiera PR offboardingowy,
@@ -673,13 +848,12 @@ deny contains msg if {
 	msg := sprintf("projects.yaml[%s]: review_by (%s) minął — potwierdź wpis albo go usuń", [name, m.review_by])
 }
 
-# Wyjątek bez uzasadnienia to reguła, której nikt nie umie później ocenić.
-deny contains msg if {
-	some name, m in input.members
-	some e in object.get(m, "exceptions", [])
-	count(e.justification) < 20
-	msg := sprintf("projects.yaml[%s]: wyjątek %q wymaga uzasadnienia (min. 20 znaków)", [name, e.title])
-}
+# POLE `exceptions:` ZOSTAŁO USUNIĘTE ZE SCHEMATU CZŁONKA (DEC-23) i dlatego nie ma tu już swojej reguły.
+# Przez cały czas istnienia sprawdzała ona wyłącznie DŁUGOŚĆ UZASADNIENIA reguły, której renderer nigdy nie
+# tworzył (`grep -rn "exceptions" terraform/` → zero) — czyli mierzyła jakość opisu czegoś, co nie
+# powstawało. Odkąd pola nie ma, `additionalProperties: false` w `schemas/member.schema.json` odrzuca wpis,
+# który je niesie, i robi to komunikatem wskazującym katalog profili. Cicha atrapa zamieniła się w twardą
+# odmowę — to jest ta zmiana, nie „usunięcie bramki".
 
 # Prosta różnica dat ISO (YYYY-MM-DD) w dniach — bez stref czasowych, bo okno liczymy w dobach.
 days_between(from, to) := days if {
