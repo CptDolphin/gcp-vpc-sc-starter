@@ -9,7 +9,8 @@ ten sam wymóg: **dowód, nie deklaracja**.
 
 ### Kiedy wolno
 
-Wszystkie warunki muszą być spełnione (bramka `promotion_gate` w `policy/onboarding.rego` egzekwuje 1–3):
+Wszystkie warunki muszą być spełnione (bramka `promotion_gate` w `policy/onboarding.rego` egzekwuje wszystkie
+poza pierwszym i ostatnim — tamte sprawdza osobny workflow i człowiek):
 
 | Warunek | Próg | Skąd wiadomo |
 |---|---|---|
@@ -17,6 +18,7 @@ Wszystkie warunki muszą być spełnione (bramka `promotion_gate` w `policy/onbo
 | Czas w dry-run | `dry_run_min_days` z `policy.yaml` (domyślnie 14) | pole `dry_run_since` w pliku członka |
 | Naruszenia w oknie | **0** w ostatnich `clean_window_days` (domyślnie 7) | `violations.json` z workflow `violations-report` |
 | Raport w ogóle istnieje | wpis dla tego członka | brak wpisu = brak dowodu, nie „zero" |
+| **Zakres ciszy potwierdzony** | `unmeasured_peers_ack` = liczba członków zostających w dry-run | nagłówek `violations.md`; DEC-27 — ruch między dwoma członkami w dry-run NIE MOŻE dać wpisu |
 | Rzadkie przepływy widziane | ocena człowieka | czy w oknie zmieścił się miesięczny batch / kwartalny job? |
 
 > **Nie skracaj okna „bo zielono od trzech dni".** Dry-run rejestruje tylko to, co faktycznie zaszło.
@@ -24,7 +26,7 @@ Wszystkie warunki muszą być spełnione (bramka `promotion_gate` w `policy/onbo
 
 ### Dokąd te warunki sięgają: do momentu WŁĄCZENIA, nie na zawsze
 
-Bramka pyta o **przejście**, a nie o stan (DEC-18). Warunki 1–3 obowiązują dopóty, dopóki repo deklaruje
+Bramka pyta o **przejście**, a nie o stan (DEC-18). Warunki egzekwowane przez bramkę obowiązują dopóty, dopóki repo deklaruje
 `enforced`, a ostatni apply opublikował dla tego członka co innego — czyli dopóki decyzja jest przed nami.
 Gdy kontrakt (`gh release download contract`) potwierdzi `stage: enforced`, granica **już działa** i te
 same liczby znaczą co innego: naruszenia w oknie to teraz **odmowy**, czyli dowód, że perimetr robi swoje.
@@ -118,8 +120,17 @@ gh workflow run violations-report.yml -f days=14
 2. Pobierz artefakt `violations` i **przeczytaj `violations.md`**, nie tylko liczbę z JSON-a. Jeśli są
    naruszenia — to nie jest „szum", tylko lista wywołań, które przestaną działać.
 
-3. Otwórz PR promocyjny: w pliku członka zmień **wyłącznie** `stage: dry-run` → `stage: enforced`.
+   Przeczytaj też nagłówek raportu: **listę członków, którzy zostają w dry-run**. To jest zakres, w którym
+   „czysto" NIC nie znaczy (DEC-27, sekcja „Przepływ, który ZASZEDŁ…" niżej). Zapytaj właściciela wprost,
+   czy jego projekt rozmawia z którymkolwiek z nich — bo tego pytania raport nie zada za Ciebie.
+
+3. Otwórz PR promocyjny: w pliku członka zmień `stage: dry-run` → `stage: enforced` i dopisz
+   `unmeasured_peers_ack: <liczba z raportu>`. **Nic więcej** — dwa pola, oba wskazane przez raport.
    Wypełnij sekcję *Evidence* w szablonie PR-a.
+
+   Bramka odrzuci liczbę inną niż faktyczna, więc pola nie da się „przeklikać": jeśli między wygenerowaniem
+   raportu a merge'em dołączy kolejna dywizja, promocja staje i wracasz do kroku 1. Po zastosowaniu promocji
+   pole jest historią — usuń je przy najbliższej zmianie pliku, inaczej bramka zgłosi je jako nieaktualne.
 
    `violations.json` **dołącza się sam**: `validate.yml` pobiera artefakt `violations` z ostatniego udanego
    przebiegu `violations-report.yml` na gałęzi domyślnej i podaje go regułom OPA. Dlatego krok 1 nie jest
@@ -232,6 +243,27 @@ kategorii i odrzuci je tak samo jak każde inne wywołanie spoza granicy:
 **Jak to sprawdzić, zanim promujesz:** przejdź listę z właścicielem projektu i zapytaj wprost *„co się
 uruchamia u was rzadziej niż raz na dwa tygodnie?"*. To pytanie wyłapuje więcej niż przeglądanie logów, bo
 raport nie może pokazać czegoś, co się nie wykonało.
+
+### Przepływ, który ZASZEDŁ i mimo to nie mógł dać wpisu (DEC-27)
+
+Cała tabela wyżej mówi o ruchu, który się **nie wykonał**. Jest jednak klasa ruchu, który wykonuje się co
+minutę, a w oknie obserwacji nie zostawia śladu: **ruch między dwoma członkami, którzy oba są w dry-run**.
+
+Konfiguracja dry-run zawiera wszystkich członków naraz, więc widzi taki przepływ jako ruch **wewnątrz**
+perimetru — nie ma czego zalogować. Promocja przenosi natomiast **jednego**: rówieśnik zostaje na zewnątrz
+konfiguracji egzekwowanej i ten sam przepływ staje się naruszeniem egress. Zmierzone dwiema maszynami i tą
+samą sondą (szczegóły w DEC-27): z członka wyłącznie dry-run do drugiego takiego członka — **PRZESZŁO, zero
+wpisów**; z członka egzekwowanego do tego samego zasobu — **ODMOWA**.
+
+To jest jedyny wiersz na tej liście, którego **nie da się** naprawić dłuższym oknem: nie chodzi o zbyt krótki
+pomiar, tylko o pomiar, który tego zdarzenia nie klasyfikuje. Dlatego:
+
+* raport wypisuje na górze listę członków w dry-run i powtarza ją przy każdym z nich,
+* `promotion_gate` żąda pola `unmeasured_peers_ack` **równego** liczbie tych członków (krok 3 niżej),
+* **jeśli dywizje rozmawiają ze sobą — promuj je jedną kohortą** (jeden pull request, jeden apply). Wtedy
+  wchodzą do konfiguracji egzekwowanej razem, zbiór niemierzalnych rówieśników robi się mniejszy, a przepływ
+  między nimi przeżywa promocję. To jest zalecenie, nie wymóg — kohorta wiąże termin każdej dywizji
+  z terminem najwolniejszej.
 
 **Reguły `baseline_ingress` bez access levelu** wymagają jawnego `allow_without_access_level: true` i
 approvalu Security — bo dotyczą wszystkich chronionych projektów naraz. Pominięcie pola nie daje tego samego

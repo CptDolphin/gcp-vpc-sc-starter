@@ -137,6 +137,13 @@ Miesięczny batch, kwartalny audyt i recertyfikacja nie pojawią się w krótkim
   drugiej granicy do utrzymania i bez ryzyka, że ktoś zostanie w stagingu na zawsze.
 - *Promocja automatyczna po czystym oknie.* „Zero naruszeń" dowodzi, że nic się nie złamało w oknie — nie że
   whitelist jest kompletna. Ostatnia ocena należy do człowieka, który zna kalendarz zespołu.
+
+**Zawężenie po pomiarze (DEC-27).** Zdanie „zero naruszeń dowodzi, że nic się nie złamało w oknie" jest
+prawdziwe wyłącznie wobec ruchu, który konfiguracja dry-run w ogóle **ocenia**. Ruch między dwoma członkami
+będącymi oba w dry-run jest dla niej ruchem wewnątrz perimetru i nie może dać ani jednego wpisu — a po
+promocji jednego z nich staje się naruszeniem egress. Okno mierzy więc ruch przez granicę **dzisiejszą**,
+a promocja przesuwa granicę; różnica tych dwóch zbiorów jest niemierzalna z definicji i dlatego jest
+DEKLAROWANA (`unmeasured_peers_ack`), a nie mierzona.
 - *Rezygnacja z jawnej treści dry-run (dziedziczenie z egzekwowanej).* Bez `use_explicit_dry_run_spec = true` nie da
   się mieć członka istniejącego wyłącznie w dry-run, czyli nie da się etapować onboardingu.
 
@@ -1971,3 +1978,56 @@ albo runnera odpada bez dyskusji)
   kontrolną, którą można sprawdzić jednym poleceniem.
 * **Suma kontrolna brana z `checksums.txt` obok wydania.** Odrzucone, bo plik z sumami leci z tego samego
   miejsca i tym samym kanałem, więc potwierdzałby sam siebie. Suma jest wpisana w akcji.
+---
+
+## DEC-27 — Raport i bramka promocji mówią, WOBEC CZEGO okno było czyste
+
+**Decyzja.** Raport naruszeń wypisuje listę członków pozostających w konfiguracji dry-run, a `promotion_gate`
+wymaga od promowanego wpisu pola `unmeasured_peers_ack` **równego** liczbie członków, którzy po tej promocji
+zostaną w dry-run. Pole jest liczbą, nie flagą; jest wymagane wyłącznie w chwili promocji (repo mówi
+`enforced`, ostatni apply mówił co innego) i wyłącznie wtedy, gdy taki członek w ogóle istnieje. Potwierdzenie
+zostawione po promocji jest odrzucane jako nieaktualne.
+
+**Dlaczego — bo „zero naruszeń" opisuje mniejszy zbiór, niż znaczy.** Konfiguracja dry-run zawiera
+**wszystkich** członków naraz. Ruch między dwoma członkami, którzy oba są w dry-run, jest dla niej ruchem
+**wewnątrz** perimetru: nie narusza niczego, więc nie powstaje żaden wpis. Promocja przenosi natomiast
+**jednego** — reszta zostaje na zewnątrz i dokładnie ten przepływ staje się naruszeniem egress. Okno
+obserwacji jest więc ślepe nie przez usterkę logowania, tylko z konstrukcji, i to na przepływach, które
+promocja zrywa.
+
+Zmierzone na żywej granicy dwiema maszynami i tą samą sondą, w jednym przelocie:
+
+| skąd | dokąd | wynik | wpisy w oknie |
+|---|---|---|---|
+| członek **wyłącznie dry-run** | zasób w drugim członku **wyłącznie dry-run** | PRZESZŁO | **0** |
+| członek **egzekwowany** | ten sam zasób | ODMOWA `NETWORK_NOT_IN_SAME_SERVICE_PERIMETER` | wpis egress |
+| członek **wyłącznie dry-run** | zasób poza perimetrem | PRZESZŁO | `dryRun=true`, egress |
+
+Trzeci wiersz jest kontrolą anty-tautologiczną: okno **działa** dla tego członka w tej samej sekundzie, więc
+cisza w pierwszym wierszu nie jest awarią zbierania, tylko własnością konfiguracji.
+
+**Dlaczego liczba, a nie flaga.** Zgoda wydana na trzech rówieśników nie jest zgodą na czwartego. Gdy do
+dry-run wejdzie kolejna dywizja, liczba przestaje się zgadzać i promocja staje ponownie — ta sama własność,
+dla której `accept_violations_up_to` jest liczbą.
+
+**Dlaczego to nie jest twarda blokada.** Zbiór rówieśników jest pusty wyłącznie wtedy, gdy promowani są
+wszyscy naraz. Przy dwudziestu dywizjach i kilkudziesięciu projektach miesięcznie blokada oznaczałaby bramkę,
+której nie da się przejść nigdy — czyli bramkę, którą ktoś w końcu wyłączy. Celem nie jest zakazanie
+promocji, tylko odebranie możliwości napisania „czysto" bez powiedzenia, wobec czego.
+
+**Odrzucone.**
+
+* *Nic nie zmieniać, opisać ograniczenie w runbooku.* Zdanie w dokumencie nie ma sposobu, żeby zatrzymać
+  promocję; a to jest dokładnie ta klasa, w której zapis „ostrzeżenie w PR-ze, który bot i tak zmerguje"
+  został już raz odrzucony (DEC-5).
+* *Twarda blokada promocji pojedynczego członka, dopóki ktokolwiek jest w dry-run.* Patrz wyżej: bramka
+  nie do przejścia jest bramką do wyłączenia.
+* *Wpis w `promotion_waivers` (Security, `policy.yaml`).* Tamten wyjątek jest rzadki i wymaga decyzji
+  Security. Ten warunek dotyczy **każdej** promocji — stały udział Security przy ~50 wnioskach miesięcznie
+  kończy się recenzją stemplowaną, z tego samego powodu, dla którego wysokie ryzyko nie weszło do CODEOWNERS.
+* *Wykrywanie tych przepływów pomiarem zamiast deklaracją* (zbieranie Data Access logs i szukanie ruchu
+  między członkami). Odrzucone: to firehose przy kilkuset projektach, a wynik i tak nie zmieniłby decyzji —
+  właściciel dywizji odpowiada na pytanie „rozmawiacie z X?" szybciej, niż log to pokaże. Kontrola, której
+  nie da się zasilić danymi w rozsądnym koszcie, jest kolejną kontrolą celującą w pustkę.
+* *Promowanie zawsze całą kohortą* (wtedy zbiór jest pusty). Zostaje jako **zalecenie** w runbooku, nie jako
+  wymóg: wymuszenie kohorty wiąże termin każdej dywizji z terminem najwolniejszej z nich.
