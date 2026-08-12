@@ -235,6 +235,30 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # THE APP TOKEN IS MINTED HERE, IT DOES NOT ARRIVE READY-MADE IN A SECRET. A GitHub App installation
+      # token expires after ONE HOUR, so one pasted into `secrets.*` works for the rest of the day and goes
+      # quiet the next morning — a failure with no change in the code to explain it, and the worst possible
+      # failure mode for a channel that fires rarely. The secret therefore holds the App's PRIVATE KEY
+      # (valid until revoked) and the token is minted per run.
+      #
+      # THE CONDITION READS `vars.INTAKE_APP_ID`, NOT THE SECRET, and that is not a matter of taste: the
+      # `secrets` context is not available in a step-level `if:`, `vars` is. While that variable is absent
+      # this step is SKIPPED and the channel behaves exactly as it did before this change — `github.token`
+      # and the limit described below. Adding the two values in the repository settings switches it over to
+      # the App WITHOUT any further change in the code.
+      #
+      # `owner`/`repositories` come from the run context: the token is scoped to THIS repository (the App
+      # is installed here and nowhere else), and a template may not name an organisation or a repository.
+      - name: mint the App installation token (when the App is configured)
+        id: app
+        if: vars.INTAKE_APP_ID != ''
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.INTAKE_APP_ID }}
+          private-key: ${{ secrets.INTAKE_APP_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
       # WHICH TOKEN OPENS THE PULL REQUEST DECIDES WHETHER THE PULL REQUEST IS EVER CHECKED — this is the
       # prerequisite that broke this channel end to end, measured 2026-08-11 (#1947), and it is written
       # here rather than only in docs/ because this is the step it breaks.
@@ -261,11 +285,10 @@ jobs:
       #     parked runs are visible in the Actions tab, so somebody COULD approve them by hand, but nothing
       #     requires it and the pull request merges without it. A reviewer looking at such a PR sees a full
       #     set of zeros, not a red gate.
-      #   * A GitHub App installation token (`secrets.INTAKE_PR_TOKEN`) — creation works, and the resulting
+      #   * A GitHub App installation token, minted by the step above — creation works, and the resulting
       #     pull request is expected to run `validate` and `plan` like any human one. That is the supported
-      #     configuration; `tools/bootstrap_github.sh` names it as a prerequisite. Expected, not measured:
-      #     there is no App yet, so there was nothing to measure. One run closes that gap — open a PR with
-      #     the App token and read `check-runs.total_count > 0`.
+      #     configuration. Expected, not measured: there is no App yet, so there was nothing to measure.
+      #     One run closes that gap — open a PR with the App token and read `check-runs.total_count > 0`.
       #
       # The fallback to `github.token` is kept so the channel degrades to a LOUD, harmless failure instead
       # of a silent one, and the step below cleans up the branch it left behind.
@@ -273,7 +296,11 @@ jobs:
         id: pr
         uses: peter-evans/create-pull-request@c5a7806660adbe173f04e3e038b0ccdcd758773c # v6.1.0
         with:
-          token: ${{ secrets.INTAKE_PR_TOKEN || github.token }}
+          # The App token when there is one, `github.token` otherwise. The `||` is deliberately robust to
+          # the `app` step being SKIPPED: reading a property that is not in the context yields an empty
+          # value in GitHub Actions expressions, not an error — so the no-App path degrades, it does not
+          # break.
+          token: ${{ steps.app.outputs.token || github.token }}
           branch: onboard/${{ inputs.division }}-${{ inputs.project_id }}
           title: "onboard: ${{ inputs.division }} / ${{ inputs.project_id }} (dry-run)"
           commit-message: "onboard: add ${{ inputs.project_id }} to the dry-run configuration"
@@ -314,5 +341,6 @@ jobs:
             echo "Plik czlonka zostal zrenderowany i przeszedl bramki, ale utworzenie PR-a odmowiono."
             echo "Najczestsza przyczyna: PR otwiera \`GITHUB_TOKEN\`, a ustawienie repozytorium"
             echo "\"Allow GitHub Actions to create and approve pull requests\" jest wylaczone."
-            echo "Konfiguracja wspierana: token instalacji GitHub Appa w \`secrets.INTAKE_PR_TOKEN\`."
+            echo "Konfiguracja wspierana: token instalacji GitHub Appa mintowany w przebiegu"
+            echo "(\`vars.INTAKE_APP_ID\` + \`secrets.INTAKE_APP_KEY\`) — patrz \`docs/5-servicenow-intake.md\` §3.1."
           } >> "$GITHUB_STEP_SUMMARY"
