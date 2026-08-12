@@ -1,0 +1,136 @@
+# .github/actions/narzedzia/action.yml
+# JEDNO miejsce, w którym powstają narzędzia bramek — i jedyne miejsce, które potrafi powiedzieć
+# „BRAMKI NIE WYKONAŁY SIĘ" zamiast zostawić po sobie czerwony check nieodróżnialny od odrzucenia wniosku.
+#
+# ============================================================================================
+# CO TU JEST BADANYM TRYBEM AWARII (zmierzone, nie hipotetyczne)
+# ============================================================================================
+# Krok instalujący `conftest` padł na pobraniu (`curl: (60) SSL certificate problem: self-signed
+# certificate`), a WSZYSTKIE kroki bramek poniżej dostały `outcome=skipped` — czyli ani jedna bramka nie
+# wystartowała. W interfejsie ten przebieg wyglądał DOKŁADNIE tak samo jak przebieg, w którym bramka
+# odrzuciła treść wniosku: czerwony X przy „schema, policy and budget". Ten sam przebieg wznowiony cztery
+# minuty później przeszedł normalnie i odrzucił wniosek treściowo.
+#
+# Recenzent, który poprzestanie na kolorze, zamknie wniosek z BŁĘDNYM powodem — a werdykt bramki jest
+# w tym systemie dowodem. To ta sama zasada, dla której `PERMISSION_DENIED` nie rozstrzyga między odmową
+# VPC-SC a wyłączonym API: kod (tu: kolor) nie niesie werdyktu, niesie go TREŚĆ.
+#
+# ============================================================================================
+# DLACZEGO ROZRÓŻNIENIE MIESZKA W ADNOTACJI, A NIE W KODZIE WYJŚCIA ANI W NAZWIE KROKU
+# ============================================================================================
+# Zmierzone na REST API tego repozytorium: job wołający akcję złożoną ma w `steps[]` JEDEN wpis
+# (`Run ./.github/actions/bramki-tresci`, `conclusion: failure`) — nazwy kroków WEWNĄTRZ akcji nie są
+# przez API wystawiane w ogóle. Kod wyjścia kroku też nie: job ma `conclusion: failure` i nic więcej.
+# Kanałem, który przeżywa granicę akcji złożonej i daje się odczytać BEZ pobierania logu, jest
+# **adnotacja** (`::error title=…::`) — widoczna na górze strony przebiegu i w
+# `GET /repos/{o}/{r}/check-runs/{id}/annotations` — oraz `$GITHUB_STEP_SUMMARY`. Dlatego werdykt idzie
+# tymi dwoma kanałami, a nie kodem wyjścia (DEC-26).
+#
+# ============================================================================================
+# DLACZEGO NADAL POBIERAMY Z SIECI (a nie obraz, cache czy akcja obca)
+# ============================================================================================
+# Ten starter jest publiczny i ma dać się odtworzyć w środowisku, które nie ma naszej infrastruktury —
+# więc każdy wariant wymagający NASZEGO rejestru, NASZEGO lustra albo NASZEGO runnera odpada z definicji.
+# Z wariantów pozostałych (pełne uzasadnienie i odrzucone alternatywy: DEC-26) zostaje pobranie
+# z GitHub Releases, bo to ten SAM host i ta sama domena zaufania, od których job już zależy przez
+# `actions/checkout` — nie dokłada ani jednej nowej. To, co się zmienia, to trzy rzeczy, których wcześniej
+# nie było: PONAWIANIE (`--retry-all-errors` ponawia także błąd 60, czyli dokładnie zmierzony tryb awarii),
+# WERYFIKACJA SUMĄ (dotąd binarny plik wchodził na ścieżkę mutatora granicy bez ŻADNEJ kontroli) oraz
+# JAWNY WERDYKT przy porażce.
+#
+# ============================================================================================
+# DLACZEGO JEDNA AKCJA, A NIE SZEŚĆ KOPII TEGO KROKU
+# ============================================================================================
+# Przed tą zmianą ten sam `curl` stał w SZEŚCIU plikach (`bramki-tresci`, `plan`, `apply`, `intake`,
+# `external-intake`, `publish-gates`). Kopia rozjeżdża się przy pierwszej poprawce — a poprawką jest tu
+# suma kontrolna i komunikat werdyktu, czyli akurat te rzeczy, których brak jest niewidoczny do dnia
+# awarii. To ta sama zasada, co przy bramkach treści (DEC-16).
+
+name: narzędzia bramek
+description: >-
+  Dostarcza `conftest` (pin + suma kontrolna + ponawianie) i opcjonalne pakiety Pythona. Porażka tego
+  kroku znaczy „bramki NIE wykonały się", a nie „wniosek odrzucony" — i tak się melduje.
+
+inputs:
+  pakiety_python:
+    description: >-
+      Pakiety pip potrzebne bramkom wywołującego, oddzielone spacją (np. `pyyaml check-jsonschema`).
+      Puste = nie instaluj nic. Świadomie NIE ma tu domyślnej listy: joby `plan`/`apply`/`publish-gates`
+      nie potrzebują pipa, a dokładanie im PyPI jako drugiego źródła sieciowego powiększałoby dokładnie
+      tę powierzchnię awarii, którą ta akcja zamyka.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: narzedzia bramek (conftest + pakiety Pythona)
+      shell: bash
+      env:
+        PAKIETY_PYTHON: ${{ inputs.pakiety_python }}
+        # Wersja i suma NIE są wejściami akcji. Wejście znaczyłoby, że wywołujący workflow — a więc każdy,
+        # kto go edytuje — wybiera, jakie narzędzie orzeka o granicy bezpieczeństwa. Podmiana jednego pola
+        # w `with:` byłaby wtedy podmianą bramki, i wyglądałaby w diffie na zmianę konfiguracji.
+        CONFTEST_WERSJA: "0.56.0"
+        # sha256 pliku `conftest_0.56.0_Linux_x86_64.tar.gz` z `checksums.txt` tego wydania.
+        CONFTEST_SHA256: "620f41640d63bbde1646a108ce2816ba54c980466ceebb7e754dda2d508e8cd5"
+      run: |
+        # BEZ `set -e`. Każda porażka ma tu przejść przez `nie_wykonaly_sie`, bo jedyne, co ten krok
+        # produkuje ponad narzędzia, to WERDYKT — a `set -e` kończyłby krok samym kodem wyjścia `curl`,
+        # czyli dokładnie tak, jak przed tą zmianą.
+        set -uo pipefail
+
+        nie_wykonaly_sie() {
+          # `%0A` — adnotacje GitHuba są jednoliniowe; dosłowny znak nowej linii ucina komunikat.
+          # W tytule NIE MA `::` ani `%` — parser adnotacji rozcina tytuł na pierwszym `::`.
+          echo "::error title=BRAMKI NIE WYKONALY SIE (awaria narzedzi, NIE odrzucenie wniosku)::$1%0AZaden test tresci nie zostal uruchomiony. Werdykt o tym wniosku NIE ZAPADL. Powtorz przebieg."
+          {
+            echo "## ⛔ BRAMKI NIE WYKONAŁY SIĘ — to **nie jest** odrzucenie wniosku"
+            echo
+            echo "Krok dostarczający narzędzia padł, więc **ani jedna bramka treści nie wystartowała**."
+            echo "Czerwony kolor tego przebiegu mówi o awarii środowiska CI, **nie o treści zmiany**."
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| werdykt o wniosku | **NIE ZAPADŁ** |"
+            echo "| co padło | \`$1\` |"
+            echo "| co zrobić | powtórzyć przebieg; jeśli powtarza się — to awaria infrastruktury, nie wniosku |"
+            echo "| czego **nie** robić | zamykać wniosku jako odrzuconego |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 1
+        }
+
+        if [ -n "$PAKIETY_PYTHON" ]; then
+          # shellcheck disable=SC2086 — lista pakietów ma się rozdzielić na słowa; to jest jej format.
+          pip install --quiet $PAKIETY_PYTHON \
+            || nie_wykonaly_sie "pip install $PAKIETY_PYTHON"
+        fi
+
+        plik="conftest_${CONFTEST_WERSJA}_Linux_x86_64.tar.gz"
+        url="https://github.com/open-policy-agent/conftest/releases/download/v${CONFTEST_WERSJA}/${plik}"
+
+        # `--retry-all-errors` ponawia TAKŻE błędy, których `--retry` samo nie ponawia — w tym `60`
+        # (problem z certyfikatem), czyli dokładnie ten, który zatrzymał zmierzony przebieg i zniknął
+        # przy powtórce cztery minuty później. Bez tej flagi ponawianie nie dotyczyłoby badanej awarii.
+        curl -sSfL --retry 5 --retry-all-errors --retry-delay 3 --connect-timeout 15 --max-time 180 \
+          -o /tmp/conftest.tar.gz "$url" \
+          || nie_wykonaly_sie "curl $url (po 5 probach)"
+
+        # SUMA KONTROLNA — dotąd nie było ŻADNEJ. To jest binarny plik, który orzeka o wniosku
+        # zmieniającym perimetr całej organizacji; „pobrało się" nie jest tym samym, co „pobrało się TO".
+        # Suma jest wpisana w tej akcji, a nie brana z `checksums.txt` obok pliku: plik z sumami leci
+        # z tego samego miejsca i tym samym kanałem, więc potwierdzałby sam siebie.
+        echo "${CONFTEST_SHA256}  /tmp/conftest.tar.gz" > /tmp/conftest.sha256
+        sha256sum -c /tmp/conftest.sha256 \
+          || nie_wykonaly_sie "suma kontrolna conftest ${CONFTEST_WERSJA} sie nie zgadza"
+
+        tar -xzf /tmp/conftest.tar.gz -C /tmp conftest \
+          || nie_wykonaly_sie "rozpakowanie conftest ${CONFTEST_WERSJA}"
+        sudo mv /tmp/conftest /usr/local/bin/ \
+          || nie_wykonaly_sie "instalacja conftest w /usr/local/bin"
+
+        # ZNACZNIK „NARZĘDZIA SĄ" — na nim stoi rozróżnienie werdyktu u wywołującego. Plik, a nie output
+        # kroku: output akcji złożonej nie przechodzi przez granicę kolejnej akcji złożonej, a znacznik
+        # ma być czytelny także dla kroku `if: always()` w innym pliku.
+        : > "${RUNNER_TEMP}/vpcsc-narzedzia-ok"
+        conftest --version
