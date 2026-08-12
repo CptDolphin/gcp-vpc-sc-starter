@@ -1761,6 +1761,43 @@ def test_alerty() -> None:
           pw.procenty_budzetu({"spec": zywa, "status": {}}, 900) == {"spec": 1.0, "status": 0.0},
           str(pw.procenty_budzetu({"spec": zywa, "status": {}}, 900)))
 
+    # 8c. ROZJAZD GRANICY Z DEKLARACJA MA DWIE PRZYCZYNY I DWIE PROCEDURY — jedno zdanie dla obu wysyla
+    # dyzurnego pod alert, ktory przy zalegajacym apply MILCZY Z DEFINICJI (`dryf_z_planu` zwraca wtedy 0
+    # celowo, a alert `apply` ma prog godzinny). Zmierzone na zywym wdrozeniu: przebiegi 31565377821
+    # i 31565606010 z 2026-08-12 meldowaly „48 vs 53 — patrz alert o dryfie" przy `drift_resources = 0`.
+    check("liczby rowne => ZADNEJ adnotacji (kontrola nie szumi, gdy jest cicho)",
+          pw.komunikat_rozjazdu("spec", 53, 53, False, "ostatni udany apply stoi na HEAD") is None)
+
+    zalega = pw.komunikat_rozjazdu("spec", 48, 53, True, "zmiana z aaaaaaaa..bbbbbbbb czeka na apply")
+    nie_zalega = pw.komunikat_rozjazdu("spec", 48, 53, False, "ostatni udany apply stoi na HEAD")
+    # ROZROZNIENIE NIESIE TRESC, NIE POZIOM ADNOTACJI — i to jest asercja na decyzje, nie na styl.
+    # `::error::` odcinalby sie na liscie przebiegow ladniej, ale gdyby (niezmierzone!) czerwienil joba,
+    # `publish` nie ruszylby przez `needs` i obserwator zamilklby dokladnie w stanie, w ktorym ma krzyczec.
+    # Stad prefiks w tresci i JEDEN poziom w `zmierz`.
+    check("producent zglasza rozjazd wylacznie jako ::warning:: (job nie moze czerwieniec)",
+          "::error::" not in watch_py.split("def zmierz(")[1].split("def opublikuj(")[0],
+          "w `zmierz` pojawil sie ::error:: — patrz docstring komunikat_rozjazdu")
+    check("rozjazd przy ZALEGAJACYM apply jest nazwany OCZEKIWANYM",
+          zalega.startswith("budzet spec: ROZJAZD OCZEKIWANY"), zalega)
+    check("rozjazd przy NIEZALEGAJACYM apply jest nazwany NIEOCZEKIWANYM",
+          nie_zalega.startswith("budzet spec: ROZJAZD NIEOCZEKIWANY"), nie_zalega)
+    # ANTY-TAUTOLOGIA: sam rozny PREFIKS przeszedlby takze wtedy, gdyby reszta obu tresci byla identyczna —
+    # a dyzurny dziala wedlug tego, co jest dalej. Wariant „zalega" NIE MOZE odsylac do alertu o dryfie.
+    check("wariant „apply zalega” NIE odsyla do alertu o dryfie, tylko do historii przebiegow apply",
+          "patrz alert o dryfie" not in zalega and "HISTORIE PRZEBIEGOW APPLY" in zalega, zalega)
+    check("wariant „apply nie zalega” odsyla do alertu o dryfie ORAZ nazywa druga przyczyne (model)",
+          "alert o dryfie" in nie_zalega and "attribute_budget.py" in nie_zalega, nie_zalega)
+    check("obie tresci niosa OBIE liczby i kierunek roznicy",
+          all(x in zalega for x in ("48", "53", "-5")) and
+          all(x in nie_zalega for x in ("48", "53", "-5")),
+          f"{zalega} || {nie_zalega}")
+    # Kotwica z komunikatu MUSI istniec — odsylacz do nieistniejacej sekcji to pol procedury. Ta sama
+    # konwencja jawnych `<a id="...">`, co przy `runbook_url` alertow (wyzej): slug generowany z polskiego
+    # naglowka zalezy od renderera, wiec kotwica jest zapisana wprost, a nie zgadywana.
+    kotwice_runbook = set(re.findall(r'<a id="([a-z0-9-]+)"></a>', (ROOT / "docs/7-alerty.md").read_text()))
+    check("kotwica z komunikatu rozjazdu istnieje w docs/7-alerty.md",
+          "rozjazd-granicy-z-deklaracja" in kotwice_runbook, str(sorted(kotwice_runbook)))
+
     # 9. PRODUCENT MUSI PATRZEĆ NA TE SAME KATALOGI, CO WYZWALACZ `apply.yml`. Rozjazd znaczy: zmiana
     # w katalogu, który uruchamia apply, nie jest liczona jako zaległa (albo odwrotnie — wieczna zaległość
     # od pliku, którego apply nigdy nie zastosuje).
