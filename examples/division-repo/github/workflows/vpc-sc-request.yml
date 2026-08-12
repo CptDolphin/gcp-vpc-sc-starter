@@ -122,7 +122,14 @@ jobs:
       # `@<SHA_WYDANIA>`, nigdy `@main`: ruchomy tag to mutowalna referencja — kto kontroluje tag,
       # kontroluje kod uruchamiany z waszym tokenem. Ten sam powód, dla którego wszystkie akcje wyżej
       # są przypięte 40-znakowym SHA-em, a wersja stoi w komentarzu obok.
-      - uses: ORG/gcp-vpc-sc/contrib@<SHA_WYDANIA> # np. v1.4.0 — NIE @main
+      #
+      # AKCJA JEST BRANA ZE STARTERA, NIE Z REPO PERIMETRU — i to nie jest wybór estetyczny (DEC-21).
+      # `uses:` rozwiązuje runner na etapie `Set up job`, WASZYM `GITHUB_TOKEN`-em, zanim wykona się
+      # jakikolwiek krok. Token aplikacji powstaje w kroku, więc tutaj nie ma go jeszcze czym podać —
+      # żadne uprawnienie aplikacji tego nie zmieni. Repo perimetru jest prywatne (trzyma konta usług
+      # członków i wasze zakresy IP), więc akcja musi przyjechać skądś publicznego. Zmierzone przy
+      # wskazaniu prywatnego repo: `Unable to resolve action …, repository not found`, zero kroków.
+      - uses: ORG/gcp-vpc-sc-starter/.github/actions/contrib@<SHA_WYDANIA> # NIE @main
         with:
           member-file: vpc-sc/request.yaml
           perimeter-repo: ORG/gcp-vpc-sc

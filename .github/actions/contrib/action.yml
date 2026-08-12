@@ -1,5 +1,16 @@
-# contrib/action.yml
+# .github/actions/contrib/action.yml
 # Composite action used BY A DIVISION'S OWN REPOSITORY to request a perimeter change.
+#
+# WHY THIS FILE LIVES IN THE PUBLIC STARTER AND NOT IN THE PERIMETER REPOSITORY. Everything else a division
+# needs — the gates bundle and the contract — arrives as a RELEASE ASSET, downloaded with the App token in
+# a step. This file is the one artefact fetched a different way: `uses:` is resolved by the runner while
+# PREPARING THE JOB, with the division repository's own `GITHUB_TOKEN`, before any step exists. The App
+# token is created BY a step, so it cannot possibly be used here — no permission on the App changes that.
+# Measured on a private perimeter repository: `##[error]Unable to resolve action, repository not found`,
+# job failed at `Set up job`, zero steps executed. A perimeter repository is private for good reasons
+# (member service accounts, corporate IP ranges), so the action has to be delivered from somewhere public.
+# See DEC-21 in docs/0-decyzje.md — including why widening the perimeter repository's Actions access policy
+# was rejected as the fix.
 #
 # The division's repository never applies anything and needs NO permission in Access Context Manager —
 # and, since the contract moved to a release asset, NO identity in Google Cloud at all. It needs exactly
@@ -34,14 +45,20 @@
 # repository — including every division's service accounts (perimeter/projects.yaml) and your corporate IP ranges
 # (perimeter/access-levels/). Validating one file of your own needs neither.
 #
-# Usage in the division's repository:
+# Usage in the division's repository. The reference is a 40-character SHA of a PUBLIC repository — the
+# starter, or your own public copy of it. Never `@main`: a moving reference is a mutable one, and whoever
+# controls it controls the code that runs with the division's App token.
 #
 #   - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-#   - uses: ORG/gcp-vpc-sc/contrib@main
+#   - uses: ORG/gcp-vpc-sc-starter/.github/actions/contrib@<40-char SHA>
 #     with:
 #       member-file: vpc-sc/prj-example-vertex-prod.yaml
 #       perimeter-repo: ORG/gcp-vpc-sc
 #       app-token: ${{ steps.app.outputs.token }}
+#
+# `perimeter-repo` is an INPUT, not a constant baked into this file — which is exactly what lets one public
+# copy of the action serve every organization that adopts the starter. Nothing here names an organization,
+# a project or a perimeter; everything environment-specific arrives as an input or in the contract.
 
 name: Request VPC-SC perimeter change
 description: Validate a member declaration against the published contract, then ask the perimeter repository to open a PR.

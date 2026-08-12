@@ -41,7 +41,7 @@ i przeczytaj [`docs/1-wdrozenie.md`](docs/1-wdrozenie.md) — kolejność krokó
 | `tools/control_plane_check.py` | konfrontuje **listę** wyżej z tym, gdzie maszyneria leży naprawdę: backend ↔ `contract.state_bucket`, `monitoring.project_id` ↔ lista, stack tożsamości ↔ lista, a przy `--live` — **właściciel bucketa stanu odczytany z API** | bramka wyżej pilnuje listy, więc projekt płaszczyzny sterowania, którego na niej NIE MA, przechodzi jak zwykły wniosek. Deklaracja, której nikt z niczym nie konfrontuje, chroni zbiór wyglądający na pełny — ta sama klasa błędu co bramka czytająca nieistniejący plik |
 | `tools/` | budżet atrybutów · pre-flight · weryfikacja ticketu · raport naruszeń · render członka · **zgodność baseline z żywą listą usług VPC-SC** | każdy zamyka konkretny tryb awarii (opisany w nagłówku pliku) |
 | `.github/workflows/` (13) | intake · external-intake · **intake-rebase** · validate · plan · apply · drift · violations-report · expiry-sweep · break-glass · publish-gates · starter-drift · boundary-probe | apply jest jedynym mutatorem: WIF keyless, environment z polityką gałęzi (i z recenzentami tam, gdzie plan GitHuba je ma), single-flight |
-| `contrib/` + `perimeter/contributors.yaml` | trzeci kanał wejścia: repo zespołu waliduje u siebie i **uruchamia** `external-intake.yml` (`workflow_dispatch`) | zespół dostaje `actions: write` — prawo URUCHOMIENIA workflowa, bez zapisu kodu i bez `servicePerimeters.update` na organizacji (DEC-7) |
+| `.github/actions/contrib/` (tutaj) + `contrib/validate-local.sh` + `perimeter/contributors.yaml` | trzeci kanał wejścia: repo zespołu waliduje u siebie i **uruchamia** `external-intake.yml` (`workflow_dispatch`) | zespół dostaje `actions: write` — prawo URUCHOMIENIA workflowa, bez zapisu kodu i bez `servicePerimeters.update` na organizacji (DEC-7) |
 | `terraform/contract.tf` + `publish-gates.yml` | publikuje wąski JSON (~4 KB) **w dwóch miejscach z jednego kroku apply** (bucket + asset release'u) i paczkę bramek | submodule oddawał `members/` wszystkich dywizji i zakresy IP, żeby zwalidować jeden plik; sam bucket kosztował dywizję tożsamość w GCP i grant IAM po to, by przeczytać 4 KB (DEC-8) |
 | `.tflint.hcl` + job `tflint` | statyczna analiza HCL: martwe zmienne, brak pinów providerów, literówki w atrybutach Google | `validate` przechodzi na konfiguracji z martwym knobem i niepinowanym providerem — jedno i drugie boli na obiekcie org-plane |
 | `tests/` + `docs/5-servicenow-intake.md` | fixture'y kanału ServiceNow (3 z 5 negatywne) + specyfikacja formularza i mapowania pól | kanał wejścia musi dać się przetestować **bez** działającej instancji ServiceNow — inaczej pierwszy test odbywa się na produkcji |
@@ -74,8 +74,10 @@ i przeczytaj [`docs/1-wdrozenie.md`](docs/1-wdrozenie.md) — kolejność krokó
 - [`docs/6-uklad-repozytoriow.md`](docs/6-uklad-repozytoriow.md) — **plik na projekt czy jeden `projects.yml`**:
   co gdzie ląduje przy 100–200 projektach, diagram struktury folderów i pomiar konfliktów (10 równoległych
   PR-ów: 10/10 kontra 1/10)
-- [`contrib/README.md`](template/contrib/README.md.example) (po rozpakowaniu: `contrib/README.md`) — instrukcja
-  dla **innych repozytoriów**: co dostają w kontrakcie, jak walidują u siebie, czego nie mogą
+- [`.github/actions/contrib/README.md`](.github/actions/contrib/README.md) — instrukcja dla **innych
+  repozytoriów**: co dostają w kontrakcie, jak walidują u siebie, czego nie mogą. Akcja mieszka TUTAJ,
+  a nie w repozytorium perimetru: `uses:` rozwiązuje się tokenem repo dywizji, zanim wykona się
+  jakikolwiek krok, więc źródło musi być publiczne (DEC-21)
 
 ## Przykład drugiej strony granicy
 
