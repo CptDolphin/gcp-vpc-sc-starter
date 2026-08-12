@@ -3349,6 +3349,29 @@ def test_kompletnosc_decyzji() -> None:
         check("ANTY-TAUTOLOGIA: po przywroceniu naglowka ta sama komenda PRZECHODZI",
               uruchom().returncode == 0)
 
+    # --- 2b. TEN SAM NUMER W DWOCH SEKCJACH -------------------------------------------------------
+    # Odtwarzamy realny tryb awarii, a nie wymyslony: sekcja doklejona DRUGI RAZ, dokladnie taka sama.
+    # Tak konczy sie (a) konflikt numeru rozwiazany przez „zostawmy oba" i (b) synchronizacja liczona od
+    # ZAPAMIETANEJ bazy — trojstronny merge nie wie, ze „ours" dostalo te sama zmiane inna droga, wiec
+    # wciaga ja ponownie przy ZERO konfliktow. Zmierzone w jeden dzien: CZTERY przenumerowania DEC
+    # (19, 24, 27, 28). Przed dolozeniem `powtorzone()` ten przypadek przechodzil na ZIELONO — mapa
+    # numerow zwijala powtorzenie do jednego klucza, wiec ani cytowania, ani zakres, ani LICZNIK sekcji
+    # niczego nie zauwazaly.
+    sekcje = re.findall(r"^## DEC-[0-9]+ .*?(?=^## DEC-[0-9]+ |\Z)", oryginal, re.M | re.S)
+    check("premisa: rejestr ma z czego wziac sekcje do powielenia", len(sekcje) >= 2)
+    if sekcje:
+        powielona = sekcje[-1]
+        numer_powielony = re.match(r"^## (DEC-[0-9]+)", powielona).group(1)
+        decyzje.write_text(oryginal + "\n" + powielona)
+        p = uruchom()
+        check(f"{numer_powielony} w DWOCH sekcjach jest ODRZUCANY (sync od nieaktualnej bazy)",
+              p.returncode != 0 and numer_powielony in p.stdout, p.stdout + p.stderr)
+        # Komunikat ma prowadzic do naprawy: bez numerow linii autor nie wie, ktore powtorzenie usunac.
+        check("komunikat wymienia LINIE obu naglowkow", "linie:" in p.stdout, p.stdout)
+        decyzje.write_text(oryginal)
+        check("ANTY-TAUTOLOGIA: po usunieciu powtorzenia ta sama komenda PRZECHODZI",
+              uruchom().returncode == 0)
+
     # --- 3. `--wzgledem`: decyzja startera, ktorej NIKT nie cytuje ---------------------------------
     # To jest druga polowa i jedyna, ktora widzi ten przypadek: sprawdzenie wewnetrzne przepuszcza
     # decyzje bez ani jednego odsylacza, bo nie ma czego rozwiazac.

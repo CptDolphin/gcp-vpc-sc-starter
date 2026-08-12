@@ -39,6 +39,12 @@ H1 — stary i nowy — przy obu bramkach na zielono. Sprawdzamy więc trzy rzec
   * **licznik w preambule** rejestru („N rozstrzygnięć", też słownie) — z liczbą sekcji;
   * **rejestr ma dokładnie JEDEN nagłówek H1** — dwa znaczą rozwiązany na oślep konflikt merge'a.
 
+CZWARTE SPRAWDZENIE (też domyślne): CZY KAŻDY NUMER WYSTĘPUJE DOKŁADNIE RAZ. Trzy sprawdzenia wyżej pytają
+o ISTNIENIE sekcji, a mapa numerów zwija powtórzenia do jednego klucza — więc drugi `## DEC-27` był dla nich
+wszystkich niewidzialny, łącznie z licznikiem. Numery przydziela KOLEJNOŚĆ MERGE'A, a nadaje je odczyt
+„ostatnia sekcja + 1"; gdy dwie gałęzie czytają ten sam stan, obie biorą tę samą liczbę. Zmierzone w jeden
+dzień: CZTERY przenumerowania DEC (19, 24, 27, 28), każde ręczne i każde po scaleniu.
+
 Najtańszą naprawą każdego z nich jest USUNIĘCIE liczby z prozy: zbiór sekcji jest źródłem prawdy, a zdanie
 o jego rozmiarze utrzymuje wyłącznie czyjaś uwaga. Bramka nie zakazuje jej wpisać — pilnuje, żeby wpisana
 przestała być zielona w dniu, w którym przestaje być prawdziwa (DEC-20).
@@ -113,13 +119,42 @@ POMIJANE_ROZSZERZENIA = {".png", ".jpg", ".jpeg", ".gif", ".pdf", ".zip", ".tar"
 
 
 def zdefiniowane(tekst: str) -> dict[str, int]:
-    """Numery decyzji mające w tym tekście własną sekcję -> numer linii nagłówka."""
+    """Numery decyzji mające w tym tekście własną sekcję -> numer linii PIERWSZEGO nagłówka.
+
+    Słownik zwija powtórzenia z premedytacją — pytanie „czy sekcja istnieje" ma jedną odpowiedź. Za to,
+    czy ten sam numer nie występuje DWA RAZY, odpowiada `powtorzone()` niżej; bez niej drugi `## DEC-27`
+    byłby niewidzialny dla wszystkich trzech sprawdzeń tego pliku, łącznie z licznikiem sekcji.
+    """
     out = {}
     for i, linia in enumerate(tekst.splitlines(), 1):
         m = NAGLOWEK.match(linia)
         if m:
             out.setdefault(m.group(1), i)
     return out
+
+
+def powtorzone(tekst: str) -> dict[str, list[int]]:
+    """Numery decyzji mające WIĘCEJ NIŻ JEDNĄ sekcję -> numery linii wszystkich nagłówków.
+
+    DLACZEGO OSOBNO. Ten rejestr rośnie z gałęzi równoległych, a numer nadawany jest przez odczyt
+    ostatniej sekcji i dodanie jedynki — czyli przez odczyt stanu, który druga gałąź właśnie zmienia.
+    Zmierzone w jeden dzień (2026-08-12): CZTERY przenumerowania DEC (19, 24, 27, 28), za każdym razem
+    po scaleniu i zawsze ręcznie. Dwa tryby awarii kończą się tym samym obrazem w pliku:
+
+      * scalenie „zostawmy oba" — rozwiązanie konfliktu, w którym obie sekcje zostają na jednym numerze;
+      * synchronizacja liczona od ZAPAMIĘTANEJ bazy — trójstronny merge nie wie, że „ours" dostało tę
+        samą zmianę inną drogą, i wciąga cudzą sekcję DRUGI RAZ, przy ZERO konfliktów.
+
+    Drugiego trybu nie widzi tu nic innego: sekcje są na miejscu, cytowania się zgadzają, a licznik
+    liczy klucze słownika, więc dwie sekcje na jednym numerze liczą się jako jedna. Sprawdzenie
+    nagłówków H1 łapie tylko szczególny przypadek, w którym powtórzył się nagłówek NAJWYŻSZEGO poziomu.
+    """
+    out: dict[str, list[int]] = {}
+    for i, linia in enumerate(tekst.splitlines(), 1):
+        m = NAGLOWEK.match(linia)
+        if m:
+            out.setdefault(m.group(1), []).append(i)
+    return {numer: linie for numer, linie in out.items() if len(linie) > 1}
 
 
 def preambula(tekst: str) -> list[tuple[int, str]]:
@@ -258,6 +293,20 @@ def main() -> int:
             f"{', '.join(map(str, h1)) or 'brak'}), a ma być JEDEN. Tak wygląda konflikt merge'a "
             f"rozwiązany przez zostawienie obu wersji nagłówka — rejestr ma wtedy dwa różne zdania "
             f"o sobie samym i oba wyglądają na obowiązujące")
+
+    # 2d. Każdy numer decyzji występuje DOKŁADNIE RAZ. Sprawdzenia 1-3 pytają, czy sekcja ISTNIEJE,
+    #     a `zdefiniowane()` zwija powtórzenia do jednego klucza — więc drugi `## DEC-27` nie zapala tu
+    #     niczego: cytowania się zgadzają, zakres się zgadza, a licznik liczy klucze, nie nagłówki.
+    #     Tak wygląda konflikt numeru rozwiązany przez „zostawmy oba" ORAZ synchronizacja liczona od
+    #     zapamiętanej bazy (trójstronny merge wciąga cudzą sekcję drugi raz przy ZERO konfliktów).
+    #     Numery decyzji przydziela KOLEJNOŚĆ MERGE'A — dwie sekcje na jednym numerze znaczą, że dwie
+    #     gałęzie policzyły „ostatnia + 1" z tego samego stanu.
+    for numer, linie in sorted(powtorzone(tresc).items(), key=lambda kv: int(kv[0].split("-")[1])):
+        problemy.append(
+            f"{DECYZJE}: {numer} ma {len(linie)} sekcje (linie: {', '.join(map(str, linie))}), a ma mieć "
+            f"JEDNĄ. Albo konflikt numeru rozwiązano przez zostawienie obu wersji, albo synchronizacja "
+            f"liczona od nieaktualnej bazy wciągnęła cudzą sekcję drugi raz — w obu przypadkach jedna "
+            f"z tych decyzji nie ma własnego numeru i nie da się jej zacytować")
 
     # 3. Pokrycie zbioru startera — tylko gdy mamy z czym porównać.
     if args.wzgledem:
