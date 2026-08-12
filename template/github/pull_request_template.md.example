@@ -34,5 +34,10 @@ ServiceNow ticket: <!-- RITM… — must match the ticket verified by the intake
 - [ ] the project belongs to the division that requested it
 - [ ] profiles match the described use case (no profile "just in case")
 - [ ] no raw rule that an existing profile already covers
-- [ ] pre-flight green (Private Google Access, DNS on the restricted VIP)
+<!-- Pre-flight is a MACHINE gate: the `pre-flight` job in `plan` runs it for every member ENTERING the
+     perimeter and blocks `terraform plan` when it fails (DEC-24). Read the verdict in the job summary —
+     do not tick this from memory. What the gate does NOT cover, and what you therefore check by hand:
+     `tools/preflight_check.sh --identity …` for the service accounts named in the profiles. -->
+- [ ] the `pre-flight` job is green (Private Google Access, DNS on the restricted VIP)
+- [ ] identities in the profiles exist — the gate does not check this (see `docs/5-servicenow-intake.md`)
 - [ ] for promotions: the observation window really is clean, and long enough to have seen rare jobs

@@ -90,9 +90,12 @@ W GitHubie: utwórz environment **`perimeter-apply`** z *required reviewers* (si
 gałęzi `main`: wymagane statusy `validate` i `plan`, wymagane review CODEOWNERS, zakaz force-push.
 Wszystko to robi `tools/bootstrap_github.sh` — i, co ważniejsze, **czyta wynik z powrotem**.
 
-> **Ochrona gałęzi domyślnej jest PREREKWIZYTEM, nie ozdobą.** Wszystkie bramki treści — schema, OPA,
-> budżet atrybutów, pre-flight — wiszą na zdarzeniu `pull_request`. Push prosto na gałąź domyślną nie
-> uruchamia **ani jednej** z nich, a apply rusza właśnie z tej gałęzi. Bez ochrony każde poświadczenie
+> **Ochrona gałęzi domyślnej jest PREREKWIZYTEM, nie ozdobą — ale nie tym, którym była kiedyś.** Bramki
+> (schema, OPA, budżet atrybutów, bramki żywe, pre-flight) biegną dziś na OBU torach: na pull requeście
+> i u mutatora (DEC-16, DEC-24), więc push prosto na gałąź domyślną **przechodzi przez nie tak samo**.
+> To była świadoma zmiana, bo ochrona gałęzi na repozytorium prywatnym bywa funkcją płatną — a bramka,
+> której istnienie zależy od planu cenowego, nie jest bramką. Czego push prosto na gałąź nie przechodzi,
+> to **review**: CODEOWNERS, druga para oczu i opis zmiany. Bez ochrony każde poświadczenie
 > z prawem zapisu do tego repozytorium (CI, integracja ticketowa, token kanału wejściowego) jest ścieżką
 > do zmiany granicy organizacji bez żadnej bramki. Dlatego kanał dywizji jedzie `workflow_dispatch`-em
 > na `actions: write` — token, który nie ma prawa zapisu, nie może tej ścieżki użyć — a `bootstrap_github.sh`

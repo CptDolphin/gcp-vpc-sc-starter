@@ -140,11 +140,13 @@ bramek, bo obie są **assetami release'u**.
   w ogóle — PR-a otwiera po swojej stronie `external-intake.yml`, własnym `GITHUB_TOKEN`-em repozytorium
   perimetru.
 - **`repository_dispatch` był tu wcześniej i został wycofany**, bo wymaga `contents: write`, czyli prawa
-  zapisu do KODU perimetru. To „więcej niż otworzyć PR" — i składa się z drugim faktem: bramki treści
-  (schema, OPA, budżet, pre-flight) wiszą na zdarzeniu `pull_request`, a apply rusza z **pushu na gałąź
-  domyślną**. Poświadczenie z prawem zapisu jest więc ścieżką do zmiany granicy z pominięciem wszystkich
-  bramek wszędzie tam, gdzie gałąź domyślna nie jest chroniona (ochrona gałęzi to na części planów GitHuba
-  funkcja płatna dla repozytoriów prywatnych — patrz „Prerekwizyt" niżej).
+  zapisu do KODU perimetru. To „więcej niż otworzyć PR" — i składa się z drugim faktem: apply rusza
+  z **pushu na gałąź domyślną**, a ochrona tej gałęzi to na części planów GitHuba funkcja płatna dla
+  repozytoriów prywatnych (patrz „Prerekwizyt" niżej). Poświadczenie z prawem zapisu omija więc **review**:
+  CODEOWNERS i drugą parę oczu. Samych bramek nie omija — schema, OPA, budżet, bramki żywe i pre-flight
+  biegną także na ścieżce apply (DEC-16, DEC-24) i to była świadoma odpowiedź na dokładnie ten układ.
+  Nadmiarowe uprawnienie zostaje jednak nadmiarowe: zmiana granicy, na którą nikt nie spojrzał, jest
+  wystarczającym powodem, żeby kanał go nie dostawał.
 - **Czego `actions: write` NIE odbiera i o czym nie milczymy:** pozwala też ponawiać i anulować przebiegi
   oraz **kasować logi przebiegów** w repo perimetru. Węższe niż zapis kodu, ale nie zerowe. Ślad, który
   ma znaczenie, siedzi więc w gicie (PR i commit), a nie wyłącznie w historii przebiegów.
@@ -196,7 +198,9 @@ ta zmiana: dywizja nie musi mieć konta w Google Cloud, żeby zwalidować swój 
 Sprawdza: strukturę pliku, istnienie profilu, komplet parametrów, istnienie access levels, twoje uprawnienie
 do projektu, **czy projekt nie jest już członkiem perimetru** i reguły onboardingu. **Nie sprawdza:**
 pre-flightu sieciowego (Private Google Access, strefa DNS na restricted VIP) ani kolizji z **inną**
-konfiguracją egzekwowaną (czyli innym perimetrem — to odczyt z żywego GCP) — jedno i drugie weryfikuje repo perimetru.
+konfiguracją egzekwowaną (czyli innym perimetrem — to odczyt z żywego GCP). Jedno i drugie robi po stronie
+perimetru **bramka `pre-flight`**, na pull requeście i przy apply — więc dowiesz się o tym z przebiegu,
+a nie po promocji. Naprawa należy do właściciela projektu: repozytorium perimetru cudzej sieci nie tworzy.
 
 ## Najczęstsze odrzucenia
 

@@ -188,12 +188,14 @@ fi
 
 # 4. Ochrona main. `validate` i `plan` jako wymagane statusy — bez nich merge nie wie, czy zmiana jest legalna.
 #
-# TO JEST PREREKWIZYT, NIE OZDOBA — i to jest jedyna rzecz w tym skrypcie, która zmienia się od kroku 3
-# stopniem, nie rodzajem. Wszystkie bramki treści (schema, OPA, budżet, pre-flight) wiszą na zdarzeniu
-# `pull_request`. Push prosto na gałąź domyślną nie uruchamia ANI JEDNEJ z nich, a apply rusza właśnie
-# z tej gałęzi. Ochrona gałęzi jest więc tym, co w ogóle sprawia, że „bramka" znaczy bramkę: bez niej
-# każde poświadczenie z prawem zapisu do tego repozytorium — CI, integracja ticketowa, token dywizji —
-# jest ścieżką do zmiany granicy organizacji z pominięciem wszystkiego.
+# TO JEST PREREKWIZYT, NIE OZDOBA — ale nie z tego powodu, z którego był nim kiedyś, i ta różnica jest
+# warta przeczytania. Bramki (schema, OPA, budżet, bramki żywe, pre-flight) biegną dziś na OBU torach:
+# na pull requeście i u mutatora (DEC-16, DEC-24), więc push prosto na gałąź domyślną przechodzi przez
+# nie TAK SAMO. Zrobiono tak świadomie, bo ochrona gałęzi na repozytorium prywatnym bywa funkcją płatną,
+# a bramka, której istnienie zależy od planu cenowego, nie jest bramką. Ochrona gałęzi daje więc to,
+# czego bramka dać nie może: REVIEW — CODEOWNERS, drugą parę oczu i opis zmiany. Bez niej każde
+# poświadczenie z prawem zapisu do tego repozytorium — CI, integracja ticketowa, token dywizji — zmienia
+# granicę organizacji bez czyjegokolwiek spojrzenia, choćby wszystkie bramki świeciły na zielono.
 #
 # Dlatego kanał dywizji został przestawiony na `workflow_dispatch` (`actions: write`, zero prawa zapisu),
 # a ten skrypt kończy się BŁĘDEM, gdy ochrony nie ma. Ta sama konwencja co przy bramce ludzkiej: brak ma

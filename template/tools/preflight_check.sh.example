@@ -2,6 +2,11 @@
 # Pre-flight: czy projekt członka JEST GOTOWY na wejście do perimetru. Wyłącznie odczyt — ten skrypt
 # niczego nie naprawia (granica własności, DEC-5: naprawia właściciel projektu, nie repo perimetru).
 #
+# KTO TO WOŁA. `tools/preflight_gate.py` — na OBU torach (pull request i mutator), przez akcję złożoną
+# `.github/actions/bramka-preflightu` (DEC-24). Ten skrypt orzeka o JEDNYM projekcie i celowo nie wie,
+# który projekt dziś wchodzi do granicy; wybór kandydatów należy do bramki. Uruchomienie z ręki jest nadal
+# poprawne i jest jedyną drogą do checku 6 (`--identity`) — patrz akapit o uprawnieniach niżej.
+#
 # Każdy check zamyka konkretny tryb awarii:
 #   1. projekt istnieje, jest ACTIVE i numer zgadza się z ID → literówka w numerze dodałaby do perimetru
 #      CUDZY projekt, a projekt w trakcie kasowania (soft-delete, 30 dni) wnosi do niego MARTWY NUMER
@@ -29,10 +34,26 @@
 # `--warn-only`, czyli wyciszenie RÓWNIEŻ tego przypadku, w którym PGA naprawdę brakuje. Check, który
 # woła „wilk", rozbraja sam siebie.
 #
-# Uprawnienia (read-only): cloudasset.viewer, compute.networkViewer, dns.reader, iam.serviceAccountViewer
-# — docs/2-uprawnienia-i-wif.md. Check 1b potrzebuje dodatkowo `billing.resourceAssociations.list`; NIE jest
-# on w tym zestawie ŚWIADOMIE — to uprawnienie z innej domeny administracyjnej (billing), a check jest tylko
-# ostrzeżeniem, więc jego brak degraduje się do „nie zweryfikowano", a nie blokuje pre-flightu.
+# UPRAWNIENIA — WYPISANE PER CHECK, BO ZESTAW NIE JEST JEDNORODNY I TO MA KONSEKWENCJE OPERACYJNE.
+# Tożsamość bramki (konto `plan`, `iam-bootstrap` → `plan_org_roles`) ma `accesscontextmanager.policyReader`,
+# `cloudasset.viewer`, `compute.networkViewer`, `dns.reader` — czyli komplet dla checków 1–4:
+#   1  `resourcemanager.projects.get`             ← policyReader
+#   2  `accesscontextmanager.servicePerimeters.list` ← policyReader
+#   3  `compute.networks.list`, `compute.subnetworks.list` ← compute.networkViewer
+#   4  `dns.managedZones.list`                    ← dns.reader
+# DWA CHECKI DEGRADUJĄ SIĘ ŚWIADOMIE I ŻADEN Z NICH NIE JEST PRZEZ TO CICHY:
+#   1b `billing.resourceAssociations.list` — inna domena administracyjna (billing); check jest tylko
+#      ostrzeżeniem, więc jego brak daje „nie zweryfikowano", a nie fałszywe „nie ma billingu";
+#   5  `aiplatform.endpoints.list` — daje „nie zweryfikowano endpointów Vertex" przy braku roli. Nie
+#      nadajemy `aiplatform.viewer` na organizację pod ostrzeżenie o KOLEJNOŚCI tworzenia zasobów: to
+#      stan naprawialny po fakcie, a rola otwierałaby odczyt wszystkich zasobów Vertex w firmie.
+# CHECK 6 (`--identity`) NIE JEST WYWOŁYWANY PRZEZ BRAMKĘ — i to jest decyzja, nie luka. Wymaga
+# `iam.serviceAccounts.get` (`roles/iam.serviceAccountViewer`), którego wdrożenie NIE nadaje; zmierzone na
+# żywej organizacji. Nadanie go kontu `plan` — impersonowalnemu z KAŻDEGO pull requesta — dałoby prawo
+# enumeracji wszystkich kont serwisowych w organizacji pod check, który zamyka tryb awarii już zamknięty
+# przez ACM: literówkę w adresie ACM odrzuca przy apply komunikatem `invalid or non-existent`, wywracając
+# CAŁĄ zmianę, czyli głośno i na NIETKNIĘTEJ granicy. Zostawiony jako narzędzie recenzenta z ręki (DEC-24).
+# Szczegóły i tabela ról: docs/2-uprawnienia-i-wif.md.
 set -euo pipefail
 
 # DLACZEGO to jest pierwsza linijka kodu, a nie szczegół. gcloud, natrafiając na wyłączone API, proponuje
@@ -47,16 +68,21 @@ PROJECT_NUMBER=""
 VERTEX_REGION="europe-west4"
 STRICT=1
 IDENTITIES=()
+LISTA_PERIMETROW=""
+POLITYKA=""
 
 uzycie() {
   cat >&2 <<'POMOC'
-użycie: preflight_check.sh --project <id> --number <numer> [--identity <spec>]… [--region <region>] [--warn-only]
+użycie: preflight_check.sh --project <id> --number <numer> [--identity <spec>]… [--region <region>]
+                          [--policy <id>] [--lista-perimetrow <plik>] [--warn-only]
 
-  --project   ID projektu kandydata
-  --number    numer projektu — MUSI zgadzać się z ID (check 1)
-  --identity  tożsamość w formacie ACM (`serviceAccount:…`, `user:…`, `group:…`), powtarzalna
-  --region    region, w którym szukamy endpointów Vertex (domyślnie europe-west4)
-  --warn-only kod wyjścia 0 mimo błędów; NIE zmienia werdyktu, tylko go nie egzekwuje
+  --project           ID projektu kandydata
+  --number            numer projektu — MUSI zgadzać się z ID (check 1)
+  --identity          tożsamość w formacie ACM (`serviceAccount:…`, `user:…`, `group:…`), powtarzalna
+  --region            region, w którym szukamy endpointów Vertex (domyślnie europe-west4)
+  --policy            access policy dla checku 2; bez tego gcloud zgaduje ją z organizacji projektu
+  --lista-perimetrow  gotowe wyjście `perimeters list` (check 2 nie pyta wtedy API — patrz check 2)
+  --warn-only         kod wyjścia 0 mimo błędów; NIE zmienia werdyktu, tylko go nie egzekwuje
 POMOC
   exit "${1:-2}"
 }
@@ -75,6 +101,9 @@ while [ $# -gt 0 ]; do
     # przepisywać (przepisywanie to kolejna literówka).
     --identity) wymagaj_wartosci "$1" $(($# - 1)); IDENTITIES+=("$2");  shift 2 ;;
     --region)   wymagaj_wartosci "$1" $(($# - 1)); VERTEX_REGION="$2";  shift 2 ;;
+    --policy)   wymagaj_wartosci "$1" $(($# - 1)); POLITYKA="$2";       shift 2 ;;
+    --lista-perimetrow)
+                wymagaj_wartosci "$1" $(($# - 1)); LISTA_PERIMETROW="$2"; shift 2 ;;
     --warn-only) STRICT=0; shift ;;
     -h|--help)  uzycie 0 ;;
     *) echo "nieznany argument: $1" >&2; uzycie ;;
@@ -214,8 +243,25 @@ fi
 # konfiguracji EGZEKWOWANEJ: check istnieje po to, żeby złapać projekt siedzący w cudzym `status`
 # (twarde ograniczenie ACM, apply pada po review) — i przy każdym realnym rozmiarze perimetru milczał.
 # Test w selfteście używał JEDNEGO zasobu w atrapie, więc zieleniał na jedynym przypadku, który działał.
-g access-context-manager perimeters list \
-  --format='value(name,status.resources.list(separator=";"),spec.resources.list(separator=";"))'
+#
+# `--lista-perimetrow`: TEN SAM ODCZYT, WYKONANY RAZ NA PRZEBIEG ZAMIAST RAZ NA KANDYDATA. Bramka
+# (`preflight_gate.py`) i tak musi przeczytać tę listę, żeby wiedzieć, KTO wchodzi do granicy — więc
+# przy partii wniosków ten check pytałby API o dokładnie to samo jeszcze N razy. Limit tempa ACM
+# (500 odczytów/min) jest najciaśniejszą kwotą w tym stosie, a dzień pierwszy dywizji to właśnie partia.
+# Plik pochodzi z tego samego przebiegu, więc nie jest „danymi z zewnątrz"; uruchomienie z ręki BEZ tej
+# flagi pyta API jak dotąd i to jest domyślna droga operatora.
+if [ -n "$LISTA_PERIMETROW" ]; then
+  if [ -r "$LISTA_PERIMETROW" ]; then
+    GOUT="$(cat "$LISTA_PERIMETROW")"; GRC=0; GERR=""
+  else
+    # Nieczytelny plik to NIE jest pusta lista perimetrów. Gałąź istnieje, bo „nie ma czego czytać"
+    # wpadłoby inaczej w werdykt „brak kolizji" — czyli check odpowiadałby OK na pytanie, którego nie zadał.
+    GOUT=""; GRC=1; GERR="nie moge odczytac pliku listy perimetrow: $LISTA_PERIMETROW"
+  fi
+else
+  g access-context-manager perimeters list ${POLITYKA:+--policy="$POLITYKA"} \
+    --format='value(name,status.resources.list(separator=";"),spec.resources.list(separator=";"))'
+fi
 if [ "$GRC" -ne 0 ]; then
   problem "nie zweryfikowano kolizji perimetrów (odczyt listy nie powiódł się): $GERR"
 else
