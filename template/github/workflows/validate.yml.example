@@ -103,6 +103,63 @@ jobs:
           sys.exit(1 if bledy else 0)
           PY
 
+      # HEARTBEAT DEAD-MAN'S-SWITCHA MA STAĆ W JOBIE, KTÓRY PISZE — I ZA KROKIEM, KTÓRY PISZE.
+      #
+      # Ten guard pilnuje trzech rzeczy, z których każda przy „drobnym uproszczeniu" cicho znosi całą
+      # warstwę zewnętrzną:
+      #   1. sekret `DMS_PING_URL` NIE trafia do joba `measure`. `measure` chodzi na koncie `plan`, które
+      #      może impersonować KAŻDY pull request; URL pingu to poświadczenie pozwalające UCISZYĆ
+      #      dead-man's-switch, więc autor dowolnego PR-a podtrzymywałby heartbeat przy martwej maszynerii.
+      #      To ta sama granica, dla której `watch.yml` ma dwa joby zamiast jednego.
+      #   2. krok heartbeatu stoi ZA publikacją metryk. Przesunięty wyżej meldowałby „runner wstał"
+      #      zamiast „cały łańcuch żyje" — czyli robiłby dokładną odwrotność tego, po co istnieje.
+      #   3. krok ma `if: success()`. Bez tego dopisanie gdziekolwiek wyżej kroku z `continue-on-error`
+      #      przywraca punkt 2 tylnymi drzwiami, i to bez śladu w diffie tego kroku.
+      #
+      # ANTY-TAUTOLOGICZNY Z KONSTRUKCJI: czyta ZPARSOWANY YAML i pyta o pozycję kroków oraz o to, który
+      # job widzi sekret. Nie da się go zdać, dopisując komentarz albo przenosząc kroki „podobnie".
+      - name: guard - heartbeat DMS we właściwym jobie
+        run: |
+          python3 - <<'PY'
+          import sys, yaml
+          w = yaml.safe_load(open(".github/workflows/watch.yml"))["jobs"]
+          bledy = []
+
+          def kroki_z_sekretem(job):
+              return [i for i, k in enumerate(w[job]["steps"])
+                      if "DMS_PING_URL" in yaml.safe_dump(k.get("env", {}))]
+
+          if kroki_z_sekretem("measure"):
+              bledy.append("sekret DMS_PING_URL jest widoczny w jobie `measure` — a ten chodzi na koncie "
+                           "`plan`, impersonowalnym z kazdego pull requesta. Autor dowolnego PR-a moglby "
+                           "podtrzymywac heartbeat przy martwej maszynerii. Heartbeat nalezy do `publish`.")
+
+          hb = kroki_z_sekretem("publish")
+          if len(hb) != 1:
+              bledy.append(f"job `publish` ma {len(hb)} krokow z DMS_PING_URL, oczekiwano dokladnie 1 — "
+                           "warstwa zewnetrzna albo znikla, albo zostala zduplikowana")
+          else:
+              kroki = w["publish"]["steps"]
+              i_hb = hb[0]
+              i_pub = next((i for i, k in enumerate(kroki)
+                            if "perimeter_watch.py publish" in (k.get("run") or "")), None)
+              if i_pub is None:
+                  bledy.append("nie znalazlem w `publish` kroku publikujacego metryki — guard nie ma "
+                               "wzgledem czego sprawdzic kolejnosci; popraw guard albo workflow")
+              elif i_hb < i_pub:
+                  bledy.append("heartbeat stoi PRZED publikacja metryk. Wtedy jego wyslanie dowodzi "
+                               "tylko tego, ze runner wstal — a ma dowodzic, ze przeszedl caly lancuch "
+                               "az do `timeSeries.create` w projekcie monitoringu.")
+              if str(kroki[i_hb].get("if", "")).strip() != "success()":
+                  bledy.append("krok heartbeatu nie ma `if: success()`. Bez tego krok z "
+                               "`continue-on-error` dopisany wyzej sprawia, ze ping idzie mimo porazki "
+                               "publikacji — czyli meldunek o zdrowiu przy zepsutej maszynerii.")
+
+          for b in bledy:
+              print(f"::error::{b}")
+          sys.exit(1 if bledy else 0)
+          PY
+
       # LISTA `control_plane_projects` MUSI OPISYWAĆ MIEJSCE, W KTÓRYM MASZYNERIA PERIMETRU NAPRAWDĘ LEŻY.
       # Bramka OPA odrzuca członka wskazującego projekt Z TEJ LISTY — więc projekt płaszczyzny sterowania,
       # którego na niej nie ma, przechodzi jak zwykły wniosek. Ten krok pilnuje spójności deklaracji między
