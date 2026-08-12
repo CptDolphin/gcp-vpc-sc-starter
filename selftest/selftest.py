@@ -2765,7 +2765,14 @@ awaria() { echo "$1" >&2; exit 1; }
 [ "${CLOUDSDK_CORE_DISABLE_PROMPTS:-}" = "1" ] || awaria "ATRAPA: pre-flight nie wylaczyl pytan gcloud"
 
 case "$*" in
-  "projects describe "*) echo "123456789012" ;;
+  # DWA POLA, nie jedno: `projects describe` odpowiada numerem ORAZ stanem cyklu zycia, a to drugie jest
+  # jedynym sygnalem odrozniajacym projekt zywy od skasowanego (soft-delete trzyma projekt odczytywalnym
+  # przez 30 dni). Atrapa oddajaca sam numer nie umialaby wyrazic tej roznicy, wiec test na nia nie mialby
+  # jak powstac. STUB_PROJECT_FAIL udaje odmowe/nieistnienie — na to Resource Manager odpowiada TAK SAMO.
+  "projects describe "*)
+    [ "${STUB_PROJECT_FAIL:-}" = "1" ] && awaria \\
+      "ERROR: (gcloud.projects.describe) User [x@example.com] does not have permission to access projects instance [prj-example:get] (or it may not exist)."
+    printf '%s\\t%s\\n' "123456789012" "${STUB_LIFECYCLE-ACTIVE}" ;;
   *"service-accounts describe "*)
     for arg in "$@"; do case " $STUB_SA_OK " in *" $arg "*) exit 0 ;; esac; done
     exit 1 ;;
@@ -2801,6 +2808,51 @@ def test_preflight() -> None:
 
     p = sh(baza, cwd=ROOT, env=env)
     check("preflight: zdrowy projekt bez tozsamosci przechodzi", p.returncode == 0, p.stdout + p.stderr)
+
+    # ---------------------------------------------- projekt SKASOWANY (soft-delete) NIE jest kandydatem
+    # DLACZEGO TO JEST OSOBNA KLASA, A NIE ODMIANA „projektu nie ma". Kasowanie projektu w GCP to
+    # soft-delete z oknem 30 dni: przez te 30 dni `projects describe` odpowiada NORMALNIE, zwraca numer
+    # i konczy sie kodem 0 — rozni sie WYLACZNIE polem `lifecycleState`. Check pytajacy o sam numer
+    # oglaszal wiec „projekt istnieje, numer zgodny" o projekcie w drodze do kasowania. Cicho pozytywny
+    # werdykt pre-flightu jest gorszy od jego braku, bo wpis wchodzi do perimetru z blogoslawienstwem
+    # kontroli, a numer zostaje w konfiguracji jako martwy, gdy projekt zniknie.
+    p = sh(baza, cwd=ROOT, env=dict(env, STUB_LIFECYCLE="DELETE_REQUESTED"))
+    check("preflight: projekt DELETE_REQUESTED wywraca pre-flight (soft-delete to nie 'istnieje')",
+          p.returncode != 0 and "DELETE_REQUESTED" in p.stdout and "SKASOWANY" in p.stdout,
+          p.stdout + p.stderr)
+
+    # ANTY-TAUTOLOGIA — bez tego asercja wyzej nie dowodzi niczego o TYM checku.
+    # Rozbrajamy DOKLADNIE jedna linie werdyktu (podmiana calego lancucha, nie wyrazenie regularne:
+    # gdy linia sie zmieni, podmiana nie zajdzie i test padnie glosno zamiast po cichu zzielieniec)
+    # i puszczamy TEN SAM przypadek. Rozbrojony skrypt ma przejsc — czyli czerwien wyzej pochodzi
+    # z tej linii, a nie z jakiegokolwiek innego checku, ktory przy okazji zapalil sie na atrapie.
+    zrodlo = (ROOT / "tools/preflight_check.sh").read_text()
+    linia_werdyktu = [w for w in zrodlo.splitlines() if 'problem "projekt $PROJECT_ID jest w stanie' in w]
+    check("preflight: linia werdyktu o stanie projektu istnieje (kotwica anty-tautologii)",
+          len(linia_werdyktu) == 1, str(linia_werdyktu))
+    if len(linia_werdyktu) == 1:
+        rozbrojony = ROOT / "tools/preflight_rozbrojony.sh"
+        rozbrojony.write_text(zrodlo.replace(linia_werdyktu[0], '    ok "ROZBROJONE — bez sprawdzenia stanu"'))
+        p = sh(["bash", "tools/preflight_rozbrojony.sh", "--project", "prj-example", "--number", "123456789012"],
+               cwd=ROOT, env=dict(env, STUB_LIFECYCLE="DELETE_REQUESTED"))
+        check("preflight: po ROZBROJENIU ten sam skasowany projekt PRZECHODZI (asercja nie jest pusta)",
+              p.returncode == 0 and "ROZBROJONE" in p.stdout, p.stdout + p.stderr)
+        rozbrojony.unlink()
+
+    # Pole nieodczytane NIE JEST stanem ACTIVE. Bez tej galezi zmiana w `--format` albo w API cofnelaby
+    # caly check do stanu sprzed poprawki — i zrobilaby to zielonym przebiegiem.
+    p = sh(baza, cwd=ROOT, env=dict(env, STUB_LIFECYCLE=""))
+    check("preflight: PUSTY lifecycleState = BLAD 'nie odczytalem', nie ciche OK",
+          p.returncode != 0 and "nie odczytałem lifecycleState" in p.stdout, p.stdout + p.stderr)
+
+    # Nieudany odczyt projektu ma NIE wybierac jednej z dwoch mozliwosci i podawac jej jako faktu.
+    # Resource Manager odpowiada tym samym komunikatem na „nie ma projektu" i „nie masz dostepu"
+    # (`... does not have permission ... (or it may not exist)`), wiec pre-flight ma zacytowac odpowiedz,
+    # a nie ja zinterpretowac — te dwie sytuacje naprawiaja dwie rozne osoby.
+    p = sh(baza, cwd=ROOT, env=dict(env, STUB_PROJECT_FAIL="1"))
+    check("preflight: nieudany odczyt projektu cytuje odpowiedz API i nazywa obie mozliwosci",
+          p.returncode != 0 and "NIE ISTNIEJE albo brak dostępu" in p.stdout
+          and "or it may not exist" in p.stdout, p.stdout + p.stderr)
 
     p = sh(baza + ["--identity", "serviceAccount:sa-example@prj-example.iam.gserviceaccount.com"], cwd=ROOT, env=env)
     check("preflight: ISTNIEJACE konto serwisowe przechodzi", p.returncode == 0, p.stdout + p.stderr)
@@ -2867,6 +2919,33 @@ def test_preflight() -> None:
     check("preflight: projekt w DRY-RUN = UWAGA 'etap onboardingu', nie blokada",
           p.returncode == 0 and "DRY-RUN" in p.stdout and "per-nasz" in p.stdout
           and "EGZEKWOWANEJ" not in p.stdout, p.stdout + p.stderr)
+
+    # WIELE ZASOBOW W KONFIGURACJI — przypadek, ktorego atrapa wczesniej nie umiala wyrazic, bo kazdy
+    # przypadek testowy mial DOKLADNIE JEDEN zasob. Na jednym zasobie porownanie trafialo niezaleznie od
+    # tego, czym pole jest rozcinane, wiec test zielenial na jedynym ukladzie, ktory dzialal. ZMIERZONE na
+    # zywej organizacji (perimetr z trzema czlonkami): projekt BEDACY w konfiguracji dry-run dostawal
+    # „brak kolizji — projektu nie ma w zadnej konfiguracji", bo `list()` skleja PRZECINKIEM, a awk
+    # rozcinal po SREDNIKU. Grozniejsza polowa dotyczy konfiguracji EGZEKWOWANEJ: to jest caly powod
+    # istnienia tego checku, a przy kazdym realnym rozmiarze perimetru byl cichym no-opem.
+    wiele = "per-inny\tprojects/111111111111;projects/123456789012;projects/222222222222\t"
+    p = sh(baza, cwd=ROOT, env=dict(env, STUB_PERIMETERS=wiele))
+    check("preflight: kolizja wykryta takze gdy konfiguracja ma WIELE zasobow (nie tylko jeden)",
+          p.returncode != 0 and "EGZEKWOWANEJ" in p.stdout and "per-inny" in p.stdout,
+          p.stdout + p.stderr)
+
+    # ANTY-TAUTOLOGIA do asercji wyzej: ten sam uklad WIELU zasobow, ale bez naszego numeru, ma dawac
+    # „brak kolizji". Bez tego „wykrywa kolizje" spelnialby sie takze przez check, ktory krzyczy zawsze.
+    bez_nas = "per-inny\tprojects/111111111111;projects/222222222222\t"
+    p = sh(baza, cwd=ROOT, env=dict(env, STUB_PERIMETERS=bez_nas))
+    check("preflight: WIELE zasobow BEZ naszego numeru = brak kolizji (check nie krzyczy zawsze)",
+          p.returncode == 0 and "brak kolizji" in p.stdout, p.stdout + p.stderr)
+
+    # Separator w `--format` i separator w awk to JEDEN kontrakt rozpisany na dwie linie. Gdy ktos zmieni
+    # jedna z nich, check cicho przestaje dopasowywac cokolwiek — dlatego pilnujemy obu naraz.
+    zrodlo_pf = (ROOT / "tools/preflight_check.sh").read_text()
+    check("preflight: format listy perimetrow ma JAWNY separator zgodny z awk",
+          'separator=";"' in zrodlo_pf and 'split(pole, a, ";")' in zrodlo_pf,
+          "brak jawnego separatora albo rozjazd z awk")
 
     # `--warn-only` ma zmieniac KOD WYJSCIA, nie werdykt. Stara wersja konczyla slowem „zaliczony" mimo
     # bledow — czyli linia, ktora czyta sie w logu CI, twierdzila dokladnie odwrotnie niz tresc raportu.
