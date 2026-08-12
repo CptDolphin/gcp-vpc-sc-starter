@@ -200,7 +200,9 @@ cat <<'DONE'
 OK — deklaracja przejdzie bramki monorepo.
 
 Sprawdzone jest to, co da się sprawdzić bez dostępu do perimetru. NIE sprawdzono:
-  - pre-flightu sieciowego (Private Google Access, strefa DNS na restricted VIP) — robi to monorepo,
+  - pre-flightu sieciowego (Private Google Access, strefa DNS na restricted VIP) — robi to BRAMKA
+    `pre-flight` po stronie perimetru, na pull requeście i przy apply; czerwona zatrzymuje plan i apply,
+    a naprawia ją WŁAŚCICIEL PROJEKTU, nie repo perimetru,
   - czy projekt nie należy już do INNEJ konfiguracji egzekwowanej (inny perimetr; to odczyt z żywego
     GCP — kontrakt odpowiada tylko za członkostwo w TYM perimetrze),
   - budżetu atrybutów po dodaniu twoich reguł (kontrakt pokazuje aktualne zużycie).

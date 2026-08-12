@@ -64,11 +64,12 @@ Czyli:
 
 **Dlaczego kanał NIE jedzie `repository_dispatch`-em, mimo że działał:** wymaga `contents: write`, czyli
 prawa zapisu do kodu perimetru — więcej niż „otworzyć PR". Samo w sobie byłoby to tylko nadmiarowe.
-Groźne robi się w złożeniu: bramki treści (schema, OPA, budżet, pre-flight) wiszą po tamtej stronie na
-zdarzeniu `pull_request`, a apply rusza z **pushu na gałąź domyślną**. Gdzie ta gałąź nie jest chroniona —
-a ochrona gałęzi to na części planów GitHuba funkcja płatna dla repozytoriów prywatnych — poświadczenie
-dywizji staje się ścieżką do zmiany granicy organizacji z pominięciem **wszystkich** bramek. Wzorzec nie
-może zależeć od planu subskrypcji odbiorcy, więc kanał został zawężony po stronie uprawnienia.
+Groźne robi się w złożeniu: apply rusza po tamtej stronie z **pushu na gałąź domyślną**, a ochrona tej
+gałęzi to na części planów GitHuba funkcja płatna dla repozytoriów prywatnych. Poświadczenie dywizji
+staje się wtedy ścieżką do zmiany granicy organizacji, na którą **nikt nie spojrzał** — z pominięciem
+CODEOWNERS i review. Samych bramek to nie omija: schema, OPA, budżet, bramki żywe i pre-flight biegną
+także na ścieżce apply, bo wzorzec nie może zależeć od planu subskrypcji odbiorcy. Z tego samego powodu
+kanał został dodatkowo zawężony po stronie uprawnienia.
 
 **Czego `actions: write` nie odbiera i o czym nie milczymy:** pozwala ponawiać i anulować przebiegi oraz
 **kasować logi przebiegów** w repo perimetru. Węższe niż zapis kodu, ale nie zerowe. Ślad audytowy, który
@@ -172,8 +173,9 @@ gh release download contract --repo ORG/gcp-vpc-sc --pattern contract.json --clo
 Sam `gh`, żadnego `gcloud`. Sprawdza: strukturę pliku, istnienie profilu, komplet parametrów, istnienie
 access levels, twoje uprawnienie do projektu i to, czy projekt nie jest już członkiem perimetru.
 **Nie sprawdza** pre-flightu sieciowego (Private Google Access, strefa DNS na restricted VIP) ani kolizji
-z inną konfiguracją egzekwowaną — jedno i drugie wymaga odczytu z żywego Google Cloud i robi to repo
-perimetru.
+z inną konfiguracją egzekwowaną — jedno i drugie wymaga odczytu z żywego Google Cloud i robi to po stronie
+perimetru **bramka `pre-flight`**, na pull requeście i przy apply. Czerwona bramka zatrzymuje wniosek,
+a naprawa należy do Ciebie: to Twoja sieć, nie ich.
 
 Pełna instrukcja kanału, razem z tabelą najczęstszych odrzuceń, jest w `contrib/README.md` repozytorium
 perimetru (w starterze: `template/contrib/README.md.example`).
