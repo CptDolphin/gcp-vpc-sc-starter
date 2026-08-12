@@ -1,6 +1,6 @@
-# Decyzje, na których stoi ten starter (DEC-1…DEC-14)
+# Decyzje, na których stoi ten starter (DEC-1…DEC-15)
 
-Czternaście rozstrzygnięć, które określają kształt repozytorium. Kod odsyła tutaj skrótem `DEC-1`…`DEC-14` — jeśli komentarz
+Piętnaście rozstrzygnięć, które określają kształt repozytorium. Kod odsyła tutaj skrótem `DEC-1`…`DEC-15` — jeśli komentarz
 w pliku mówi „(DEC-4)", to znaczy: „powód tej linijki jest opisany w DEC-4, nie zmieniaj jej bez przeczytania".
 
 Każda pozycja ma tę samą strukturę: **decyzja** · **dlaczego** · **co odrzucono i dlaczego**. Odrzucone warianty są
@@ -780,3 +780,46 @@ odliczać od razu, więc uzbrojenie porzucone w połowie zgłasza się samo.
   meldowałby zdrowie także wtedy, gdy publikacja metryk pada. Plus sekret w jobie impersonowalnym z PR-a.
 - *Heartbeat z osobnego workflowa na tym samym cronie.* Wysyłałby ping niezależnie od tego, czy `watch`
   cokolwiek zmierzył — czyli mierzyłby dostępność GitHub Actions, a nie żywotność maszynerii granicy.
+
+---
+
+---
+
+## DEC-15 — `combining_function: OR` wymaga napisanego powodu; pusty warunek nie jest już doklejany
+
+**Decyzja.** Access level z `combining_function: OR` musi nieść pole `or_reason` (min. 20 znaków) i mieć co
+najmniej dwa warunki do połączenia; poziom bez ani jednego warunku jest odrzucany. Renderuje to trzy niezależne
+warstwy: `schemas/access-level.schema.json` (`if/then/else`), reguły `vpcsc.onboarding` na deklaracjach
+i `precondition` w `terraform/perimeter.tf`. Osobno: renderer przestał wysyłać PUSTY warunek do poziomu
+złożonego wyłącznie z `required_access_levels`.
+
+**Dlaczego.** Dwa problemy tej samej klasy — „wygląda inaczej, niż działa".
+
+*OR.* `combiningFunction` łączy warunki poziomu. Przy `AND` poziom `corp_network_and_region` znaczy „region PL/DE
+**oraz** korpo-sieć". Przestawienie jednego słowa na `OR` daje „region PL/DE **albo** korpo-sieć", czyli wpuszcza
+dowolny adres z regionu — a diff to jedna linia wyglądająca na przeredagowanie. Po stronie API nie ma na czym
+oprzeć wykrycia: ZMIERZONE na żywym ACM (2026-08-11), `POST` z `combiningFunction: OR` na poziomie złożonym
+kończy się `200` i tą samą wartością w odpowiedzi, bez ostrzeżenia i bez śladu, że polityka osłabła.
+`or_reason` zamienia jednosłowny diff w zdanie o osłabieniu — recenzent czyta powód zamiast domyślać się intencji.
+
+*Pusty warunek.* Blok `conditions` renderował się bezwarunkowo, więc kompozycja bez własnych atrybutów dostawała
+doklejony warunek `{}`, a ACM odrzucał całość jako `AccessLevel definition has a trivial condition`. Materiał
+zapisał ten wynik jako właściwość API („kompozycja musi nieść własny warunek") i na tej podstawie blokował
+`corp_network AND corp_managed_device` — najmocniejszy wariant dostępu człowieka. ZMIERZONE: ten sam poziom
+wysłany surowym `POST`-em (`{"basic":{"conditions":[{"requiredAccessLevels":[…]}]}}`) POWSTAJE. Ograniczenie
+było nasze. Po poprawce `dynamic "conditions"` renderuje dokładnie jeden warunek — i dopiero teraz brak
+warunków w ogóle nie ma żadnej bariery po stronie API, dlatego pojawia się `precondition` na ten przypadek.
+
+**Co odrzucono i dlaczego.**
+- *Zakaz `OR`.* Wzorzec „korpo-sieć **albo** zarządzane urządzenie" jest poprawny i częsty (laptop na
+  zarządzanym sprzęcie pracuje spoza sieci firmowej). Zakaz wypchnąłby go do `custom_expression`, czyli do
+  wyrażenia CEL — nieporównywalnie trudniejszego do zaudytowania niż lista warunków.
+- *Flaga `or_is_intentional: true` zamiast tekstu.* Boolean odhacza się bez myślenia i nie zostawia w pliku
+  żadnej informacji dla następnego czytelnika. To samo rozstrzygnięcie co przy `control_plane_exception`.
+- *Bramka wyłącznie na plan-JSON (`vpcsc.perimeter`), zgodnie z zasadą „waliduj plan, nie YAML".* Reguły planu
+  dostają `--data perimeter/policy.yaml`, a nie katalog poziomów, więc nie widziałyby `or_reason` — furtka
+  byłaby niewyrażalna. `precondition` renderera daje tę samą własność (leży NA ścieżce planu i apply,
+  nie da się go pominąć nie uruchamiając conftesta) i widzi deklarację razem z uzasadnieniem.
+- *Ostrzeżenie zamiast odmowy przy `OR` na jednym warunku.* Taki zapis nic nie robi, więc kusi, żeby go
+  tolerować. Ożywa jednak w dniu, w którym ktoś dołoży `required_access_levels`: osłabienie wchodzi wtedy
+  bez żadnego diffu przy `combining_function`, bo to słowo stało w pliku od dawna.
