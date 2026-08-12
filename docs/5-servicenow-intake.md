@@ -156,11 +156,35 @@ zaparkowane przebiegi widać w zakładce Actions, więc ktoś **mógłby** je za
 tego nie wymusza, a PR jest scalalny bez tego kliknięcia. Reviewer patrzący na taki PR widzi komplet zer,
 nie czerwoną bramkę.
 
-**Konfiguracja wspierana:** token instalacji GitHub Appa w `secrets.INTAKE_PR_TOKEN` (oba workflow
-wejściowe czytają ten sam sekret). PR otwarty tym tokenem powinien uruchamiać bramki jak każdy inny — to
-**przewidywanie, nie pomiar**: Appa nadal nie ma, więc nie było czego zmierzyć. Domknięcie tej luki to
-jeden przebieg: otworzyć PR-a tokenem Appa i sprawdzić `check-runs.total_count > 0`. Aplikacji nie da
-się założyć przez API — to ta sama pozycja „wymaga człowieka", co App dywizji.
+#### Konfiguracja wspierana: token Appa **mintowany w przebiegu**, nie wklejony do sekretu
+
+Trzy workflow, które dotykają gałęzi i PR-ów kanału (`intake.yml`, `external-intake.yml`,
+`intake-rebase.yml`), wołają `actions/create-github-app-token` i biorą token z jego outputu:
+
+| co | gdzie | dlaczego tam |
+|---|---|---|
+| `INTAKE_APP_ID` | **zmienna** repozytorium (`vars`) | identyfikator, nie poświadczenie — a `secrets` nie jest widoczne w `if:` kroku, więc na czymś jawnym musi stać warunek |
+| `INTAKE_APP_KEY` | **sekret** repozytorium | klucz prywatny aplikacji; ważny do odwołania, więc nadaje się do sekretu |
+
+**Dlaczego nie „wklej gotowy token do sekretu":** token instalacji Appa **wygasa po godzinie**. Wklejony
+raz działa do końca dnia i milknie nazajutrz — awaria bez żadnej zmiany w kodzie, która by ją tłumaczyła,
+w kanale, który i tak odpala się rzadko. Sekret trzyma więc klucz, a token powstaje na każdy przebieg.
+
+**Zakres aplikacji:** `Contents: Read and write` + `Pull requests: Read and write`, instalacja
+**wyłącznie** na repozytorium perimetru. `owner`/`repositories` w kroku mintującym czytane są z kontekstu
+przebiegu, więc token jest zawężony do tego jednego repozytorium także wtedy, gdy aplikację ktoś
+zainstaluje szerzej.
+
+**Degradacja, gdy Appa jeszcze nie ma.** Krok mintujący ma `if: vars.INTAKE_APP_ID != ''`, a wyrażenie
+tokenu brzmi `${{ steps.app.outputs.token || github.token }}`. Bez zmiennej krok jest **pomijany**,
+odczyt nieobecnego pola kontekstu daje wartość pustą (nie błąd), i kanał zachowuje się dokładnie tak jak
+wyżej: staje na kroku otwarcia PR-a, głośno, ze sprzątnięciem gałęzi. Dodanie dwóch wartości przełącza go
+na Appa **bez zmiany w kodzie**.
+
+PR otwarty tokenem Appa powinien uruchamiać bramki jak każdy inny — to **przewidywanie, nie pomiar**:
+Appa nadal nie ma, więc nie było czego zmierzyć. Domknięcie tej luki to jeden przebieg: otworzyć PR-a
+tokenem Appa i sprawdzić `check-runs.total_count > 0`. Aplikacji nie da się założyć przez API — to ta
+sama pozycja „wymaga człowieka", co App dywizji.
 
 ---
 
