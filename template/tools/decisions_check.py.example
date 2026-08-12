@@ -60,9 +60,21 @@ CZEGO ŚWIADOMIE NIE SPRAWDZAMY (żeby zielony wynik nie znaczył więcej, niż 
   * TREŚCI deklaracji poza zakresem i licznikiem. „Kilkanaście decyzji" przejdzie, bo nie jest liczbą.
     Bramka domyka formę, w której to realnie gniło — zakres i liczebnik — a nie prozę w ogóle.
 
-Użycie (patrz `.github/actions/bramki-tresci/action.yml` i `.github/workflows/starter-drift.yml`):
+GDZIE TE SPRAWDZENIA BIEGAJĄ — I DLACZEGO NIE WSZĘDZIE TAK SAMO (DEC-30). Sprawdzenie 1 pyta konsumenta
+rejestru: „czy cytujesz decyzję, której nie niesiesz". To pytanie do ROZPAKOWANEGO repozytorium, które
+kopiuje ze startera podzbiór. W drzewie SAMEGO startera odpowiedź jest z założenia inna: leżą tam testy
+negatywne cytujące numery nieistniejące z premedytacją (fixture dowodzący, że `--wzgledem` gryzie), więc
+sprawdzenie 1 świeciłoby tam na czerwono na treści POPRAWNEJ — a naprawiałoby się je kasowaniem testu.
+Sprawdzenia 2a-2d pytają o coś innego — „czy repozytorium mówi o swoim rejestrze prawdę" — i to pytanie
+należy przede wszystkim do startera, bo tam rejestr MIESZKA. `--tylko-deklaracje` uruchamia więc drugą
+grupę bez pierwszej. Zmierzone: bez tego trybu deklaracja w `selftest/skan_samodzielnosci.py` przeżyła
+dwadzieścia jeden decyzji, bo bramka nie widziała katalogu, w którym stała.
+
+Użycie (patrz `.github/actions/bramki-tresci/action.yml`, `.github/workflows/starter-drift.yml`
+i `test_kompletnosc_decyzji` w selfteście startera):
     python3 tools/decisions_check.py
     python3 tools/decisions_check.py --wzgledem /tmp/0-decyzje-startera.md
+    python3 tools/decisions_check.py --tylko-deklaracje --root /sciezka/do/startera
 """
 import argparse
 import pathlib
@@ -223,7 +235,19 @@ def main() -> int:
     ap.add_argument("--root", default=".", help="katalog repozytorium (domyślnie bieżący)")
     ap.add_argument("--wzgledem", metavar="PLIK",
                     help="plik `0-decyzje.md` startera — sprawdź, czy zbiór decyzji tutaj go POKRYWA")
+    ap.add_argument("--tylko-deklaracje", action="store_true",
+                    help="sprawdź WYŁĄCZNIE, czy repo mówi o swoim rejestrze prawdę (zakres, licznik, "
+                         "jeden H1, jeden numer = jedna sekcja) — bez pytania o rozwiązywalność cytowań")
     args = ap.parse_args()
+
+    # Wykluczenie, nie ciche pierwszeństwo. `--wzgledem` pyta o POKRYCIE zbioru, `--tylko-deklaracje`
+    # wyłącza pytania o zbiór i zostawia pytania o prozę — złożone razem jedno z nich musiałoby zostać
+    # zignorowane, a bramka wywołana z flagą, która nic nie robi, jest gorsza niż bramka niewywołana:
+    # wygląda w logu tak samo jak działająca.
+    if args.tylko_deklaracje and args.wzgledem:
+        print("::error::--tylko-deklaracje i --wzgledem wykluczaja sie: pierwsza flaga wylacza porownanie "
+              "zbiorow, ktore druga wlasnie zamawia", file=sys.stderr)
+        return 1
 
     root = pathlib.Path(args.root).resolve()
     plik = root / DECYZJE
@@ -238,8 +262,11 @@ def main() -> int:
 
     # 1. Każdy cytowany numer ma sekcję. Sortujemy po NUMERZE, nie leksykalnie — inaczej lista błędów
     #    czyta się jak losowa (DEC-10 przed DEC-2), a to jest lista do odhaczania.
+    #    Pomijane przy `--tylko-deklaracje`: to jedyne sprawdzenie w tym pliku, które pyta o ZBIÓR
+    #    cytowań, a więc jedyne, na które drzewo startera odpowiada inaczej niż rozpakowane repo —
+    #    leżą tam testy negatywne cytujące numery nieistniejące z premedytacją (DEC-30).
     odsylacze, zakresy = skanuj(root)
-    for numer in sorted(odsylacze, key=lambda s: int(s.split("-")[1])):
+    for numer in (sorted(odsylacze, key=lambda s: int(s.split("-")[1])) if not args.tylko_deklaracje else []):
         if numer not in tutaj:
             # KOD PRZED DOKUMENTACJĄ na liście miejsc. Odsyłacz w pustkę z `apply.yml` albo z reguły OPA
             # znaczy co innego niż ten sam odsyłacz w prozie: pierwszy stoi w pliku, który coś wykonuje.
@@ -342,8 +369,14 @@ def main() -> int:
     # ZMIERZYŁA. Liczba sprawdzonych deklaracji stoi obok celowo: „0 deklaracji" znaczy, że repo
     # o swoim zakresie nie twierdzi nic, i to jest stan zalecany, a nie brak sprawdzenia.
     rozpietosc = f" ({numery[0]}…{numery[-1]})" if numery else ""
-    print(f"OK: {len(tutaj)} decyzji w {DECYZJE}{rozpietosc}, {len(odsylacze)} cytowanych numerow "
-          f"rozwiazanych, {len(deklaracje)} deklaracji zakresu zgodnych ze zbiorem{ile_wzorzec}")
+    # W trybie deklaracji NIE piszemy „N cytowanych numerow rozwiazanych": policzone one są (jedno
+    # przejście po drzewie zbiera oba wyniki), ale rozwiązywalności nikt nie sprawdzał. Podsumowanie
+    # ma mówić, co bramka ZMIERZYŁA — nie co miała pod ręką. Zielony wiersz obiecujący sprawdzenie,
+    # którego nie było, jest dokładnie tym trybem awarii, dla którego powstał cały ten plik.
+    ile_cytowan = "" if args.tylko_deklaracje else f", {len(odsylacze)} cytowanych numerow rozwiazanych"
+    tryb = " [tylko deklaracje]" if args.tylko_deklaracje else ""
+    print(f"OK{tryb}: {len(tutaj)} decyzji w {DECYZJE}{rozpietosc}{ile_cytowan}, "
+          f"{len(deklaracje)} deklaracji zakresu zgodnych ze zbiorem{ile_wzorzec}")
     return 0
 
 
