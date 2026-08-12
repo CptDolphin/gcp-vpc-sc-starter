@@ -5442,9 +5442,12 @@ def test_werdykt_i_narzedzia() -> None:
               and "NIE jest odrzucenie wniosku" in out_awaria
               and "nie zamykaj wniosku jako odrzuconego" in sum_awaria.lower(),
               f"rc={rc_awaria} {out_awaria[:300]}")
+        # `rc != 0` takze tutaj: w tym repozytorium kazde `::error::` stoi obok niezerowego kodu wyjscia,
+        # bo nie ma pomiaru mowiacego, czy sama adnotacja zmienia status joba (patrz naglowek
+        # `komunikat_rozjazdu` w `tools/perimeter_watch.py`). Asercja utrwala te zasade.
         check("ODRZUCENIE TRESCI: werdykt mowi, ze bramki SIE WYKONALY i odrzucily tresc",
-              "ODRZUCONY PRZEZ BRAMKE TRESCI" in out_odrzut and "ODRZUCONY" in sum_odrzut,
-              f"rc={rc_odrzut} {out_odrzut[:300]}")
+              rc_odrzut != 0 and "ODRZUCONY PRZEZ BRAMKE TRESCI" in out_odrzut
+              and "ODRZUCONY" in sum_odrzut, f"rc={rc_odrzut} {out_odrzut[:300]}")
         check("PRZEJSCIE: werdykt zalicza i nie zostawia zadnej adnotacji bledu",
               rc_ok == 0 and "::error" not in out_ok and "ZALICZONY" in sum_ok,
               f"rc={rc_ok} {out_ok[:300]}")

@@ -480,7 +480,13 @@ runs:
             echo "Bramki treści **wykonały się** i któraś z nich odrzuciła tę zmianę. Powtórzenie przebiegu"
             echo "niczego nie zmieni — poprawka jest po stronie treści wniosku."
           } >> "$GITHUB_STEP_SUMMARY"
-          exit 0
+          # `exit 1`, choć job jest już czerwony od bramki, która odrzuciła. Powód nie jest kosmetyczny:
+          # w tym repozytorium KAŻDE `::error::` stoi obok niezerowego kodu wyjścia (rozpisane w nagłówku
+          # `komunikat_rozjazdu` w `tools/perimeter_watch.py`), bo nie mamy pomiaru mówiącego, czy sama
+          # adnotacja poziomu error zmienia status joba. Wyjątek od tej zasady kosztowałby dokładnie tyle,
+          # ile pierwszy raz, gdy ktoś się na nią powoła — a tutaj nic nie kosztuje: brak znacznika kompletu
+          # znaczy, że któryś wcześniejszy krok padł, więc job i tak jest czerwony.
+          exit 1
         fi
         {
           echo "## ✅ WERDYKT: ZALICZONY — komplet bramek treści wykonał się i nic nie odrzucił"
