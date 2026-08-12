@@ -323,7 +323,11 @@ poprawne.
 
 Konsekwencja praktyczna: pozycja katalogu powinna mieć **prerekwizyt** — projekt utworzony przez fabrykę
 projektów (warstwa landing zone, jeśli organizacja ją ma) z włączonym PGA i DNS na restricted VIP.
-Sprawdza to `tools/preflight_check.sh` i jest to element checklisty recenzenta w opisie PR-a. Gdyby
+Sprawdza to **bramka maszynowa**: job `pre-flight` w `plan.yml` i w `apply.yml` uruchamia
+`tools/preflight_check.sh` dla każdego członka WCHODZĄCEGO do perimetru (zadeklarowanego, a nieobecnego
+jeszcze w `spec`/`status` żywej granicy) i przy czerwonym werdykcie zostawia `terraform plan` oraz
+`terraform apply` w stanie `skipped` — DEC-24. Recenzent czyta werdykt w podsumowaniu przebiegu; jedyne,
+co zostaje mu do zrobienia z ręki, to check tożsamości (`--identity`, niżej), bo bramka go nie woła. Gdyby
 jeden ticket miał robić oba kroki, to jest integracja **dwóch** automatów (fabryka projektów + ten kanał), a nie
 rozszerzenie tego workflow — i wymaga osobnej decyzji, bo tworzenie projektu to inny blast-radius niż dodanie
 go do granicy.
@@ -336,13 +340,20 @@ poprawnemu kandydatowi zbudować sieć, której nie potrzebuje, i — groźniej 
 odpalający się przy każdym onboardingu, a odruchową reakcją na taki alarm jest `--warn-only`, czyli
 wyciszenie **również** projektów, w których PGA naprawdę brakuje.
 
-Recenzent uruchamia go z tożsamościami z wniosku — powtarzalne `--identity`, wartości przepisane 1:1 z pliku
-członka:
+**Check tożsamości (`--identity`) to jedyna część pre-flightu, której bramka NIE wykonuje**, i to jest
+decyzja, nie luka (DEC-24). Wymaga `iam.serviceAccounts.get`, którego wdrożenie nie nadaje kontom CI —
+wpięty byłby więc fail-closed na **każdym** wniosku, z powodu leżącego po stronie perimetru, a nie
+wnioskodawcy. Nadanie tego prawa kontu `plan`, impersonowalnemu z każdego pull requesta, oznaczałoby
+możliwość enumeracji wszystkich kont serwisowych organizacji. Recenzent uruchamia ten check z ręki,
+z tożsamościami z wniosku — powtarzalne `--identity`, wartości przepisane 1:1 z pliku członka:
 
 ```bash
 tools/preflight_check.sh --project prj-example-vertex-dev --number 123456789012 \
   --identity serviceAccount:sa-example-serving@prj-example-vertex-dev.iam.gserviceaccount.com
 ```
+
+Checki 1–5 policzą się przy okazji drugi raz — to jest tanie i zamierzone: uruchomienie z ręki ma dawać
+komplet, a nie wymagać sklejania go z dwóch źródeł.
 
 **Dlaczego to nie jest duplikat bramki OPA.** `perimeter.rego` sprawdza **kształt** adresu na plan-JSON i robi
 to na każdym PR, bez żadnych poświadczeń — łapie literówkę w domenie. Adres poprawny składniowo, wskazujący na

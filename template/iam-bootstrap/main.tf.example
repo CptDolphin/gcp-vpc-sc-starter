@@ -99,11 +99,21 @@ locals {
   #     na pull requescie nie potrzebuje dostepu do chmury. Domyslnie wylaczone = niezmiennik zostaje.
   zarzadza_tematem_alertow = (var.monitoring_project_id != "" && var.manage_alert_topic) ? 1 : 0
 
+  # TA LISTA JEST TOŻSAMOŚCIĄ BRAMKI PRE-FLIGHTU, nie tylko planu (DEC-24) — bramka pyta kontem `plan`
+  # na OBU torach, także na ścieżce apply, bo konto `apply` nie ma ani jednej z tych ról, a dokładanie ich
+  # powiększyłoby zbiór uprawnień, których brak ZATRZYMUJE jedyną drogę wdrożenia. Zdjęcie którejkolwiek
+  # z trzech pozycji poniżej zatrzymuje więc onboarding, i to fail-closed — czyli głośno, ale zatrzymuje.
   plan_org_roles = [
-    "roles/accesscontextmanager.policyReader", # odczyt perimetru do terraform plan
-    "roles/cloudasset.viewer",                 # pre-flight: czy projekt istnieje, czy nie jest w innym perimetrze
-    "roles/compute.networkViewer",             # pre-flight: Private Google Access na podsieciach
-    "roles/dns.reader",                        # pre-flight: strefa DNS kierująca googleapis.com na restricted VIP
+    # Niesie także `resourcemanager.projects.get/list` — czyli checki 1 i 2 pre-flightu (projekt istnieje
+    # i jest ACTIVE, numer zgodny z ID, brak kolizji z cudzą konfiguracją egzekwowaną).
+    "roles/accesscontextmanager.policyReader", # odczyt perimetru do terraform plan + pre-flight 1 i 2
+    # NIE dla pre-flightu, mimo że tak tu stało: skrypt nie woła Cloud Asset Inventory ani razu (zmierzone).
+    # Ta rola żywi KONTROLĘ POZYTYWNĄ sondy granicy — `gcloud asset search-all-resources` jest w niej
+    # wywołaniem usługi SPOZA `restricted_services`, które ma przejść ZAWSZE. Bez niej sonda nie odróżnia
+    # „granica odmówiła" od „nie miałem prawa zapytać", czyli jej negatyw przestaje być falsyfikowalny.
+    "roles/cloudasset.viewer",     # sonda granicy: kontrola pozytywna (NIE pre-flight)
+    "roles/compute.networkViewer", # pre-flight 3: Private Google Access na podsieciach
+    "roles/dns.reader",            # pre-flight 4: strefa DNS kierująca googleapis.com na restricted VIP
     # Metryki i alerty perimetru (terraform/monitoring.tf) są w stanie, więc `plan` MUSI umieć je odczytać —
     # inaczej odświeżenie stanu pada na `Error when reading MonitoringAlertPolicy`, mimo że konto nic nie
     # zmienia. `viewer`, nie `editor`: czytanie do planu, zapisywanie zostaje przy `apply`. (Issue #1904)

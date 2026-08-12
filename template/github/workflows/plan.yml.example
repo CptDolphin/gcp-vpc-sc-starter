@@ -34,14 +34,46 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  plan:
-    name: terraform plan
+  # PREREKWIZYTY KANDYDATA PRZED PLANEM, A NIE PO NIM — i dlatego osobny job, nie krok.
+  #
+  # Werdykt tej bramki ma ZATRZYMAĆ plan, a nie go zaczerwienić: `needs:` niżej sprawia, że przy czerwonym
+  # pre-flighcie job `plan` pokazuje się jako `skipped`, czyli zamek stanu nie zostaje wzięty i refresh
+  # przeciw organizacji się nie wykonuje. Wniosek o projekt bez Private Google Access kosztuje wtedy jedno
+  # przeczytanie sieci kandydata, a nie pełny plan.
+  #
+  # TEN SAM JOB STOI W `apply.yml` (DEC-16 — bramka należy do mutatora, nie do zdarzenia `pull_request`),
+  # z tą samą akcją i tą samą tożsamością. Selftest mierzy zawieranie zbiorów akcji obu torów, więc
+  # dopisanie bramki wyłącznie tutaj czerwieni go natychmiast.
+  pre-flight:
+    name: pre-flight (prerekwizyty wchodzacych)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      # Keyless. The read-only service account is the only thing this workflow can ever reach, because the
-      # WIF provider condition pins it to event_name == 'pull_request' — see docs/2-uprawnienia-i-wif.md.
+      - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.9
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.PLAN_SERVICE_ACCOUNT }}
+
+      - uses: ./.github/actions/bramka-preflightu
+
+  plan:
+    name: terraform plan
+    runs-on: ubuntu-latest
+    # Twarda zależność, nie kolejność kroków: czerwony pre-flight = ten job w ogóle nie startuje.
+    needs: pre-flight
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # Keyless. Konto read-only jest jedyną tożsamością, jaką ten workflow potrafi objąć — decyduje o tym
+      # `service_account` niżej, a NIE warunek providera WIF.
+      #
+      # NIE CZYTAJ TU OGRANICZENIA NA `event_name`, bo go nie ma, i to jest fakt o kształcie wdrożenia,
+      # nie szczegół. `attribute_condition` providera pyta WYŁĄCZNIE o repozytorium, a `principalSet`
+      # konta `plan` celuje w `attribute.repository` — czyli w KAŻDY workflow tego repozytorium, także
+      # uruchomiony pushem na gałąź domyślną. Na tym stoi bramka pre-flightu na ścieżce apply: pyta tym
+      # samym kontem `plan`, bez rozszerzania uprawnień konta `apply` (DEC-24). Odwrotnie jest przy koncie
+      # `watch`, które celuje w `attribute.ref` — patrz `iam-bootstrap/main.tf` i docs/2-uprawnienia-i-wif.md.
       - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.9
         with:
           workload_identity_provider: ${{ vars.WIF_PROVIDER }}

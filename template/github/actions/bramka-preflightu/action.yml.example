@@ -1,0 +1,46 @@
+# .github/actions/bramka-preflightu/action.yml
+# Prerekwizyt sieciowy kandydata, sprawdzany PRZECIW ŻYWEMU API — na obu torach, z jednej definicji.
+#
+# DLACZEGO OSOBNA AKCJA, A NIE KROK W `bramki-zywe`. Tamten zestaw pyta o DEKLARACJĘ skonfrontowaną
+# z rzeczywistością (czy usługa jest wspierana przez VPC-SC, do jakiego projektu należy bucket stanu) —
+# czyli o rzeczy należące do TEGO repozytorium. Ta bramka pyta o CUDZY projekt, którego to repozytorium
+# świadomie nie provisionuje (DEC-5), i dlatego różni się trzema własnościami naraz: wymaga uprawnień
+# na projektach członkowskich, jej zbiór pracy zależy od stanu granicy (a nie od treści pull requesta),
+# i jako jedyna jest naprawiana przez KOGOŚ SPOZA tego repozytorium. Wspólny plik chowałby tę asymetrię.
+#
+# DLACZEGO WŁASNY JOB U WYWOŁUJĄCEGO, A NIE KROK W ISTNIEJĄCYM. Werdykt ma ZATRZYMYWAĆ plan i apply,
+# a nie czerwienić je po fakcie: job z `needs:` sprawia, że `terraform plan` na pull requeście i
+# `terraform apply` na gałęzi domyślnej pokazują się jako `skipped`, czyli zamek stanu nie zostaje wzięty,
+# a refresh przeciw organizacji się nie wykonuje. Krok wewnątrz joba planującego dałby dokładnie odwrotną
+# kolejność — najpierw koszt, potem werdykt.
+#
+# TOŻSAMOŚĆ WYBIERA WYWOŁUJĄCY, tak samo jak w `bramki-zywe`, i tutaj wybiera na OBU torach konto `plan`.
+# To jest ODSTĘPSTWO od zasady „bramka żywa pyta tożsamością mutatora" i ma zmierzony powód: konto `apply`
+# nie ma ANI JEDNEJ z ról potrzebnych pre-flightowi (ma wyłącznie własną rolę zapisu na perimetrze plus
+# dostęp do bucketa stanu), a dołożenie ich powiększyłoby zbiór uprawnień, których brak ZATRZYMUJE jedyną
+# drogę wdrożenia. Podmiot pytania jest przy tym niezależny od pytającego: „czy podsieci kandydata mają
+# Private Google Access" ma tę samą odpowiedź dla obu kont — inaczej niż „czy widzę własny bucket stanu",
+# gdzie tożsamość JEST treścią pytania. Uzasadnienie i odrzucone warianty: DEC-24.
+#
+# WYMAGANIE WYWOŁUJĄCEGO: krok `google-github-actions/auth` MUSI stać wcześniej w tym samym jobie.
+
+name: bramka pre-flightu
+description: >-
+  Prerekwizyty projektów WCHODZĄCYCH do perimetru (istnienie i stan projektu, kolizja perimetrów,
+  Private Google Access, prywatna strefa DNS na restricted VIP) — czytane z żywego API, wyłącznie odczyt.
+
+runs:
+  using: composite
+  steps:
+    # Ta akcja bywa jedyną, która w danym jobie czyta YAML-e repozytorium, więc nie zakłada, że ktoś
+    # przed nią zainstalował pyyaml. Instalacja jest idempotentna i kosztuje sekundy.
+    - name: pyyaml dla bramki
+      shell: bash
+      run: pip install --quiet pyyaml
+
+    # Zbiór pracy liczy się z RÓŻNICY deklaracji i żywej granicy, nie z diffa commitów — powód (trzy
+    # niezależne) stoi w nagłówku `tools/preflight_gate.py`. Przy ustabilizowanym perimetrze różnica jest
+    # pusta i cały krok kosztuje jeden odczyt ACM.
+    - name: prerekwizyty projektow wchodzacych do perimetru
+      shell: bash
+      run: python3 tools/preflight_gate.py

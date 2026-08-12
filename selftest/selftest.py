@@ -136,6 +136,8 @@ def bootstrap() -> None:
         ".github/actions/bramki-tresci/action.yml", ".github/actions/bramki-zywe/action.yml",
         # Bramka promocji: jedyna bramka WYLACZNIE mutatora — pyta o moment skutku, nie o tresc (DEC-17).
         ".github/actions/bramka-promocji/action.yml", "tools/promotion_hold.py",
+        # Bramka pre-flightu: prerekwizyty CUDZEGO projektu, na obu torach, tozsamoscia `plan` (DEC-24).
+        ".github/actions/bramka-preflightu/action.yml", "tools/preflight_gate.py",
         ".tflint.hcl", ".github/dependabot.yml", "tests/README.md",
         "tests/snow-approved.json", "tests/snow-not-approved.json", "tests/snow-self-approved.json",
         "tests/snow-wrong-project.json", "tests/dispatch-example.json",
@@ -3548,6 +3550,11 @@ def test_eksperyment_wyscigu() -> None:
 GCLOUD_ATRAPA = """#!/usr/bin/env bash
 awaria() { echo "$1" >&2; exit 1; }
 
+# Dziennik wywolan — wlaczany wylacznie przez STUB_LOG, wiec dla pozostalych testow to no-op. Bez niego
+# nie da sie asertowac, ze bramka pre-flightu CZEGOS NIE ZAPYTALA (check `--identity`): brak wywolania
+# jest niewidoczny w stdout, a asercja na tresci skryptu mowilaby o kodzie, nie o zachowaniu.
+[ -n "${STUB_LOG:-}" ] && echo "$*" >> "$STUB_LOG"
+
 # Skrypt jest wylacznie do odczytu (DEC-5), wiec nie ma prawa dopuscic do pytania „czy wlaczyc API?".
 # Zywy gcloud zadaje je na stderr, ktory pre-flight przechwytuje — na terminalu skrypt stalby w miejscu
 # bez widocznego powodu, a „y" wlaczyloby usluge w CUDZYM projekcie. Atrapa egzekwuje to zachowaniem.
@@ -3561,7 +3568,10 @@ case "$*" in
   "projects describe "*)
     [ "${STUB_PROJECT_FAIL:-}" = "1" ] && awaria \\
       "ERROR: (gcloud.projects.describe) User [x@example.com] does not have permission to access projects instance [prj-example:get] (or it may not exist)."
-    printf '%s\\t%s\\n' "123456789012" "${STUB_LIFECYCLE-ACTIVE}" ;;
+    # STUB_NUMBER: numer zwracany przez atrape. Bramka pre-flightu bierze numery z pliku czlonkow
+    # repozytorium, wiec test jej sciezki POZYTYWNEJ musi umiec ustawic te sama wartosc po obu stronach —
+    # inaczej „pre-flight przechodzi" jest nieosiagalne z powodu, ktorego ten test wcale nie bada.
+    printf '%s\\t%s\\n' "${STUB_NUMBER-123456789012}" "${STUB_LIFECYCLE-ACTIVE}" ;;
   # `beta billing projects describe` NIE wpada w galaz `projects describe ` wyzej: tamten wzorzec jest
   # zakotwiczony na poczatku `$*`, a tu `$*` zaczyna sie od `beta billing`. Trzy wartosci zamiast dwoch,
   # bo check ma trzy wyjscia: True (jest), False (nie ma) i PUSTE (nie odczytalem) — a to ostatnie musi
@@ -3810,6 +3820,168 @@ def test_preflight() -> None:
     p = sh(["bash", "tools/preflight_check.sh", "--number", "123456789012", "--project"], cwd=ROOT, env=env)
     check("preflight: flaga bez wartosci konczy sie komunikatem, nie cichym 1",
           p.returncode != 0 and "wymaga wartości" in p.stdout + p.stderr, p.stdout + p.stderr)
+
+
+# --------------------------------------------------- bramka pre-flightu: kogo pyta i czy w ogole jedzie
+def test_bramka_preflightu() -> None:
+    """Czy pre-flight ma WYZWALACZ — i czy pyta o wlasciwy zbior (DEC-24).
+
+    ZMIERZONY STAN WYJSCIOWY: `preflight_check.sh` nie byl wolany przez NIC. `grep -rn preflight_check`
+    po `.github/`, `tools/` i pre-commicie dawal zero trafien w czymkolwiek wykonywalnym, a cztery miejsca
+    w materiale twierdzily, ze jedzie automatycznie — w tym opis pull requesta, ktory czyta recenzent.
+    Narzedzie doczekalo sie przy tym DWOCH rund poprawek. Poprawialismy skrypt, ktorego nikt nie uruchamial.
+
+    Sam `test_preflight()` tego nie widzial i nie mogl: pyta skrypt wprost (`bash tools/preflight_check.sh`),
+    wiec byl zielony dokladnie tak samo przy wpietej i niewpietej bramce. Ta funkcja mierzy to, czego tamta
+    nie dotyka — WYZWALACZ, ZBIOR PRACY i TOZSAMOSC.
+    """
+    print("\n== bramka pre-flightu ==")
+    sys.path.insert(0, str(ROOT / "tools"))
+    for modul in ("preflight_gate", "projects_file"):
+        sys.modules.pop(modul, None)
+    import preflight_gate  # noqa: E402 — moduly zyja w rozpakowanym repo, nie w starterze
+    import projects_file  # noqa: E402
+
+    # --------------------------------------------------------------- zbior pracy (czysta funkcja, bez API)
+    # Uklad WIELU zasobow w obu konfiguracjach — bo dokladnie przy >1 zasobie cichl kiedys check kolizji
+    # (`list()` skleja PRZECINKIEM, a parser ciol po sredniku) i dokladnie tego atrapa z jednym zasobem
+    # nie umiala pokazac. Ten sam ksztalt danych obsluguje tu wybor kandydatow, wiec ta sama pomylka
+    # dalaby „nikt nie wchodzi" — czyli bramke zielona zawsze.
+    lista = ("inny_perimetr\tprojects/777777777777\tprojects/888888888888\n"
+             "ai-example\tprojects/111111111111\t"
+             "projects/111111111111;projects/222222222222;projects/333333333333\n")
+    obecne, znaleziony = preflight_gate.numery_w_granicy(lista, "ai-example")
+    check("bramka pre-flightu: czyta WIELE zasobow z obu konfiguracji naszego perimetru",
+          znaleziony and obecne == {"111111111111", "222222222222", "333333333333"}, str(obecne))
+    # ANTY-TAUTOLOGIA: zasoby CUDZEGO perimetru nie moga wpasc do zbioru „juz w granicy" — inaczej czlonek
+    # siedzacy w czyjejs konfiguracji egzekwowanej zostalby uznany za sprawdzonego i nikt by go nie zapytal.
+    check("bramka pre-flightu: zasoby CUDZEGO perimetru NIE licza sie jako 'juz w granicy'",
+          "888888888888" not in obecne and "777777777777" not in obecne, str(obecne))
+    check("bramka pre-flightu: brak naszego perimetru na liscie jest widoczny (pierwszy apply/literowka)",
+          preflight_gate.numery_w_granicy(lista, "nie-ma-takiego")[1] is False)
+
+    czlonkowie = {
+        "div-a": {"project_id": "prj-example-a", "project_number": "111111111111"},
+        "div-b": {"project_id": "prj-example-b", "project_number": "999999999999"},
+    }
+    kand = preflight_gate.wchodzacy(czlonkowie, obecne)
+    check("bramka pre-flightu: pyta WYLACZNIE o czlonka, ktorego w granicy jeszcze nie ma",
+          set(kand) == {"div-b"}, str(kand))
+
+    # --------------------------------------------------------------------- bramka end-to-end (atrapa API)
+    bin_dir = ROOT / "stub-bin"
+    bin_dir.mkdir(exist_ok=True)
+    (bin_dir / "gcloud").write_text(GCLOUD_ATRAPA)
+    (bin_dir / "gcloud").chmod(0o755)
+    env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}")
+
+    polityka = yaml.safe_load((ROOT / "perimeter/policy.yaml").read_text())
+    nazwa = polityka["perimeter"]["name"]
+    czlonkowie_repo = projects_file.wczytaj(ROOT)["members"]
+    numery = ";".join(f"projects/{m['project_number']}" for m in czlonkowie_repo)
+    plik_pelny = ROOT / "perimetry-pelne.tsv"
+    plik_pelny.write_text(f"{nazwa}\t\t{numery}\n")
+    # Granica zawierajaca WSZYSTKICH POZA PIERWSZYM — czyli dokladnie jeden czlonek wchodzacy, niezaleznie
+    # od tego, ilu ich jest w szablonie. Atrapa `gcloud` zwraca JEDEN numer projektu, wiec zbior wchodzacych
+    # wiekszy niz jednoelementowy mierzylby check 1, a nie to, po co ten przypadek istnieje.
+    plik_pusty = ROOT / "perimetry-jeden-wchodzi.tsv"
+    reszta = ";".join(f"projects/{m['project_number']}" for m in czlonkowie_repo[1:])
+    plik_pusty.write_text(f"{nazwa}\t\t{reszta}\n")
+
+    # STAN USTABILIZOWANY: wszyscy zadeklarowani sa juz w granicy. To jest NORMALNY wynik wiekszosci
+    # przebiegow i musi konczyc sie zielono BEZ ani jednego wywolania API o projekty — inaczej bramka
+    # kosztowalaby N odczytow na kazdym pull requescie, przy limicie ACM 500/min.
+    log = ROOT / "wywolania-0.log"
+    p = sh(["python3", "tools/preflight_gate.py", "--perimetry-z-pliku", str(plik_pelny)],
+           cwd=ROOT, env=dict(env, STUB_LOG=str(log)))
+    check("bramka pre-flightu: nikt nie wchodzi = zielono i JAWNY werdykt (nie cisza)",
+          p.returncode == 0 and "WCHODZACYCH 0" in p.stdout and "nie ma czego pytac" in p.stdout,
+          p.stdout + p.stderr)
+    check("bramka pre-flightu: przy zerze wchodzacych NIE PYTA API o projekty (koszt przy skali)",
+          not log.exists(), log.read_text() if log.exists() else "")
+
+    # WCHODZACY Z DEFEKTEM: podsiec bez Private Google Access. To jest tryb awarii, dla ktorego ta bramka
+    # istnieje — projekt wchodzi do dry-run z kompletem zielonych bramek i umiera w dniu promocji.
+    #
+    # STUB_NUMBER rowna sie numerowi z pliku czlonkow, zeby check 1 nie zapalil sie „przy okazji": inaczej
+    # obie polowy pary anty-tautologicznej padalyby na numerze i zadna nie mowilaby nic o PGA.
+    numer = str(czlonkowie_repo[0]["project_number"])
+    env_num = dict(env, STUB_NUMBER=numer)
+    log2 = ROOT / "wywolania-1.log"
+    p = sh(["python3", "tools/preflight_gate.py", "--perimetry-z-pliku", str(plik_pusty)],
+           cwd=ROOT, env=dict(env_num, STUB_SUBNETS="subnet-a\\tFalse", STUB_LOG=str(log2)))
+    # Asercja celuje w LINIE WERDYKTU, nie w samo wystapienie nazwy checku: napis „Private Google Access"
+    # stoi takze w komunikacie zbiorczym bramki, wiec sprawdzanie go w calym stdout zzielenialoby przy
+    # KAZDYM niezaliczonym pre-flightcie — takze takim, ktory padl z zupelnie innego powodu.
+    check("bramka pre-flightu: WCHODZACY bez Private Google Access wywraca bramke",
+          p.returncode != 0 and "podsieci bez Private Google Access: subnet-a" in p.stdout,
+          p.stdout + p.stderr)
+
+    # ANTY-TAUTOLOGIA: TEN SAM zbior wchodzacych, defekt usuniety — bramka ma zzielieniec. Bez tej polowy
+    # „bramka odrzuca" jest nieodroznialne od bramki, ktora odrzuca wszystko.
+    p_ok = sh(["python3", "tools/preflight_gate.py", "--perimetry-z-pliku", str(plik_pusty)],
+              cwd=ROOT, env=env_num)
+    check("ANTY-TAUTOLOGIA: ten sam wniosek BEZ defektu przechodzi",
+          p_ok.returncode == 0 and "pre-flight zaliczony dla wszystkich wchodzacych" in p_ok.stdout,
+          p_ok.stdout + p_ok.stderr)
+
+    # CHECK 6 SWIADOMIE NIEWPIETY (DEC-24) — mierzone ZACHOWANIEM, nie obecnoscia slowa w kodzie.
+    # Wymaga `iam.serviceAccounts.get`, ktorego wdrozenie nie nadaje; wpiety bylby fail-closed na KAZDYM
+    # wniosku, z powodu lezacego po NASZEJ stronie. Asercja pilnuje obu kierunkow naraz: bramka ma NIE
+    # pytac o konta serwisowe i JEDNOCZESNIE pytac o siec — inaczej „nie pyta o SA" spelnialby sie takze
+    # wtedy, gdyby nie pytala o nic.
+    wywolania = log2.read_text() if log2.exists() else ""
+    check("bramka pre-flightu: NIE pyta o konta serwisowe (--identity zostaje przy recenzencie)",
+          "service-accounts describe" not in wywolania, wywolania)
+    check("bramka pre-flightu: ale PYTA o siec kandydata (asercja wyzej nie jest pusta)",
+          "subnets list" in wywolania and "managed-zones list" in wywolania, wywolania)
+    # Jeden odczyt ACM na przebieg, nie jeden na kandydata: liste perimetrow bramka podaje skryptowi
+    # plikiem. Przy partii wnioskow to jest roznica miedzy 1 a N+1 odczytami na najciasniejszej kwocie.
+    check("bramka pre-flightu: pre-flight NIE powtarza odczytu listy perimetrow per kandydat",
+          "perimeters list" not in wywolania, wywolania)
+
+    # FAIL-CLOSED NA NIEODCZYTANEJ LISCIE. Nieczytelny plik to NIE jest „brak kolizji": check, ktory
+    # odpowiada OK na pytanie, ktorego nie zadal, jest gorszy od jego braku.
+    p = sh(["bash", "tools/preflight_check.sh", "--project", "prj-example", "--number", "123456789012",
+            "--lista-perimetrow", str(ROOT / "nie-ma-takiego-pliku.tsv")], cwd=ROOT, env=env)
+    check("bramka pre-flightu: NIECZYTELNA lista perimetrow = BLAD, nie ciche 'brak kolizji'",
+          p.returncode != 0 and "nie zweryfikowano kolizji" in p.stdout
+          and "brak kolizji" not in p.stdout, p.stdout + p.stderr)
+
+    # --------------------------------------------------------------------------------- wpiecie w oba tory
+    # To jest asercja, ktorej brak kosztowal cala te historie: narzedzie dzialalo, testy byly zielone,
+    # a wyzwalacza nie bylo. Czytamy ZPARSOWANY YAML i pytamy o strukture jobow, nie o obecnosc slow.
+    def job_z_akcja(wf: dict, akcja: str):
+        for nazwa_joba, job in (wf.get("jobs") or {}).items():
+            for krok in (job.get("steps") or []):
+                if str(krok.get("uses", "")).endswith(akcja):
+                    return nazwa_joba, job
+        return None, None
+
+    for plik, konsument in (("plan.yml", "plan"), ("apply.yml", "apply")):
+        wf = yaml.safe_load((ROOT / ".github/workflows" / plik).read_text())
+        nazwa_joba, job = job_z_akcja(wf, "/bramka-preflightu")
+        check(f"{plik}: bramka pre-flightu MA wyzwalacz (jest wolana z joba)", job is not None, plik)
+        if job is None:
+            continue
+        needs = wf["jobs"][konsument].get("needs")
+        needs = [needs] if isinstance(needs, str) else list(needs or [])
+        # TWARDA zaleznosc: czerwony pre-flight ma zostawic `plan`/`apply` w stanie `skipped`, czyli bez
+        # wziecia zamka stanu i bez refreshu — a nie przerwac je w polowie.
+        check(f"{plik}: `{konsument}` NIE STARTUJE bez zielonego pre-flightu (needs)",
+              nazwa_joba in needs, f"needs={needs}")
+        konta = [k.get("with", {}).get("service_account") for k in job["steps"]
+                 if "google-github-actions/auth" in str(k.get("uses", ""))]
+        # Tozsamosc `plan` na OBU torach — konto `apply` nie ma ani jednej z rol pre-flightu, a dokladanie
+        # ich powiekszaloby zbior uprawnien, ktorych brak ZATRZYMUJE jedyna droge wdrozenia (DEC-24).
+        check(f"{plik}: job pre-flightu uwierzytelnia sie kontem PLAN",
+              konta == ["${{ vars.PLAN_SERVICE_ACCOUNT }}"], str(konta))
+        check(f"{plik}: job pre-flightu nie uruchamia terraforma (stoi PRZED kosztem i przed zamkiem)",
+              not any("terraform" in str(k.get("run", "")) for k in job["steps"]), nazwa_joba)
+        # Job z `environment` nie wykona ani jednego kroku na galezi spoza polityki tego environment.
+        # Bez tej wlasnosci nie da sie ZOBACZYC, ze bramka odrzuca, inaczej niz na zywej granicy.
+        check(f"{plik}: job pre-flightu nie deklaruje environment (da sie go uruchomic z galezi testowej)",
+              "environment" not in job, str(job.get("environment")))
 
 
 # --------------------------------------------------------------------- workflows
@@ -4956,6 +5128,7 @@ def main() -> int:
     test_kompletnosc_decyzji()
     test_tools()
     test_preflight()
+    test_bramka_preflightu()
     test_eksperyment_wyscigu()
     test_workflows()
     test_workflowy_wykonywalne()
