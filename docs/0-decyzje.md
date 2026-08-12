@@ -1382,3 +1382,81 @@ dywizji to trzydzieści kopii walidatora, z których każda starzeje się osobno
 * Organizacja, która chce mieć własne źródło akcji, publikuje **publiczną kopię startera** i wskazuje ją
   w `uses:` — nic w akcji nie nazywa organizacji, projektu ani perimetru; wszystko środowiskowe wchodzi
   wejściami (`perimeter-repo`, `member-file`, `app-token`) albo przyjeżdża w kontrakcie.
+
+---
+
+## DEC-24 — Weryfikacja egressu wymaga maszyny WEWNĄTRZ perimetru; „bez maszyny" dotyczy wyłącznie ingressu
+
+### Kontekst
+
+`boundary-probe.yml` nosił w nagłówku zdanie „DLACZEGO TO NIE WYMAGA ANI JEDNEJ MASZYNY" i to zdanie było
+prawdziwe — dla kierunku, który ten workflow mierzy. Czytane jako zasada ogólna dawało jednak skutek, którego
+nikt nie wybrał: kierunek **egress**, czyli ten, dla którego kupuje się VPC Service Controls, nie miał
+sposobu, by kiedykolwiek zostać zmierzonym. Perimetr sprzedaje się jako kontrola anty-eksfiltracyjna,
+a cały nasz dowód dotyczył ruchu **do** granicy.
+
+Najtańsza hipoteza brzmiała: może „wewnątrz" jest własnością **tożsamości**. Wtedy wystarczyłoby konto
+serwisowe należące do projektu członkowskiego, użyte z runnera — i pomiar dalej nic by nie kosztował.
+
+**Hipoteza obalona pomiarem na żywym ACM.** Konto utworzone w projekcie członkowskim, impersonowane
+z zewnątrz, wołające chronioną usługę na **tym samym** projekcie:
+
+```
+violationReason  : NO_MATCHING_ACCESS_LEVEL
+ingressViolations: [{targetResource: projects/<CZLONEK>}]
+egressViolations : null
+callerIp: "private"      callerNetwork: BRAK
+```
+
+— zaksięgowane jako ruch **obcy**. Kontrola od drugiej strony: to samo konto wołające projekt **spoza**
+perimetru **przeszło**, bo z punktu widzenia granicy oba końce były na zewnątrz.
+
+### Decyzja
+
+**„Wewnątrz" jest własnością SIECI, nie tożsamości. Pomiar egressu wymaga zasobu obliczeniowego w sieci VPC
+projektu członkowskiego — nie ma wariantu bez maszyny i nie należy go szukać.**
+
+Tor pomiarowy (`tools/sonda_egress_wewnetrzna.py` + `tools/sonda_egress_startup.sh`): `e2-micro` bez adresu
+zewnętrznego na podsieci z Private Google Access, tożsamość = konto z mierzonej reguły egress, dowód
+czytany z **portu szeregowego** (`compute` nie należy do `restricted_services`, więc serial czyta się
+z zewnątrz nawet przy w pełni egzekwowanej granicy — pomiar nie wymaga reguły firewalla, klucza SSH ani
+wyjątku ingress, czyli **nie zmienia tego, co mierzy**). Sonda chodzi w pętli ze stemplem czasu, bo rollback
+ma **dwie różne liczby**: czas do zielonego apply i czas do zmiany zachowania ruchu.
+
+Nagłówek `boundary-probe.yml` mówi teraz wprost, czego ten workflow **nie mierzy**.
+
+### Konsekwencje
+
+* **`status.egressPolicies: []` znaczy „odmawiaj każdego wyjścia", a nie „egress nieegzekwowany".** Reguła
+  egress jest **wyjątkiem** od domyślnej odmowy. Wniosek „egress: 0, czyli nic nie chroni" jest błędny
+  i trzeba go poprawiać wszędzie, gdzie padł.
+* **Trzecia klasa naruszeń.** `SERVICE_NOT_ALLOWED_FROM_VPC` (z `vpcAccessibleServices`) nie ma **ani**
+  `ingressViolations`, **ani** `egressViolations` — filtr pytający o którąś z tych tablic nie widzi jej
+  wcale. Skutkiem praktycznym jest to, że kontrola negatywna „usługa spoza `restricted_services` ma nadal
+  działać", poprawna dla ingressu, **jest nieprawdziwa dla egressu**.
+* **Projekt rozliczeniowy potrafi wyprodukować fałszywy dowód.** Wywołanie z `quota_project` spoza
+  perimetru dotyka dwóch zasobów po dwóch stronach granicy i dostaje
+  `RESOURCES_NOT_IN_SAME_SERVICE_PERIMETER` zaksięgowane jako naruszenie **egress** — czyli sonda widzi
+  „odmowę VPC-SC", nie mierząc access levelu. Przy ręcznym sondowaniu ustawiaj
+  `CLOUDSDK_BILLING_QUOTA_PROJECT` na sondowany projekt.
+* **Okno dry-run dla egressu NIE jest ślepe** (zmierzone): maszyna w projekcie będącym wyłącznie w `spec`
+  produkuje wpisy `dryRun=true` + `egressViolations`, czyli dwustopniowy onboarding chroni również ten
+  kierunek. Zastrzeżenie: gdy konfiguracja egzekwowana już odmawia danego wywołania, **osobny wpis dry-run
+  nie powstaje** — okno pokazuje to, co dopiero zacznie być blokowane.
+* **Koszt przestaje być zerowy** — rząd eurocentów za przelot — i weryfikacja egressu przestaje dać się
+  wykonać wyłącznie z CI. Wymaga też włączenia `compute.googleapis.com` w projekcie członkowskim; API
+  wraca do stanu wyłączonego w tym samym zadaniu, a potwierdzenie tego jest częścią procedury.
+
+### Alternatywy odrzucone
+
+* **Impersonacja konta z projektu członkowskiego** — odrzucona **pomiarem**, patrz Kontekst. To jest
+  najważniejsza z odrzuconych, bo wygląda na oczywistą i milcząco stała za zasadą „bez maszyny".
+* **Zadanie BigQuery w projekcie członkowskim** (kanoniczny przykład eksfiltracji u Google, bez maszyny) —
+  odrzucone, bo **zlecenie** zadania jest wywołaniem chronionej usługi wykonanym spoza granicy i pada na
+  ingressie, zanim cokolwiek zdąży wyjść.
+* **Cloud Run / Cloud Build** — odrzucone jako droższe w konfiguracji przy tym samym skutku: domyślne pule
+  biegną w tenant-projekcie Google'a, więc atrybucja do perimetru i tak wymaga puli prywatnej wpiętej
+  w VPC, czyli tej samej sieci co przy VM plus dodatkowy komponent.
+* **Zostawienie zasady „bez maszyny" i uznanie egressu za nieweryfikowalny** — odrzucone, bo to zamienia
+  ograniczenie budżetowe w milczącą lukę: perimetr bez zmierzonego egressu chroni kierunek łatwiejszy
+  do zmierzenia, a nie ten, dla którego został wdrożony.
