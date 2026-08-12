@@ -123,6 +123,8 @@ def bootstrap() -> None:
         "tools/bootstrap_github.sh", "docs/access-request.md",
         "tools/check_supported_services.py",
         "tools/control_plane_check.py",
+        # Rozdzielenie wlasnosci, na ktorym stoi zgoda Security na egress poza GCP (DEC-23).
+        "tools/codeowners_check.py",
         # Kompletnosc rejestru decyzji — druga bramka rozjazdu ze starterem, obok wskaznika (DEC-20).
         "tools/decisions_check.py",
         "tools/perimeter_to_policy.py", "tools/brownfield_import.sh",
@@ -1489,8 +1491,11 @@ def test_kanal_ticketowy() -> None:
     plik_czlonkow.write_text(przed_renderem)
     check("render_member.py sklada wpis z listy dozwolonych pol (stage zawsze dry-run)",
           p.returncode == 0 and "stage: dry-run" in wynik, p.stdout + p.stderr)
-    check("render_member.py NIE przepuszcza control_plane_exception ani niepustych exceptions",
-          "control_plane_exception" not in wynik and "exceptions: []" in wynik, wynik[:300])
+    # `exceptions` NIE MA JUZ W WYNIKU — pole zniknelo ze schematu (DEC-23), wiec renderer, ktory nadal
+    # by je wypisywal, produkowalby wpis odrzucany przez `additionalProperties: false`. Asercja pilnuje
+    # OBU kierunkow naraz: pola wnioskodawcy nie przechodza, a renderer nie dokleja pola, ktorego nie ma.
+    check("render_member.py NIE przepuszcza control_plane_exception ani nie dokleja `exceptions`",
+          "control_plane_exception" not in wynik and "exceptions" not in wynik, wynik[:300])
 
     # TRYB TESTOWY. Bramka na nazwe fixture'a decyduje o tym, CO zostanie uznane za odpowiedz systemu
     # rekordu — wiec musi byc kotwiczonym dopasowaniem, a nie wzorcem powloki (`snow-[a-z0-9-]*`
@@ -1522,13 +1527,10 @@ def test_kanal_ticketowy() -> None:
                 check("intake fixture — polecenie z nazwy NIE zostalo wykonane",
                       not any(l.strip() == "WSTRZYKNIETE" for l in r.stdout.splitlines()), r.stdout[-200:])
 
-    # KTORY TOKEN OTWIERA PR, DECYDUJE CZY PR JEST SPRAWDZANY. Z `GITHUB_TOKEN` utworzenie PR-a jest
-    # odmawiane (`GitHub Actions is not permitted to create or approve pull requests`), a nawet po
-    # wlaczeniu tamtego ustawienia PR utworzony tym tokenem nie uruchamia workflowow `pull_request`.
+    # KTORY TOKEN OTWIERA PR, DECYDUJE CZY PR JEST SPRAWDZANY (DEC-22) — pelny zestaw asercji o
+    # poswiadczeniu kanalu stoi w test_poswiadczenie_kanalu(), bo dotyczy TRZECH workflowow, nie dwoch.
     for plik, tresc in ((".github/workflows/intake.yml", tekst),
                         (".github/workflows/external-intake.yml", ext)):
-        check(f"{plik}: PR-a otwiera token instalacji Appa, gdy jest (INTAKE_PR_TOKEN)",
-              "secrets.INTAKE_PR_TOKEN" in tresc)
         # Bez stanu posredniego: `create-pull-request` wypycha galaz ZANIM wola API PR-ow, wiec odmowa
         # zostawia galaz z plikiem czlonka i bez PR-a — niewidoczna na liscie PR-ow.
         check(f"{plik}: po odmowie PR-a kasuje galaz, ktora wypchnal",
@@ -1553,6 +1555,160 @@ def test_kanal_ticketowy() -> None:
     check("snow_verify.py bez konfiguracji SNOW: odmowa z komunikatem, nie traceback",
           p.returncode == 2 and "ODRZUCONE" in p.stderr and "Traceback" not in p.stderr,
           f"rc={p.returncode}: {p.stderr[-200:]}")
+
+
+# ------------------------------------------------------ poswiadczenie kanalu wejsciowego (DEC-22)
+# Trzy detektory czytajace TEKST workflowa. Osobno, bo kazdy odpowiada na inne pytanie, i kazdy jest
+# nizej karmiony probkami o znanym werdykcie — detektor, ktory zawsze mowi „dobrze", zazielenia komplet
+# asercji i nie chroni niczego.
+
+# Krok mintujacy: akcja przypieta 40-znakowym SHA-em. `@main`/`@v3` to referencja ruchoma, wiec kto
+# kontroluje tag, ten dostaje kod uruchamiany z kluczem prywatnym naszej aplikacji.
+MINT = re.compile(r"uses:\s*actions/create-github-app-token@[0-9a-f]{40}\b")
+
+# POZYCJA POSWIADCZENIA: miejsce, w ktorym workflow podaje token DALEJ — wejscie `token:` akcji albo
+# zmienna srodowiskowa czytana przez `gh`/`git`. Klucz prywatny (`private-key:`) pozycja NIE jest i ma
+# w sekrecie zostac: to on jest wazny do odwolania, a token z niego zyje godzine.
+POZYCJA = re.compile(r"^\s*(?:token|GH_TOKEN|GITHUB_TOKEN):\s*(\S.*?)\s*$", re.M)
+
+# Fallback, ktory znosi POMINIETY krok mintujacy: albo goly `github.token`, albo `steps.<id>.outputs.token`
+# z alternatywa. Odczyt pola nieobecnego w kontekscie daje w wyrazeniach GitHub Actions wartosc pusta,
+# nie blad — wiec `||` przeprowadza przebieg przez brak aplikacji.
+FALLBACK = re.compile(r"\$\{\{\s*steps\.[A-Za-z_][\w-]*\.outputs\.token\s*\|\|\s*github\.token\s*\}\}")
+
+# Gotowy token wniesiony w sekrecie. `secrets.GITHUB_TOKEN` to wbudowane poswiadczenie przebiegu,
+# nie wklejona wartosc, wiec jest wylaczone z tej definicji.
+SEKRET_JAKO_TOKEN = re.compile(r"secrets\.(?!GITHUB_TOKEN\b)[A-Za-z_][\w]*")
+
+
+def pozycje_poswiadczenia(tresc: str) -> list:
+    """Wartosci wszystkich pozycji poswiadczenia w workflowie, z pominieciem komentarzy."""
+    return POZYCJA.findall(bez_komentarzy(tresc))
+
+
+def gotowy_token_w_sekrecie(tresc: str) -> list:
+    """Pozycje poswiadczenia, ktore oczekuja GOTOWEGO tokenu w sekrecie repozytorium."""
+    return [w for w in pozycje_poswiadczenia(tresc) if SEKRET_JAKO_TOKEN.search(w)]
+
+
+def znosi_brak_appa(tresc: str) -> bool:
+    """Czy KAZDA pozycja poswiadczenia przezyje pominiety krok mintujacy."""
+    pozycje = pozycje_poswiadczenia(tresc)
+    return bool(pozycje) and all(
+        w == "${{ github.token }}" or w == "${{ secrets.GITHUB_TOKEN }}" or FALLBACK.fullmatch(w)
+        for w in pozycje)
+
+
+def test_poswiadczenie_kanalu() -> None:
+    """Czym kanal wejsciowy otwiera pull requesta — i co robi, zanim aplikacja w ogole powstanie.
+
+    DLACZEGO TO JEST ODDZIELNA GRUPA ASERCJI. Poprzedni ksztalt (`secrets.INTAKE_PR_TOKEN ||
+    github.token`) mowil „wklej tu token instalacji Appa". Token instalacji WYGASA PO GODZINIE, wiec
+    sekret dzialalby do konca dnia i milkl nazajutrz, bez zmiany w kodzie, ktora by to tlumaczyla.
+    Sekret ma trzymac KLUCZ PRYWATNY, a token ma powstawac na przebieg (DEC-22).
+    """
+    print("\n== poswiadczenie kanalu wejsciowego (DEC-22) ==")
+
+    # Trzy workflow, a nie dwa: `intake-rebase.yml` FORCE-PUSHUJE galezie kanalu, wiec decyduje o tym,
+    # czy pull request zostanie PONOWNIE sprawdzony po przepisaniu go na nowa baze. Zostawiony na
+    # `github.token` niesie nowy commit ze starymi wynikami bramek.
+    pliki = {nazwa: (ROOT / f".github/workflows/{nazwa}").read_text()
+             for nazwa in ("intake.yml", "external-intake.yml", "intake-rebase.yml")}
+
+    for nazwa, tresc in pliki.items():
+        wf = yaml.safe_load(tresc)
+        kroki_joba = list(wf["jobs"].values())[0]["steps"]
+        mint = [k for k in kroki_joba
+                if str(k.get("uses", "")).startswith("actions/create-github-app-token@")]
+
+        check(f"{nazwa}: token Appa MINTOWANY w przebiegu, akcja przypieta @SHA",
+              bool(MINT.search(tresc)) and len(mint) == 1,
+              f"trafien pinu: {len(MINT.findall(tresc))}, krokow mintujacych: {len(mint)}")
+
+        if not mint:
+            continue
+        krok = mint[0]
+
+        # Warunek MUSI stac na zmiennej, nie na sekrecie: kontekst `secrets` nie jest dostepny
+        # w `if:` kroku, wiec `if: secrets.X != ''` nie jest surowszym wariantem tego samego —
+        # jest warunkiem, ktorego GitHub nie umie obliczyc.
+        check(f"{nazwa}: krok mintujacy jest WARUNKOWY na jawnej zmiennej (secrets nie ma w if:)",
+              "vars.INTAKE_APP_ID" in str(krok.get("if", "")),
+              f"if: {krok.get('if')!r}")
+        check(f"{nazwa}: id aplikacji ze zmiennej, klucz prywatny z sekretu",
+              krok.get("with", {}).get("app-id") == "${{ vars.INTAKE_APP_ID }}"
+              and krok.get("with", {}).get("private-key") == "${{ secrets.INTAKE_APP_KEY }}",
+              str(krok.get("with")))
+        # Token zawezony do TEGO repozytorium — takze wtedy, gdy ktos zainstaluje aplikacje szerzej.
+        # Wartosci z kontekstu przebiegu, bo szablon nie moze nazwac organizacji ani repozytorium.
+        check(f"{nazwa}: token zawezony do tego repozytorium wartosciami z kontekstu przebiegu",
+              krok.get("with", {}).get("owner") == "${{ github.repository_owner }}"
+              and krok.get("with", {}).get("repositories") == "${{ github.event.repository.name }}",
+              str(krok.get("with")))
+
+        check(f"{nazwa}: kazda pozycja poswiadczenia znosi POMINIETY krok mintujacy",
+              znosi_brak_appa(tresc), str(pozycje_poswiadczenia(tresc)))
+
+        # Kolejnosc, nie sama obecnosc: krok mintujacy PO konsumencie daje wyrazenie, ktore zawsze
+        # spada na `github.token` — komplet asercji wyzej bylby zielony, a Appa nie uzylby nikt.
+        i_mint = kroki_joba.index(krok)
+        i_konsument = next((i for i, k in enumerate(kroki_joba)
+                            if "steps.app.outputs.token" in yaml.safe_dump(k)), None)
+        check(f"{nazwa}: krok mintujacy POPRZEDZA pierwszego konsumenta tokenu",
+              i_konsument is not None and i_mint < i_konsument,
+              f"mint={i_mint}, konsument={i_konsument}")
+
+    # NIGDZIE — nie tylko w trzech plikach wyzej. Sekret z gotowym tokenem, do ktorego wraca jeden
+    # workflow, wraca do calego trybu awarii: wartosc bez wlasciciela i bez daty waznosci, ktora
+    # w tym repozytorium znaczy `Contents: write` na granicy.
+    wszystkie = sorted((ROOT / ".github/workflows").glob("*.yml"))
+    z_sekretem = {p.name: gotowy_token_w_sekrecie(p.read_text()) for p in wszystkie}
+    z_sekretem = {k: v for k, v in z_sekretem.items() if v}
+    check("zaden workflow nie oczekuje GOTOWEGO tokenu w sekrecie repozytorium",
+          not z_sekretem, str(z_sekretem))
+    check("skan pozycji poswiadczenia oglada wszystkie workflow (nie jest pusta petla)",
+          len(wszystkie) >= 10 and sum(len(pozycje_poswiadczenia(p.read_text())) for p in wszystkie) >= 8,
+          f"plikow: {len(wszystkie)}")
+
+    # ---------------------------------------------------------------- ANTY-TAUTOLOGIA
+    # Kazdy z trzech detektorow dostaje probki o znanym werdykcie, w tym DOKLADNIE ten ksztalt kodu,
+    # ktory stal w tych workflowach przed DEC-22. Bez tego „zielono" znaczy tylko tyle, ze detektor
+    # niczego nie zglosil — a to samo powie detektor zepsuty.
+    ROZBROJONE = [
+        # (opis, fragment, mint?, znosi brak Appa?, gotowy token w sekrecie?)
+        ("stan sprzed DEC-22 (token wklejany do sekretu)",
+         "        with:\n          token: ${{ secrets.INTAKE_PR_TOKEN || github.token }}\n",
+         False, False, True),
+        ("stan po DEC-22",
+         "      - uses: actions/create-github-app-token@" + "0" * 40 + "\n"
+         "        with:\n          token: ${{ steps.app.outputs.token || github.token }}\n",
+         True, True, False),
+        ("akcja na ruchomej referencji (@v3 zamiast SHA)",
+         "      - uses: actions/create-github-app-token@v3\n"
+         "        with:\n          token: ${{ steps.app.outputs.token || github.token }}\n",
+         False, True, False),
+        ("token Appa BEZ fallbacku — brak zmiennej wywraca krok zamiast go degradowac",
+         "      - uses: actions/create-github-app-token@" + "0" * 40 + "\n"
+         "        with:\n          token: ${{ steps.app.outputs.token }}\n",
+         True, False, False),
+        ("wbudowane poswiadczenie przebiegu to NIE jest wklejony token",
+         "        env:\n          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}\n",
+         False, True, False),
+        ("PAT czlowieka w sekrecie, pod inna nazwa",
+         "        env:\n          GH_TOKEN: ${{ secrets.RELEASE_PAT }}\n",
+         False, False, True),
+        ("KOMENTARZ cytujacy stary ksztalt nie jest kodem",
+         "          # kiedys bylo: token: ${{ secrets.INTAKE_PR_TOKEN || github.token }}\n"
+         "          token: ${{ steps.app.outputs.token || github.token }}\n",
+         False, True, False),
+    ]
+    for opis, probka, ma_mint, ma_fallback, ma_sekret in ROZBROJONE:
+        check(f"anty-tautologia — mint: {opis}",
+              bool(MINT.search(probka)) == ma_mint, probka)
+        check(f"anty-tautologia — fallback: {opis}",
+              znosi_brak_appa(probka) == ma_fallback, str(pozycje_poswiadczenia(probka)))
+        check(f"anty-tautologia — gotowy token w sekrecie: {opis}",
+              bool(gotowy_token_w_sekrecie(probka)) == ma_sekret, str(gotowy_token_w_sekrecie(probka)))
 
 
 # --------------------------------------------------------------------- monitoring
@@ -2570,6 +2726,87 @@ def test_rego() -> None:
     check("policy.yaml deklaruje sekcje control_plane_projects (nie da sie jej po cichu usunac)",
           isinstance(polityka.get("control_plane_projects"), list), str(sorted(polityka.keys())))
 
+    # --- zgoda Security na profil wypuszczajacy dane poza Google Cloud (DEC-23) ----------------------
+    #
+    # PARA ANTY-TAUTOLOGICZNA NA REALNYCH DEKLARACJACH SZABLONU, a nie na fixture'ach reguł: `conftest
+    # verify` sprawdza, czy reguła robi to, co napisano w jej testach, a te trzy przebiegi sprawdzają,
+    # czy KATALOG PROFILI I PLIK CZŁONKÓW, które starter realnie wypuszcza, tę bramkę przechodzą i czy
+    # przestają przechodzić po zdjęciu zgody. Bez tego dałoby się wypuścić szablon, w którym reguła jest
+    # poprawna, a materiał jej nie spełnia — czyli wdrożenie zaczyna od czerwonego CI.
+    zgody = polityka.get("egress_approvals")
+    check("policy.yaml niesie sekcje egress_approvals (zgody Security na profile high-risk)",
+          isinstance(zgody, list) and len(zgody) > 0, str(type(zgody)))
+
+    # NEGATYW: zdejmujemy zgodę i zostawiamy WSZYSTKO inne. To jest dokładnie stan repozytorium sprzed
+    # tej zmiany — profil wypuszczający dane poza Google Cloud, cel podany, zero śladu Security.
+    doc = json.loads(decl.stdout)
+    doc["policy"]["egress_approvals"] = []
+    p = onboarding_na(doc, "bad-egress-bez-zgody.json")
+    check("czlonek z profilem risk:high BEZ zgody Security jest ODRZUCANY", p.returncode != 0, p.stdout[-900:])
+    check("komunikat wskazuje plik i sekcje, w ktorej zgoda ma stanac",
+          "egress_approvals" in p.stdout and "policy.yaml" in p.stdout, p.stdout[-600:])
+
+    # ANTY-TAUTOLOGIA #1 — ten sam wpis ze zgodą przechodzi. Bez tego negatyw wyżej byłby spełniony przez
+    # regułę „odrzuć każdy wniosek z tym profilem", czyli przez zakaz profilu udający bramkę.
+    p = onboarding_na(json.loads(decl.stdout), "ok-egress-ze-zgoda.json")
+    check("ten sam wpis ZE zgoda Security PRZECHODZI (test anty-tautologiczny)",
+          p.returncode == 0, p.stdout[-900:])
+
+    # ANTY-TAUTOLOGIA #2 — RUTYNA NIE PŁACI ZA TĘ BRAMKĘ. Wniosek bez egressu przechodzi przy PUSTEJ
+    # liście zgód. To jest asercja o WĄSKOŚCI klasy: bramka wymagająca człowieka przy każdym z ~50
+    # wniosków miesięcznie zostanie wyłączona przy pierwszym pośpiechu, więc „nie łapie za szeroko"
+    # jest tu wymaganiem, a nie komfortem.
+    doc = json.loads(decl.stdout)
+    doc["policy"]["egress_approvals"] = []
+    doc["members"][name]["profiles"] = [p_ for p_ in doc["members"][name]["profiles"]
+                                        if p_["name"] != "bq-omni-external-read"]
+    doc["members_list"] = [doc["members"][name]]
+    p = onboarding_na(doc, "ok-egress-rutyna.json")
+    check("wniosek BEZ egressu przechodzi przy pustej liscie zgod (bramka nie lapie rutyny)",
+          p.returncode == 0, p.stdout[-900:])
+
+    # NEGATYW: zgoda wydana na inny cel. Podmiana bucketa jest rutynowym diffem w pliku członka i bez tej
+    # reguły przechodziłaby pod zgodą wydaną na coś zupełnie innego — zgoda opisywałaby wtedy zdolność
+    # wysyłania, a nie kierunek wypływu, który jest całym przedmiotem decyzji.
+    doc = json.loads(decl.stdout)
+    for prof_ in doc["members"][name]["profiles"]:
+        if prof_["name"] == "bq-omni-external-read":
+            prof_["params"]["external_resources"] = ["s3://podmieniony-po-zatwierdzeniu"]
+    doc["members_list"] = [doc["members"][name]]
+    p = onboarding_na(doc, "bad-egress-inny-cel.json")
+    check("podmiana celu po zatwierdzeniu jest ODRZUCANA (zgoda pokrywa CELE, nie zdolnosc)",
+          p.returncode != 0, p.stdout[-900:])
+
+    # NEGATYW: zgoda wygasła. `expires` jest obowiązkowe właśnie po to, żeby ten przypadek istniał —
+    # bezterminowa zgoda na wyprowadzanie danych poza Google Cloud to obniżenie baseline pod inną nazwą.
+    doc = json.loads(decl.stdout)
+    for w in doc["policy"]["egress_approvals"]:
+        w["expires"] = "2000-01-01"
+    p = onboarding_na(doc, "bad-egress-wygasla.json")
+    check("wygasla zgoda Security jest ODRZUCANA", p.returncode != 0, p.stdout[-900:])
+
+    # NEGATYW NA KATALOGU, NIE NA WPISIE: najtańsze obejście tej bramki to jedna linia w profilu.
+    # `risk` jest teraz wejściem kontroli, więc musi być KONSEKWENCJĄ kształtu, a nie deklaracją o nim.
+    doc = json.loads(decl.stdout)
+    doc["profiles"]["bq-omni-external-read"]["risk"] = "low"
+    p = onboarding_na(doc, "bad-egress-risk-zanizony.json")
+    check("zanizenie `risk` profilu wypuszczajacego dane poza GCP jest ODRZUCANE",
+          p.returncode != 0, p.stdout[-900:])
+
+    # NEGATYW: PROFIL DOSTAJE EGRESS PÓŹNIEJ, bez ani jednego pull requesta u członka. To jest powód, dla
+    # którego reguła siedzi na DEKLARACJACH, a nie odpala się raz przy onboardingu — członkowie profilu
+    # stają się wnioskami wysokiego ryzyka w sekundzie, w której zmienia się katalog.
+    doc = json.loads(decl.stdout)
+    doc["policy"]["egress_approvals"] = []
+    doc["profiles"]["vertex-online-serving"]["risk"] = "high"
+    doc["profiles"]["vertex-online-serving"]["egress"] = [{
+        "title": "swiezy-egress", "identities_from": "caller_identities",
+        "to_external_from": "caller_identities",
+        "operations": [{"service": "bigquery.googleapis.com", "permissions": ["externalResource.read"]}]}]
+    p = onboarding_na(doc, "bad-egress-profil-zmieniony.json")
+    check("egress dolozony do profilu PO onboardingu tez jest ODRZUCANY",
+          p.returncode != 0, p.stdout[-900:])
+
     # --- bramka promocji pyta o PRZEJŚCIE, nie o stan (kontrakt = etapy zastosowane) -----------------
     #
     # Reguła związana wyłącznie z `stage: enforced` obowiązuje DOPÓKI członek jest enforced — także długo
@@ -2760,6 +2997,78 @@ def test_control_plane_lista() -> None:
     wyzwalacz = plan.split("jobs:", 1)[0]
     check("plan.yml ma `tools/**` w sciezkach wyzwalacza (guard widzi zmiane samego siebie)",
           '"tools/**"' in wyzwalacz, wyzwalacz)
+
+
+# --------------------------------------------------------------------- rozdzielenie wlasnosci
+def test_codeowners_rozdzielenie() -> None:
+    """DEC-23: CODEOWNERS musi opisywac rozdzielenie zgody od wniosku — sprawdzane jako RELACJA zbiorow.
+
+    Bramka `egress_approvals` ma wartosc dokladnie dopoty, dopoki plik ze zgodami (`perimeter/policy.yaml`)
+    ma innych wlascicieli niz plik z wnioskami (`perimeter/projects.yaml`). Zrownanie tych dwoch linii nie
+    wyglada w diffie na oslabienie kontroli — wyglada na uporzadkowanie listy, i wlasnie dlatego pyta o to
+    maszyna, a nie recenzent.
+
+    Kazdy przypadek negatywny jest MUTACJA rozpakowanego szablonu, nie recznie napisanym plikiem: guard,
+    ktory testujemy na wlasnym fixture, moze rozjechac sie z materialem, ktory starter naprawde wypuszcza.
+    """
+    print("\n== rozdzielenie wlasnosci w CODEOWNERS (DEC-23) ==")
+    plik = ROOT / ".github/CODEOWNERS"
+    oryginal = plik.read_text()
+
+    def uruchom():
+        return sh([sys.executable, "tools/codeowners_check.py"], cwd=ROOT)
+
+    try:
+        # --- 1. POZYTYW: szablon, ktory starter wypuszcza, przechodzi -----------------------------
+        p = uruchom()
+        check("codeowners_check przechodzi na rozpakowanym starterze", p.returncode == 0,
+              p.stdout + p.stderr)
+
+        # Placeholdery zespolow NIE sa bledem (na koncie prywatnym zespolow nie da sie utworzyc), ale
+        # MUSZA byc nazwane przy kazdym przebiegu. Cicha zgoda na niedokonczona konfiguracje jest tym,
+        # z czego bierze sie „kontrola opisana i nieistniejaca".
+        check("codeowners_check nazywa placeholdery zespolow jako niedokonczona konfiguracje",
+              "NIEDOKONCZONE" in p.stdout and "placeholder" in p.stdout, p.stdout)
+
+        # --- 2. NEGATYW: zrownanie wlascicieli -----------------------------------------------------
+        # Plik ze zgodami dostaje DOKLADNIE tych samych wlascicieli co plik z wnioskami. Diff wyglada
+        # na porzadki, a znosi cala wlasnosc bezpieczenstwa: zgode wystawia ten, kogo ona dotyczy.
+        wlasciciele_wnioskow = next(l.split(None, 1)[1].strip() for l in oryginal.splitlines()
+                                    if l.startswith("/perimeter/projects.yaml"))
+        zrownany = "\n".join(
+            f"/perimeter/policy.yaml      {wlasciciele_wnioskow}" if l.startswith("/perimeter/policy.yaml") else l
+            for l in oryginal.splitlines())
+        plik.write_text(zrownany)
+        p = uruchom()
+        check("zrownanie wlascicieli policy.yaml i projects.yaml jest ODRZUCANE", p.returncode != 0,
+              p.stdout + p.stderr)
+        check("komunikat tlumaczy KONSEKWENCJE (zgoda wystawiana samemu sobie)",
+              "samemu sobie" in p.stdout, p.stdout[-800:])
+
+        # --- 3. NEGATYW: plik niosacy decyzje traci wlasna regule ----------------------------------
+        # Usuniecie linii nie zostawia pliku bez wlasciciela (jest domyslna `*`), wiec bez tego guardu
+        # zmiana przechodzi w ciszy — a razem z nia znika rozdzielenie.
+        bez_reguly = "\n".join(l for l in oryginal.splitlines() if not l.startswith("/perimeter/policy.yaml"))
+        plik.write_text(bez_reguly)
+        p = uruchom()
+        check("usuniecie wlasnej reguly dla policy.yaml jest ODRZUCANE (spadek na domyslna `*`)",
+              p.returncode != 0, p.stdout + p.stderr)
+
+        # --- 4. NEGATYW: brak pliku ----------------------------------------------------------------
+        # Na wdrozeniu z ochrona galezi brak CODEOWNERS znaczy „kazdy moze zatwierdzic wszystko".
+        plik.unlink()
+        p = uruchom()
+        check("brak pliku CODEOWNERS jest ODRZUCANY (fail-closed)", p.returncode != 0,
+              p.stdout + p.stderr)
+    finally:
+        plik.write_text(oryginal)
+
+    # Bramka uruchamiana recznie nie jest bramka. Guard jedzie w akcji zlozonej `bramki-tresci`, czyli
+    # na OBU torach — pull request i apply — bo bez ochrony galezi tor apply jest jedynym, ktorego nie
+    # da sie ominac pushem na galaz domyslna (DEC-16).
+    akcja = (ROOT / ".github/actions/bramki-tresci/action.yml").read_text()
+    check("codeowners_check jest wpiety w bramki tresci (oba tory)",
+          "tools/codeowners_check.py" in akcja, akcja[-400:])
 
 
 # --------------------------------------------------------------------- kompletnosc rejestru decyzji
@@ -4068,6 +4377,30 @@ def test_schemas() -> None:
     p = sh(["check-jsonschema", "--schemafile", "schemas/member.schema.json", "czlonek-wyjatek-krotki.yaml"], cwd=ROOT)
     check("schema czlonka ODRZUCA wyjatek bez uzasadnienia (min. 20 znakow)", p.returncode != 0, p.stdout[-400:])
 
+    # POLE `exceptions:` MA BYC ODRZUCANE, A NIE IGNOROWANE (DEC-23).
+    #
+    # Do 2026-08-12 pole istnialo w schemacie, mialo regule OPA na dlugosc uzasadnienia i wpis w CODEOWNERS
+    # obiecujacy udzial Security — a `grep -rn "exceptions" terraform/` dawal ZERO: renderer nie tworzyl
+    # z niego ani jednej reguly. Dywizja deklarowala wyjatek, dostawala zielony pull request, merge, apply
+    # — i nie powstawalo nic. Usuniecie pola zamienia cicha atrape w TWARDA ODMOWE przez
+    # `additionalProperties: false`, i to jest wlasnie ta zmiana, ktorej ten przypadek pilnuje.
+    czlonek.pop("control_plane_exception", None)
+    czlonek["exceptions"] = [{
+        "title": "surowa regula spoza katalogu", "justification": "uzasadnienie dostatecznie dlugie",
+        "kind": "egress", "identities": ["serviceAccount:a@b.iam.gserviceaccount.com"],
+        "operations": [{"service": "storage.googleapis.com", "methods": ["google.storage.objects.get"]}]}]
+    (ROOT / "czlonek-exceptions.yaml").write_text(yaml.safe_dump(czlonek, sort_keys=False, allow_unicode=True))
+    p = sh(["check-jsonschema", "--schemafile", "schemas/member.schema.json", "czlonek-exceptions.yaml"], cwd=ROOT)
+    check("schema czlonka ODRZUCA pole `exceptions` (nie renderowalo niczego, DEC-23)",
+          p.returncode != 0, p.stdout[-400:])
+    # Nawet PUSTA lista musi odpasc: `exceptions: []` bylo wypisywane przez renderer w kazdym wpisie, wiec
+    # przepuszczenie jej zostawiloby pole w materiale i w glowach — jako format, ktory „chyba dziala".
+    czlonek["exceptions"] = []
+    (ROOT / "czlonek-exceptions-pusty.yaml").write_text(yaml.safe_dump(czlonek, sort_keys=False, allow_unicode=True))
+    p = sh(["check-jsonschema", "--schemafile", "schemas/member.schema.json", "czlonek-exceptions-pusty.yaml"], cwd=ROOT)
+    check("schema czlonka ODRZUCA takze puste `exceptions: []`", p.returncode != 0, p.stdout[-400:])
+    czlonek.pop("exceptions", None)
+
     # KSZTALTY REGUL SA ROZDZIELONE PER KIERUNEK — i to jest bramka, nie porzadek w pliku.
     #
     # Do 2026-08 `ingress` i `egress` dzielily jedna definicje (`ruleList`), wiec `access_levels_from`
@@ -4613,6 +4946,7 @@ def main() -> int:
     test_przyklad_repo_dywizji()
     test_kanal_dywizji()
     test_kanal_ticketowy()
+    test_poswiadczenie_kanalu()
     test_monitoring()
     test_alerty()
     test_brownfield()
@@ -4623,6 +4957,7 @@ def main() -> int:
     test_lint_and_pinning()
     test_rego()
     test_control_plane_lista()
+    test_codeowners_rozdzielenie()
     test_kompletnosc_decyzji()
     test_tools()
     test_preflight()

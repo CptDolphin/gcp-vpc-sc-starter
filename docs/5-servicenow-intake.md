@@ -19,7 +19,7 @@ perimetru i nie wywołuje API Google.
 | Robi | Nie robi |
 |---|---|
 | zbiera wniosek w ustrukturyzowanej formie | nie zapisuje niczego w Access Context Managerze |
-| przeprowadza approval (dywizja → networking → security dla profili `risk: high`) | nie decyduje, czy projekt jest chroniony (o tym decyduje merge PR-a i `stage`) |
+| przeprowadza approval (dywizja → networking → security dla profili `risk: high`) | **nie jest miejscem, w którym zgoda Security zaczyna obowiązywać** — tym jest wpis w `perimeter/policy.yaml` §`egress_approvals` (DEC-23) |
 | wysyła `workflow_dispatch` do repo perimetru | nie tworzy projektów GCP ani sieci (patrz §7) |
 | zostaje rekordem „kto poprosił, kto zatwierdził, kiedy" | nie zastępuje audytu w gicie — ten jest w historii PR-ów |
 
@@ -43,7 +43,7 @@ Nazwy techniczne po lewej to nazwy zmiennych w Catalog Item; automat wysyła je 
 | `profiles` | Multi-row (lista) | tak, min. 1 | każdy wiersz: `name` + parametry | dozwolone nazwy = katalog `perimeter/profiles/` opublikowany w kontrakcie |
 | `profiles[].params` | Key-value per wiersz | tak | klucze = `parameters` profilu | brak parametru → OPA odrzuca PR z nazwą brakującego pola |
 | `use_case` | Multi-line text | tak | min. 40 znaków | nie trafia do YAML-a; zostaje w tickecie i w opisie PR-a jako uzasadnienie |
-| `data_classification` | Choice | tak | słownik klasyfikacji danych organizacji | steruje tym, czy wymagany jest approval Security (profile `risk: high` — zawsze) |
+| `data_classification` | Choice | tak | słownik klasyfikacji danych organizacji | wejście do decyzji Security, nie jej egzekwowanie — bramka czyta `risk` profilu z katalogu, a nie to pole (DEC-23) |
 | `requested_by` | Reference (User) | auto | — | wypełnia SNOW |
 
 **Czego formularz świadomie NIE ma:**
@@ -68,6 +68,20 @@ wnioskodawca (dywizja)
       └─ approval 3: security  ── TYLKO gdy któryś z profili ma `risk: high`
                                   (dziś: bq-omni-external-read — jedyny, który wypuszcza dane z GCP)
 ```
+
+**Approval 3 jest ZAPISEM DECYZJI, a nie jej egzekwowaniem — i ta różnica kosztowała już jeden defekt.**
+Do 2026-08-12 ten diagram był jedynym miejscem, w którym udział Security istniał: `perimeter/projects.yaml`
+ma w CODEOWNERS wyłącznie zespół sieciowy, a pole `risk` nie sterowało niczym (`grep -rn "risk" terraform/
+policy/ .github/` → publikacja w kontrakcie i enum w schemacie, zero bramek). Ticket z pominiętym approvalem
+3 wjeżdżał do granicy tak samo gładko jak każdy inny.
+
+Od DEC-23 zgoda Security **materializuje się jako wpis** w `perimeter/policy.yaml` §`egress_approvals` —
+w pliku, którego Security jest właścicielem w CODEOWNERS — i wymienia członka, profil oraz **dokładne cele**,
+z obowiązkową datą wygaśnięcia. Bez tego wpisu reguła OPA odrzuca wniosek, i robi to **także na ścieżce
+apply**, więc nie da się jej ominąć commitem prosto na gałąź domyślną. Praktyczna konsekwencja dla ścieżki
+ticketowej: po approvalu 3 ktoś z Security otwiera jednolinijkowy pull request do `policy.yaml`. To jest
+jedyny krok ręczny, jaki ta zgoda dokłada — i jedyny, który zostawia po sobie ślad dający się zaudytować bez
+dostępu do ServiceNow i bez dostępu do GitHuba.
 
 Po ostatnim approvalu Flow Designer wysyła:
 
@@ -156,11 +170,35 @@ zaparkowane przebiegi widać w zakładce Actions, więc ktoś **mógłby** je za
 tego nie wymusza, a PR jest scalalny bez tego kliknięcia. Reviewer patrzący na taki PR widzi komplet zer,
 nie czerwoną bramkę.
 
-**Konfiguracja wspierana:** token instalacji GitHub Appa w `secrets.INTAKE_PR_TOKEN` (oba workflow
-wejściowe czytają ten sam sekret). PR otwarty tym tokenem powinien uruchamiać bramki jak każdy inny — to
-**przewidywanie, nie pomiar**: Appa nadal nie ma, więc nie było czego zmierzyć. Domknięcie tej luki to
-jeden przebieg: otworzyć PR-a tokenem Appa i sprawdzić `check-runs.total_count > 0`. Aplikacji nie da
-się założyć przez API — to ta sama pozycja „wymaga człowieka", co App dywizji.
+#### Konfiguracja wspierana: token Appa **mintowany w przebiegu**, nie wklejony do sekretu
+
+Trzy workflow, które dotykają gałęzi i PR-ów kanału (`intake.yml`, `external-intake.yml`,
+`intake-rebase.yml`), wołają `actions/create-github-app-token` i biorą token z jego outputu:
+
+| co | gdzie | dlaczego tam |
+|---|---|---|
+| `INTAKE_APP_ID` | **zmienna** repozytorium (`vars`) | identyfikator, nie poświadczenie — a `secrets` nie jest widoczne w `if:` kroku, więc na czymś jawnym musi stać warunek |
+| `INTAKE_APP_KEY` | **sekret** repozytorium | klucz prywatny aplikacji; ważny do odwołania, więc nadaje się do sekretu |
+
+**Dlaczego nie „wklej gotowy token do sekretu":** token instalacji Appa **wygasa po godzinie**. Wklejony
+raz działa do końca dnia i milknie nazajutrz — awaria bez żadnej zmiany w kodzie, która by ją tłumaczyła,
+w kanale, który i tak odpala się rzadko. Sekret trzyma więc klucz, a token powstaje na każdy przebieg.
+
+**Zakres aplikacji:** `Contents: Read and write` + `Pull requests: Read and write`, instalacja
+**wyłącznie** na repozytorium perimetru. `owner`/`repositories` w kroku mintującym czytane są z kontekstu
+przebiegu, więc token jest zawężony do tego jednego repozytorium także wtedy, gdy aplikację ktoś
+zainstaluje szerzej.
+
+**Degradacja, gdy Appa jeszcze nie ma.** Krok mintujący ma `if: vars.INTAKE_APP_ID != ''`, a wyrażenie
+tokenu brzmi `${{ steps.app.outputs.token || github.token }}`. Bez zmiennej krok jest **pomijany**,
+odczyt nieobecnego pola kontekstu daje wartość pustą (nie błąd), i kanał zachowuje się dokładnie tak jak
+wyżej: staje na kroku otwarcia PR-a, głośno, ze sprzątnięciem gałęzi. Dodanie dwóch wartości przełącza go
+na Appa **bez zmiany w kodzie**.
+
+PR otwarty tokenem Appa powinien uruchamiać bramki jak każdy inny — to **przewidywanie, nie pomiar**:
+Appa nadal nie ma, więc nie było czego zmierzyć. Domknięcie tej luki to jeden przebieg: otworzyć PR-a
+tokenem Appa i sprawdzić `check-runs.total_count > 0`. Aplikacji nie da się założyć przez API — to ta
+sama pozycja „wymaga człowieka", co App dywizji.
 
 ---
 

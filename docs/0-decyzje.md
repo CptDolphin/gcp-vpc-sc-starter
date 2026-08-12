@@ -1,6 +1,6 @@
-# Decyzje, na których stoi ten starter (DEC-1…DEC-19)
+# Decyzje, na których stoi ten starter (DEC-1…DEC-23)
 
-Dziewiętnaście rozstrzygnięć, które określają kształt repozytorium. Kod odsyła tutaj skrótem `DEC-1`…`DEC-19` — jeśli komentarz
+Dwadzieścia trzy rozstrzygnięcia, które określają kształt repozytorium. Kod odsyła tutaj skrótem `DEC-1`…`DEC-23` — jeśli komentarz
 w pliku mówi „(DEC-4)", to znaczy: „powód tej linijki jest opisany w DEC-4, nie zmieniaj jej bez przeczytania".
 
 Każda pozycja ma tę samą strukturę: **decyzja** · **dlaczego** · **co odrzucono i dlaczego**. Odrzucone warianty są
@@ -76,9 +76,19 @@ realnego). Prędkość, którą kupuje, jest zresztą nieistotna przy zmianie, k
 
 **Decyzja.** Zespół wybiera **profil** z katalogu (`perimeter/profiles/*.yaml`), nie pisze reguł. Profil to
 wersjonowany szablon reguł ingress/egress, sparametryzowany danymi członka (numer projektu, konta serwisowe, access
-level). Reguły renderuje Terraform z pary (członek × profil) — nikt spoza zespołu platformy nie edytuje HCL. Ścieżka
-wyjątku istnieje jawnie (`exceptions[]` w pliku członka, approval security, uzasadnienie); **trzeci taki sam wyjątek
-to sygnał do stworzenia profilu**, nie do czwartego wyjątku.
+level). Reguły renderuje Terraform z pary (członek × profil) — nikt spoza zespołu platformy nie edytuje HCL.
+
+> **SPROSTOWANIE (DEC-22, 2026-08-12).** Ta decyzja opisywała drugą ścieżkę: *„ścieżka wyjątku istnieje jawnie
+> (`exceptions[]` w pliku członka, approval security, uzasadnienie); trzeci taki sam wyjątek to sygnał do
+> stworzenia profilu"*. **Ta ścieżka nigdy nie działała.** Pole było w schemacie, miało regułę OPA na długość
+> uzasadnienia i wpis w CODEOWNERS obiecujący udział Security — a `grep -rn "exceptions" terraform/` dawał
+> **zero**: renderer nie tworzył z niego ani jednej reguły. Dywizja deklarowała wyjątek, dostawała zielony pull
+> request, merge, apply — i nie powstawało nic. Awaria była fail-closed (ruch nadal zablokowany), więc nie
+> zagrażała danym; zagrażała zaufaniu i przepustowości, bo zawór ucieczki miał pochłaniać wszystko, czego katalog
+> nie pokrywa. **Pole zostało usunięte** (schemat, reguła OPA, renderer wpisów, CODEOWNERS). Jedyną drogą
+> dołożenia reguły spoza katalogu jest dziś **nowy profil** — w `perimeter/profiles/`, pod CODEOWNERS Security.
+> Zdanie „trzeci taki sam wyjątek to sygnał do stworzenia profilu" zostaje jako zasada projektowania katalogu;
+> zmienia się to, że pierwszy też nim jest.
 
 **Dlaczego — dwa powody, oba twarde.**
 1. **Limit atrybutów.** Perimeter ma 6 000 atrybutów na konfigurację, liczonych **osobno** dla egzekwowanej
@@ -1385,6 +1395,227 @@ dywizji to trzydzieści kopii walidatora, z których każda starzeje się osobno
 
 ---
 
+## DEC-22 — Kanał wejściowy MINTUJE token Appa w przebiegu; sekret trzyma KLUCZ, nie token
+
+**Decyzja.** Trzy workflow, które w repozytorium perimetru dotykają gałęzi i pull requestów kanału
+wejściowego — `intake.yml`, `external-intake.yml`, `intake-rebase.yml` — wołają
+`actions/create-github-app-token` i biorą poświadczenie z jego outputu:
+
+```yaml
+- name: token instalacji Appa (gdy App jest skonfigurowany)
+  id: app
+  if: vars.INTAKE_APP_ID != ''
+  uses: actions/create-github-app-token@<40-znakowy SHA>
+  with:
+    app-id: ${{ vars.INTAKE_APP_ID }}
+    private-key: ${{ secrets.INTAKE_APP_KEY }}
+    owner: ${{ github.repository_owner }}
+    repositories: ${{ github.event.repository.name }}
+# …
+    token: ${{ steps.app.outputs.token || github.token }}
+```
+
+Zakres aplikacji: `Contents: Read and write` + `Pull requests: Read and write`, instalacja **wyłącznie**
+na repozytorium perimetru. Sekret `INTAKE_PR_TOKEN` — miejsce na gotowy token — **znika**.
+
+**Powód 1: token instalacji żyje GODZINĘ.** Poprzedni kształt (`secrets.INTAKE_PR_TOKEN || github.token`)
+mówił „wklej tu token instalacji Appa". Taki sekret działa do końca dnia i milknie nazajutrz, bez żadnej
+zmiany w kodzie ani w konfiguracji, która by to tłumaczyła. W kanale odpalanym rzadko oznacza to awarię
+odkrywaną przy zgłoszeniu, którego akurat nikt nie chce debugować. Do sekretu nadaje się **klucz
+prywatny** aplikacji — ważny do odwołania. Token ma powstawać na przebieg.
+
+**Powód 2: przełącznik repozytorium NIE jest alternatywą — i to jest zmierzone, nie wywnioskowane.**
+Nasuwająca się „naprawa" brzmi: włącz *Allow GitHub Actions to create and approve pull requests*
+(`can_approve_pull_request_reviews`) i zostaw `GITHUB_TOKEN`. Pomiar (2026-08-11, #1977, przełącznik
+włączony na kilka minut za zgodą właściciela repozytorium): PR **powstaje**, przebiegi `pull_request`
+też powstają — po jednym na `validate` i `plan` — ale każdy jest `completed` / `action_required` /
+`jobs: []`. Na PR-ze `check-runs.total_count` = **0**, status zbiorczy `pending` z zerem wpisów,
+`gh pr checks` → „no checks reported", a PR mimo to **MERGEABLE**. Kontrola wiążąca to z TOKENEM, a nie
+ze ścieżkami triggera: `action_required` wystąpiło na dokładnie tych dwóch przebiegach ze stu ostatnich,
+przy ludzkich PR-ach tego samego dnia z zielonymi `validate`+`plan`.
+
+Przełącznik zamienia więc kanał **niedziałający** na kanał **omijający wszystkie bramki** — schema, OPA,
+budżet i `plan` wiszą na `pull_request`. Naiwna naprawa jest gorsza od usterki, więc
+`can_approve_pull_request_reviews` zostaje `false`, a poświadczenie zmienia się zamiast ustawienia.
+
+**Powód 3: fallback jest częścią decyzji, nie niedoróbką.** Krok mintujący jest warunkowy, bo bez tego
+repozytorium bez aplikacji wywracałoby się na `Set up job` zamiast paść tam, gdzie pada dziś — na kroku
+otwarcia PR-a, głośno, ze sprzątnięciem wypchniętej gałęzi. Warunek stoi na **zmiennej**, nie na sekrecie,
+bo kontekst `secrets` nie jest dostępny w `if:` kroku. Wyrażenie `steps.app.outputs.token || github.token`
+znosi krok pominięty: odczyt pola nieobecnego w kontekście daje w wyrażeniach GitHub Actions wartość
+pustą, a nie błąd.
+
+**Kontrola, bez której ten fallback jest deklaracją** i którą wykonuje się na wdrożeniu **przed**
+założeniem aplikacji: przelot kanału ma dać **ten sam** wynik co przed zmianą — kroki walidacyjne
+zielone, stop dokładnie na kroku otwarcia PR-a z komunikatem
+`GitHub Actions is not permitted to create or approve pull requests`, gałąź sprzątnięta. Inny wynik —
+w szczególności padnięcie na `Set up job` albo na kroku mintującym — znaczy, że warunek albo wyrażenie
+tokenu nie znoszą braku aplikacji. Zapis pomiaru należy do dokumentacji wdrożenia, nie do szablonu.
+
+**Powód 4: dwie ścieżki uwierzytelnienia to dwa tryby awarii.** Rozważone i **odrzucone**: zostawić
+`secrets.INTAKE_PR_TOKEN` jako drugą drogę (`steps.app.outputs.token || secrets.INTAKE_PR_TOKEN ||
+github.token`). Kosztuje jedną linijkę i dokłada pytanie „którym poświadczeniem poszedł ten przebieg"
+do **każdej** diagnozy kanału — przy czym odpowiedzi nie widać w logu, bo obie wartości są maskowane.
+Sekret bez właściciela i bez daty ważności żyje w ustawieniach repozytorium latami; ten akurat trzymałby
+`Contents: write` na granicy. Jedna droga, jeden tryb awarii.
+
+### Alternatywy odrzucone
+
+**1. Personal Access Token człowieka w sekrecie.** Działa od ręki i nie wymaga zakładania aplikacji.
+Odrzucone: wiąże zmianę granicy z **kontem osoby** (odejście z zespołu = cichy zanik kanału), ma zakres
+konta, a nie repozytorium, i wygasa w terminie, o którym nie wie nikt poza jego właścicielem. PR-y
+kanału podpisywałaby wtedy osoba, która ich nie widziała.
+
+**2. Jedna aplikacja do wszystkiego (ta sama, co w kanale dywizji).** Odrzucone i to jest granica
+bezpieczeństwa, nie porządek: aplikacja dywizji ma klucz **w repozytorium dywizji**. Dołożenie jej
+`Contents: write` na repo perimetru dałoby dywizji prawo zapisu do kodu granicy, obok bramek wiszących
+na `pull_request` — dokładnie ta ścieżka, którą zamknęło zawężenie kanału do `workflow_dispatch`.
+Dwa różne zakresy mieszkają w dwóch różnych miejscach; rozdzielenie kluczy jest tu całą różnicą.
+
+**3. `Pull requests: Write` bez `Contents: Write`.** Odrzucone po przeczytaniu tego, co robi krok:
+`create-pull-request` najpierw **wypycha gałąź**, a dopiero potem woła API pull requestów, a
+`intake-rebase.yml` dodatkowo force-pushuje gałęzie kanału. Bez `Contents: write` kanał padałby o krok
+wcześniej niż dziś. `Pull requests` zostaje `Read and write` — token może PR-a otworzyć, a **nie może go
+zatwierdzić ani zmergować**: bot proponuje, bramki oceniają, człowiek merguje.
+
+### Konsekwencje
+
+* Wdrożenie ma dwie pozycje „wymaga człowieka" zamiast jednej: aplikacji nie da się utworzyć przez API.
+  Do czasu, aż powstanie, kanał **jest niedziałający i wygląda na niedziałający** — to stan świadomy.
+* Zmienna `INTAKE_APP_ID` jest jawna z premedytacją. To identyfikator, nie poświadczenie, a warunek na
+  czymś jawnym jest jedyną drogą do warunkowego kroku (`secrets` nie ma w `if:`).
+* `owner`/`repositories` czytane z kontekstu przebiegu zawężają token do jednego repozytorium także
+  wtedy, gdy ktoś zainstaluje aplikację szerzej — konfiguracja instalacji nie jest wtedy jedyną obroną.
+* Selftest pilnuje trzech własności naraz: każdy z trzech workflowów mintuje token, każdy ma warunkowy
+  krok i wyrażenie z fallbackiem, i **żaden** workflow nie czyta gotowego tokenu z własnego sekretu.
+
+---
+
+## DEC-23 — Zgoda Security na wypuszczenie danych poza Google Cloud jest WPISEM w pliku, którego Security jest właścicielem, a nie approvalem w GitHubie
+
+**Decyzja.** Wpis członka, który wybiera profil `risk: high` (czyli taki, którego reguła egress ma
+`to_external_from` — cel poza Google Cloud) i podaje niepusty cel, jest **odrzucany**, dopóki
+`perimeter/policy.yaml` §`egress_approvals` nie niesie **ważnej** zgody nazywającej tego członka, ten profil
+i **dokładnie te cele**. Zgoda ma obowiązkowe `expires` i uzasadnienie ≥ 40 znaków. Egzekwuje to reguła
+`vpcsc.onboarding`, uruchamiana przez akcję `bramki-tresci`, czyli **na obu torach — pull request i apply**.
+
+Razem z tym: `risk` przestaje być etykietą opisową i staje się **wejściem bramki**, więc druga reguła nie
+pozwala mu zaniżyć kształtu (egress poza Google Cloud ⇒ `high`; jakikolwiek egress ⇒ nie `low`). Pole
+`exceptions[]` w pliku członka **znika** (sprostowanie do DEC-3). CODEOWNERS przestaje obiecywać ścieżkę,
+której nie ma, a `tools/codeowners_check.py` pilnuje jedynej własności, na której ten układ stoi.
+
+**Kontekst — co było zmierzone.** `perimeter/projects.yaml` ma w CODEOWNERS wyłącznie zespół sieciowy.
+Profil `bq-omni-external-read` jest jedyną regułą w katalogu, która pozwala danym opuścić Google Cloud,
+a wchodzi do granicy **edycją tego pliku**. Cztery miejsca twierdziły, że wymaga to zgody Security
+(komentarz `risk` w profilu — *„steruje ścieżką review (validate.yml)"*, nagłówek `bq-omni-external-read`,
+`docs/5-servicenow-intake.md`, DEC-3), a mechanicznie nie robiło tego nic:
+`grep -rn "risk" terraform/ policy/ .github/` → publikacja w kontrakcie, enum w schemacie, asercja w tftest.
+**Zero bramek.** Ten sam defekt drugi raz: `exceptions[]` miało schemat, regułę OPA i wpis w CODEOWNERS,
+a `grep -rn "exceptions" terraform/` → zero. Zadeklarowana kontrola, której nie ma, jest gorsza od jej braku,
+bo produkuje fałszywe poczucie pokrycia — i jest to dokładnie ta klasa, którą rozpoznaje DEC-20.
+
+### Dlaczego reguła, a nie CODEOWNERS
+
+**1. Rozdzielenie idzie po ZAWARTOŚCI, nie po ścieżce.** Wniosek o profil zewnętrzny i wniosek o zwykły
+serving to ta sama linia w tym samym pliku. CODEOWNERS dopasowuje **ścieżki**, więc albo Security recenzuje
+wszystkie wnioski (przy ~50 miesięcznie: recenzja, która najpierw staje się pieczątką, a potem znika), albo
+żaden. Rozdzielenie po treści jest z definicji regułą polityki, nie regułą własności pliku.
+
+**2. Bez ochrony gałęzi CODEOWNERS nie jest egzekwowany przez NIC.** Na repozytorium prywatnym w darmowym
+planie `branches/main/protection` i `rulesets` odpowiadają `403 Upgrade to GitHub Pro`, więc
+`require_code_owner_reviews` nie ma gdzie zadziałać, a commit wypchnięty prosto na gałąź domyślną omija cały
+tor pull requesta. Reguła jedzie w `bramki-tresci`, czyli **także na ścieżce apply** (DEC-16) — zatrzymanie
+następuje u **mutatora**, a nie przy przycisku w GitHubie. To jest ta sama konstrukcja, którą DEC-17 zastosował
+do promocji: rozpoznanie po **treści deklaracji**, zatrzymanie na ścieżce, którą realnie zmienia się granicę.
+
+**3. Zgoda ma być artefaktem, nie kliknięciem.** Approval w GitHubie nie ma daty ważności, nie mówi CZEGO
+dotyczył i znika z historii przy pierwszym force-pushu. Wpis w `policy.yaml` jest diffowalny, wygasa sam
+i wymienia cele — a `policy.yaml` **jest** plikiem Security w CODEOWNERS.
+
+### Dlaczego nie rozszerzenie bramki promocji (DEC-17)
+
+Kusi, bo problem wygląda podobnie: nieodwracalny skutek, którego `git revert` nie cofa. Ale tamta bramka pyta
+o **MOMENT** („czy wykonanie tego apply, teraz, zacznie komuś odmawiać") i zwalnia ją pole formularza
+`workflow_dispatch`, wpisywane przez osobę **uruchamiającą apply**, czyli zespół sieciowy. Zgoda Security
+przeniesiona do tamtego pola byłaby zgodą wpisywaną przez zatwierdzanego — czyli dokładnie defektem, który ta
+decyzja zamyka, tylko przeniesionym o jeden plik dalej. Dodatkowo treść pola formularza nie zostaje w repo:
+nie ma daty ważności, nie da się jej zrecenzować przed uruchomieniem ani odtworzyć po fakcie.
+
+To jest pytanie o **TREŚĆ** deklaracji, więc mieszka tam, gdzie reszta pytań o treść, i wykonuje się na obu
+torach. Rozdział „treść kontra moment" pozostaje dokładnie tam, gdzie postawił go DEC-16.
+
+### Dlaczego bramka pyta o STAN, a nie o PRZEJŚCIE (i dlaczego to nie łamie DEC-18)
+
+DEC-18 przestawił bramkę promocji na pytanie o przejście, bo jej dowód **odwraca znaczenie**: po promocji te
+same naruszenia są odmowami, czyli miarą sukcesu — reguła pytająca o stan zamieniała się w blokadę repo
+wyzwalaną przez poprawne działanie granicy (zmierzone: 2 odrzucenia na wnioskach niezwiązanych z promocją).
+
+Tutaj nic się nie odwraca. „Ta dywizja może wysyłać dane do `s3://X`" jest uprawnieniem **stojącym** i musi
+być pokryte tak długo, jak długo reguła stoi w granicy. To jest klasa `review_by`, nie klasa dowodu naruszeń:
+wygaśnięcie zgody **ma** zatrzymać repozytorium, bo zatrzymanie jest tańsze niż niepokryta droga wyjścia
+danych. Konsekwencja jest realna i świadoma: przeoczona data odnowienia czerwieni każdy pull request, dopóki
+ktoś nie odnowi zgody jednolinijkowym PR-em w `policy.yaml`. Dlatego wzorcem w szablonie jest `expires` równe
+`review_by` członka — uprawnienie do wyprowadzania danych nie ma prawa przeżyć przeglądu wpisu, który je nosi.
+
+### Zakres — co bramkujemy, a czego świadomie nie
+
+| zmiana | bramka maszynowa | dlaczego |
+|---|---|---|
+| wpis członka wybiera profil `risk: high` z niepustym celem | **TAK** | jedyna droga wypłynięcia danych poza Google Cloud; plik jest osiągalny dla trzech kanałów wejścia, a Security nie jest jego właścicielem |
+| profil dostaje regułę egress poza Google Cloud (osobny PR) | **TAK, tą samą regułą** | reguła siedzi na deklaracjach, więc członkowie tego profilu stają się wnioskami wysokiego ryzyka w tej samej sekundzie — bez PR-a u siebie |
+| `risk` profilu zaniżony do `low`/`medium` | **TAK** | to jest najtańsze obejście bramki: jedna linia w katalogu |
+| egress **w granicach** Google Cloud (`to_projects_from`) | nie | cel zostaje w audycie Google, pod IAM i org-policy organizacji; objęcie tego bramką wciągnęłoby profil treningowy, czyli rutynę — a bramka na rutynie zostaje wyłączona |
+| zmiana `restricted_services`, `contributors.yaml`, `control_plane_projects`, `access-levels/` | nie | **żaden kanał wejścia nie pisze do tych plików** — pisze do nich wyłącznie zespół platformy, a pliki są już pod CODEOWNERS obu zespołów. Bramka byłaby Security bramkującym Security. Zmiany `restricted_services` w dół pilnuje osobno reguła baseline'u (aiplatform), a `control_plane_projects` — `control_plane_check.py` |
+
+Kryterium jest jedno i warto je nazwać wprost: **bramka stoi tam, gdzie zmianę może wywołać ktoś inny niż
+właściciel kontroli.** Gdzie autor i właściciel to ten sam zespół, dokładamy szum, nie kontrolę.
+
+### Co zrobiliśmy z `risk` i `exceptions`
+
+* **`risk` — podpięte.** Uruchamia wymóg zgody Security i samo jest sprawdzane wobec kształtu profilu.
+  Komentarz *„steruje ścieżką review (validate.yml)"* stał się prawdziwy, bo `validate.yml` woła
+  `bramki-tresci`, a te wołają regułę. Usunięcie pola byłoby drugą opcją, ale `risk` jedzie w kontrakcie do
+  dywizji wybierających profil — jest im potrzebne, więc taniej jest uczynić je prawdziwym niż wyciąć.
+* **`exceptions` — usunięte.** Podpięcie wymagałoby zbudowania w rendererze **drugiej ścieżki renderowania
+  reguł** (surowy ingress/egress per członek, poza katalogiem) — przy czterech profilach i zerowym użyciu pola
+  to jest dokładnie ten gold-plating, który to repozytorium odrzuca. Usunięcie jest przy tym **zacieśnieniem**,
+  a nie sprzątaniem: schemat dopuszczał tam `kind: egress` z dowolnym `to_projects`, dowolnymi tożsamościami
+  i progiem uzasadnienia 20 znaków, **bez** własności Security. Gdyby ktoś kiedyś „dokończył" renderer, najszersza
+  droga wyjścia danych w całym systemie byłaby tą z najsłabszą kontrolą. `additionalProperties: false` zamienia
+  cichą atrapę w twardą odmowę wskazującą katalog profili.
+
+### Odrzucone
+
+* **Security jako CODEOWNER `perimeter/projects.yaml`.** Najprostsze i pozornie oczywiste. Odrzucone: nie
+  odróżnia wniosku wysokiego ryzyka od rutynowego (jeden plik, jedna ścieżka), więc przy ~50 wnioskach
+  miesięcznie produkuje recenzję, którą pierwszy pośpiech zamienia w pieczątkę — a drugi w usunięcie linii.
+  I tak nie działa bez ochrony gałęzi.
+* **Zgoda jako pole w pliku członka** (`security_approved_by:`). Odrzucone z tego samego powodu, dla którego
+  `promotion_waivers` nie mieszkają w pliku członka: dywizja zwalniałaby się z bramki własnym pull requestem.
+* **Zgoda jako etykieta pull requesta albo nazwa gałęzi.** Odrzucone — rozpoznanie musi iść z **treści**, nie
+  z metadanych, których autor wniosku jest właścicielem. Ta sama lekcja co bramka baseline'u rozpoznawana po
+  tytule; metadanych nie widać też na ścieżce apply.
+* **Flaga `risk: high` sama jako bramka, bez sprawdzania kształtu.** Odrzucone: obejściem byłaby jedna linia
+  w profilu, a bramka, którą wyłącza się edycją etykiety, jest bramką tylko z nazwy.
+* **Zgoda bez `destinations`** („ten członek może używać tego profilu"). Odrzucone: cel jest całym ryzykiem,
+  a jego podmiana byłaby rutynowym diffem w pliku członka, przechodzącym pod zgodą wydaną na coś innego.
+* **Twardy błąd na placeholderach `@your-org/*` w CODEOWNERS.** Odrzucone: na koncie prywatnym zespołów
+  GitHuba **nie da się utworzyć**, więc byłaby to bramka, którą w jej własnym środowisku testowym trzeba
+  trwale wyłączyć — czyli wyłącznik z dobrą opinią. `codeowners_check.py` nazywa je przy każdym przebiegu
+  jako niedokończoną konfigurację, a twardo pilnuje **relacji zbiorów właścicieli**, która jest prawdziwa
+  także na placeholderach i przeżywa każde przemianowanie zespołów.
+
+### Konsekwencje
+
+* Zgoda Security jest **czytelna dla audytora bez dostępu do GitHuba**: jeden plik, wiersz na decyzję, z datą
+  ważności i wymienionymi celami.
+* Wygasła zgoda zatrzymuje **każdy** pull request w repozytorium — świadomie. Odnowienie to jednolinijkowy PR
+  w pliku, którego właścicielem jest Security.
+* Katalog profili staje się **jedyną** drogą dołożenia reguły. Pierwszy przypadek spoza katalogu wymaga
+  profilu, nie pola w pliku wnioskodawcy.
+* CODEOWNERS przestaje być mechanizmem, na którym stoi jakakolwiek własność bezpieczeństwa tego repozytorium,
+  i mówi to o sobie wprost. Na GitHub Enterprise, gdzie ochrona gałęzi istnieje, dokłada drugą warstwę —
+  ale pierwsza działa bez niego.
 ## DEC-24 — Weryfikacja egressu wymaga maszyny WEWNĄTRZ perimetru; „bez maszyny" dotyczy wyłącznie ingressu
 
 ### Kontekst

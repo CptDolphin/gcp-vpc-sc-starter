@@ -25,8 +25,31 @@
 # The contribution action used by other repositories. Changing it changes what those repositories send.
 /contrib/                   @your-org/network-team @your-org/security-team
 
-# Membership. The bot opens these PRs; the networking team approves. Security is pulled in by the workflow
-# only when the entry contains an `exceptions:` block (a raw rule outside the profile catalogue).
+# Membership. The bot opens these PRs; the networking team approves.
+#
+# THIS FILE IS THE ONE PATH BY WHICH DATA MAY LEAVE GOOGLE CLOUD, AND SECURITY IS NOT AN OWNER OF IT.
+# That is deliberate, and it is safe only because the control was moved OFF this file. Until 2026-08-12 it
+# was not: the line below said Security is pulled in when an entry carries an `exceptions:` block, and no
+# workflow ever read that field — the field itself rendered nothing (DEC-23). A promise in a comment is
+# worth exactly what a promise in a comment is worth.
+#
+# WHAT GATES IT NOW. A member entry that selects a `risk: high` profile (one whose egress rule leaves
+# Google Cloud) and supplies a destination is rejected by `policy/onboarding.rego` unless
+# `perimeter/policy.yaml` §egress_approvals carries a live approval naming that member, that profile and
+# those exact destinations. `policy.yaml` IS owned by Security, two lines above. So the approval lands in
+# a file Security owns, instead of in a file it does not.
+#
+# WHY NOT CODEOWNERS. Three reasons, each sufficient: (1) the ordinary request and the high-risk request
+# are the same line in the same file, so path matching cannot tell them apart — splitting by CONTENT is a
+# policy rule, not an ownership rule; (2) at ~50 requests a month, putting Security on every one of them
+# produces a review that gets rubber-stamped and then removed; (3) without branch protection
+# (`403 Upgrade to GitHub Pro` on a private repository in the free plan) CODEOWNERS is not enforced by
+# GitHub at all, while the OPA rule runs on both tracks — pull request AND apply (DEC-16).
+#
+# SO WHAT IS THIS FILE FOR. It states who is expected to read what, and it is the enforcement mechanism on
+# GitHub Enterprise, where branch protection exists. It is NOT the mechanism any security property of this
+# repository depends on. `tools/codeowners_check.py` keeps that honest: it fails when the file that carries
+# Security's approvals is not owned by anyone beyond the owners of the file being approved.
 #
 # ONE FILE MEANS ONE OWNER, AND THAT IS A DECISION, NOT A SIDE EFFECT (DEC-12). Membership used to be one
 # file per project, so `/perimeter/members/risk-* @your-org/risk-team` was AVAILABLE — nobody had configured
