@@ -57,6 +57,11 @@
       "type": "string",
       "format": "date"
     },
+    "unmeasured_peers_ack": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "ILU CZŁONKÓW ZOSTAJE W DRY-RUN PO TEJ PROMOCJI — potwierdzenie, że promujący widział zakres, w którym okno obserwacji było ślepe (DEC-27). Konfiguracja dry-run zawiera wszystkich członków naraz, więc ruch między dwoma członkami w dry-run jest dla niej ruchem WEWNĄTRZ perimetru i nie może wygenerować ani jednego wpisu; promocja przenosi jednego z nich i ten sam przepływ staje się naruszeniem egress (zmierzone, dwie maszyny, ten sam cel). Liczba, nie flaga: zgoda wydana na trzech rówieśników przestaje się zgadzać, gdy do dry-run wejdzie czwarty, i promocja staje ponownie. OPA wymaga tego pola WYŁĄCZNIE w chwili promocji (repo mówi `enforced`, ostatni apply mówił co innego) i wyłącznie gdy taki członek w ogóle istnieje; po zastosowaniu promocji pole jest historią, nie parametrem — wtedy trzeba je usunąć, bo opisuje zbiór sprzed zmiany."
+    },
     "review_by": {
       "type": "string",
       "format": "date"

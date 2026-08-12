@@ -925,3 +925,73 @@ test_profil_dostaje_egress_pozniej_denied if {
 	zle := object.union(healthy_input, {"profiles": byl_bez_egressu})
 	count(deny) > 0 with input as zle
 }
+
+# --- zakres, w którym okno obserwacji mogło cokolwiek zobaczyć (DEC-27) -----------------------------
+#
+# Konfiguracja dry-run zawiera WSZYSTKICH członków, więc ruch między dwoma członkami w dry-run jest dla
+# niej ruchem wewnątrz perimetru i nie generuje wpisów. Promocja przenosi JEDNEGO — i dokładnie ten ruch
+# staje się naruszeniem egress. Zmierzone na żywej granicy (#2005), stąd te testy.
+#
+# Para pozytyw/negatyw jest tu KONIECZNA w mocniejszej postaci niż zwykle: reguła „są dwaj członkowie,
+# więc odrzuć" przeszłaby każdy negatyw poniżej. Dlatego test z poprawnym potwierdzeniem stoi obok testu
+# bez potwierdzenia na TYM SAMYM wejściu — różnią się wyłącznie jednym polem.
+
+rowiesnik_w_dryrun := object.union(healthy_member, {
+	"division": "market",
+	"project_id": "prj-example-vertex-prod",
+	"project_number": "222222222222",
+})
+
+# `promowany_dec27(pola)` — członek w trakcie promocji: repo mówi `enforced`, okno czyste, 19 dni w dry-run.
+promowany_dec27(pola) := object.union(object.union(healthy_member, {"stage": "enforced"}), pola)
+
+wejscie_promocji_dec27(pola) := object.union(
+	wejscie_z_listy([promowany_dec27(pola), rowiesnik_w_dryrun]),
+	ze_stanem({"risk-prj-example-vertex-dev": "dry-run", "market-prj-example-vertex-prod": "dry-run"}, true),
+)
+
+# NEGATYW: jeden rówieśnik zostaje w dry-run, promujący tego nie potwierdził.
+test_promocja_z_rowiesnikiem_bez_potwierdzenia_odrzucona if {
+	count(deny) > 0 with input as wejscie_promocji_dec27({})
+}
+
+# POZYTYW na tym samym wejściu — dowód, że bramka pyta o POTWIERDZENIE, a nie o obecność drugiego członka.
+test_promocja_z_rowiesnikiem_i_potwierdzeniem_przechodzi if {
+	count(deny) == 0 with input as wejscie_promocji_dec27({"unmeasured_peers_ack": 1})
+}
+
+# LICZBA, NIE FLAGA: potwierdzenie wystawione na inny zbiór nie przepuszcza tego. Bez tego testu
+# `unmeasured_peers_ack: 1` na stałe działałoby jak „ignoruj" przy dowolnej liczbie rówieśników.
+test_potwierdzenie_o_zlej_liczbie_odrzucone if {
+	count(deny) > 0 with input as wejscie_promocji_dec27({"unmeasured_peers_ack": 2})
+}
+
+# Pierwsza promocja w organizacji: nikt nie zostaje w dry-run, więc nie ma czego potwierdzać. Gdyby
+# bramka żądała pola zawsze, blokowałaby dokładnie ten przypadek, w którym okno NIE było ślepe.
+test_promocja_bez_rowiesnikow_nie_wymaga_potwierdzenia if {
+	dobre := object.union(
+		object.union(healthy_input, {"members": {"example-prj-example-vertex-dev": promowany_dec27({})}, "members_list": [promowany_dec27({})]}),
+		ze_stanem({"example-prj-example-vertex-dev": "dry-run"}, true),
+	)
+	count(deny) == 0 with input as dobre
+}
+
+# Potwierdzenie-widmo: zostało w pliku, a opisuje zbiór sprzed zmiany. Wygląda jak żywa deklaracja.
+test_nieaktualne_potwierdzenie_bez_rowiesnikow_odrzucone if {
+	zle := object.union(
+		object.union(healthy_input, {"members": {"example-prj-example-vertex-dev": promowany_dec27({"unmeasured_peers_ack": 2})}, "members_list": [promowany_dec27({"unmeasured_peers_ack": 2})]}),
+		ze_stanem({"example-prj-example-vertex-dev": "dry-run"}, true),
+	)
+	count(deny) > 0 with input as zle
+}
+
+# Po zastosowaniu promocji pytanie „co się zepsuje, jeśli włączymy" nie ma adresata — a rówieśnicy w
+# dry-run zmieniają się bez udziału tego członka. Bramka bez tego warunku wywracałaby każdy kolejny
+# pull request w repozytorium, tak samo jak reguły wyżej przed DEC-16.
+test_juz_egzekwowany_z_rowiesnikiem_nie_wymaga_potwierdzenia if {
+	dobre := object.union(
+		wejscie_z_listy([promowany_dec27({}), rowiesnik_w_dryrun]),
+		ze_stanem({"risk-prj-example-vertex-dev": "enforced", "market-prj-example-vertex-prod": "dry-run"}, true),
+	)
+	count(deny) == 0 with input as dobre
+}

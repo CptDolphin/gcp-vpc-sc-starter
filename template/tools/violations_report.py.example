@@ -27,6 +27,14 @@ Numer członka mieszka w rekordzie naruszenia i zależy od KIERUNKU:
 Kierunku nie wolno mylić: przy egressie `resourceNames`/`targetResource` wskazują zasób POZA perimetrem,
 więc przypisanie po nich obwinia stronę wołaną zamiast członka, którego dane wychodzą.
 
+CZEGO TEN RAPORT NIE MOŻE ZAWIERAĆ — i to nie jest usterka, tylko definicja (DEC-27). Ruch między dwoma
+członkami, którzy OBAJ są w dry-run, jest dla konfiguracji dry-run ruchem WEWNĄTRZ perimetru: nie narusza
+niczego, więc nie powstaje żaden wpis. Promocja przenosi jednego z nich do konfiguracji egzekwowanej i
+dokładnie ten przepływ staje się naruszeniem egress. Zmierzone 2026-08-12 (#2005) dwiema maszynami i tą samą
+sondą: z członka wyłącznie dry-run do drugiego takiego członka — PRZESZŁO i zero wpisów; z członka
+egzekwowanego do tego samego zasobu — ODMOWA (`NETWORK_NOT_IN_SAME_SERVICE_PERIMETER`, `egressViolations`).
+Dlatego raport wypisuje listę członków w dry-run: bez niej słowo „czysto" opisuje mniejszy zbiór, niż znaczy.
+
 CZEGO TEN RAPORT NIE OBIECUJE: `principalEmail` w logach `cloudaudit.googleapis.com/policy` bywa przez
 GCP zredagowany (`m...@ra...m`) i wtedy raport nie nazwie wołającego. Do namierzenia wywołania służy
 `vpcServiceControlsUniqueId` — dlatego trafia do raportu markdown.
@@ -249,12 +257,34 @@ def main() -> int:
     }
     pathlib.Path(args.platform_json_out).write_text(json.dumps(platform_out, indent=2, sort_keys=True) + "\n")
 
+    # ZAKRES, W KTÓRYM „CZYSTO" COKOLWIEK ZNACZY (DEC-27). Konfiguracja dry-run zawiera WSZYSTKICH członków
+    # naraz, więc ruch między dwoma członkami w dry-run jest dla niej ruchem wewnątrz perimetru — nie ma
+    # czego zalogować. Promocja przenosi natomiast JEDNEGO: reszta zostaje na zewnątrz i ten sam przepływ
+    # staje się naruszeniem egress. Raport, który pisze samo „czysto", opisuje więc mniejszy zbiór, niż
+    # sugeruje to słowo. Nazwiska rówieśników są tu po to, żeby dało się zadać właścicielowi konkretne
+    # pytanie („rozmawiacie z <X>?"), a nie ogólne — to samo, co robi lista przepływów rzadkich w runbooku.
+    w_dry_run = sorted(n for n, m in decl["members"].items() if m.get("stage") != "enforced")
+
     lines = ["# Naruszenia dry-run — okno obserwacji", ""]
+    if w_dry_run:
+        lines.append(f"**Czego to okno nie mogło zobaczyć:** {len(w_dry_run)} członków jest w konfiguracji "
+                     f"dry-run ({', '.join(w_dry_run)}). Przepływy MIĘDZY nimi są dla tej konfiguracji ruchem "
+                     "wewnątrz perimetru i nie generują wpisów — a po promocji pojedynczego członka stają się "
+                     "naruszeniem egress. Słowo „czysto\" niżej znaczy: czysto wobec ruchu, który granica dziś ocenia.")
+        lines.append("")
     for name in sorted(result):
         member = decl["members"][name]
         status = "czysto" if result[name] == 0 else f"**{result[name]} naruszeń**"
         lines.append(f"## {name} ({member['project_id']}, stage: {member['stage']}) — {status}")
         lines.append(f"właściciel: {member['owner_group']}")
+        # Tylko dla członków, których promocja jest jeszcze przed nami. Dla członka już egzekwowanego ta
+        # sama lista nie jest do niczego — jego decyzja zapadła, a bramka pyta o PRZEJŚCIE, nie o stan.
+        rowiesnicy = [n for n in w_dry_run if n != name] if member.get("stage") != "enforced" else []
+        if rowiesnicy:
+            lines.append("")
+            lines.append(f"niemierzalne w tym oknie: przepływy do/z **{len(rowiesnicy)}** członków w dry-run "
+                         f"({', '.join(rowiesnicy)}) — przy promocji tego członka `unmeasured_peers_ack` "
+                         f"musi wynosić **{len(rowiesnicy)}**")
         if platforma.get(name):
             # Świadomie NAD listą naruszeń dywizji: czytelnik ma zobaczyć, co zostało wyłączone z liczby,
             # zanim uwierzy w słowo „czysto". Milczenie o wykluczeniach byłoby tym samym, co ich brak.
