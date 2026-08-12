@@ -20,7 +20,7 @@
 # dostęp do bucketa stanu), a dołożenie ich powiększyłoby zbiór uprawnień, których brak ZATRZYMUJE jedyną
 # drogę wdrożenia. Podmiot pytania jest przy tym niezależny od pytającego: „czy podsieci kandydata mają
 # Private Google Access" ma tę samą odpowiedź dla obu kont — inaczej niż „czy widzę własny bucket stanu",
-# gdzie tożsamość JEST treścią pytania. Uzasadnienie i odrzucone warianty: DEC-23.
+# gdzie tożsamość JEST treścią pytania. Uzasadnienie i odrzucone warianty: DEC-24.
 #
 # WYMAGANIE WYWOŁUJĄCEGO: krok `google-github-actions/auth` MUSI stać wcześniej w tym samym jobie.
 

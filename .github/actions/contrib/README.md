@@ -144,7 +144,7 @@ bramek, bo obie są **assetami release'u**.
   z **pushu na gałąź domyślną**, a ochrona tej gałęzi to na części planów GitHuba funkcja płatna dla
   repozytoriów prywatnych (patrz „Prerekwizyt" niżej). Poświadczenie z prawem zapisu omija więc **review**:
   CODEOWNERS i drugą parę oczu. Samych bramek nie omija — schema, OPA, budżet, bramki żywe i pre-flight
-  biegną także na ścieżce apply (DEC-16, DEC-23) i to była świadoma odpowiedź na dokładnie ten układ.
+  biegną także na ścieżce apply (DEC-16, DEC-24) i to była świadoma odpowiedź na dokładnie ten układ.
   Nadmiarowe uprawnienie zostaje jednak nadmiarowe: zmiana granicy, na którą nikt nie spojrzał, jest
   wystarczającym powodem, żeby kanał go nie dostawał.
 - **Czego `actions: write` NIE odbiera i o czym nie milczymy:** pozwala też ponawiać i anulować przebiegi

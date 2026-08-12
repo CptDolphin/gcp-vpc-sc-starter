@@ -92,7 +92,7 @@ Wszystko to robi `tools/bootstrap_github.sh` — i, co ważniejsze, **czyta wyni
 
 > **Ochrona gałęzi domyślnej jest PREREKWIZYTEM, nie ozdobą — ale nie tym, którym była kiedyś.** Bramki
 > (schema, OPA, budżet atrybutów, bramki żywe, pre-flight) biegną dziś na OBU torach: na pull requeście
-> i u mutatora (DEC-16, DEC-23), więc push prosto na gałąź domyślną **przechodzi przez nie tak samo**.
+> i u mutatora (DEC-16, DEC-24), więc push prosto na gałąź domyślną **przechodzi przez nie tak samo**.
 > To była świadoma zmiana, bo ochrona gałęzi na repozytorium prywatnym bywa funkcją płatną — a bramka,
 > której istnienie zależy od planu cenowego, nie jest bramką. Czego push prosto na gałąź nie przechodzi,
 > to **review**: CODEOWNERS, druga para oczu i opis zmiany. Bez ochrony każde poświadczenie

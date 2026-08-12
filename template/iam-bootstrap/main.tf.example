@@ -99,7 +99,7 @@ locals {
   #     na pull requescie nie potrzebuje dostepu do chmury. Domyslnie wylaczone = niezmiennik zostaje.
   zarzadza_tematem_alertow = (var.monitoring_project_id != "" && var.manage_alert_topic) ? 1 : 0
 
-  # TA LISTA JEST TOŻSAMOŚCIĄ BRAMKI PRE-FLIGHTU, nie tylko planu (DEC-23) — bramka pyta kontem `plan`
+  # TA LISTA JEST TOŻSAMOŚCIĄ BRAMKI PRE-FLIGHTU, nie tylko planu (DEC-24) — bramka pyta kontem `plan`
   # na OBU torach, także na ścieżce apply, bo konto `apply` nie ma ani jednej z tych ról, a dokładanie ich
   # powiększyłoby zbiór uprawnień, których brak ZATRZYMUJE jedyną drogę wdrożenia. Zdjęcie którejkolwiek
   # z trzech pozycji poniżej zatrzymuje więc onboarding, i to fail-closed — czyli głośno, ale zatrzymuje.

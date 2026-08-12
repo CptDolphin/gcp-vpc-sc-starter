@@ -312,7 +312,7 @@ projektów (warstwa landing zone, jeśli organizacja ją ma) z włączonym PGA i
 Sprawdza to **bramka maszynowa**: job `pre-flight` w `plan.yml` i w `apply.yml` uruchamia
 `tools/preflight_check.sh` dla każdego członka WCHODZĄCEGO do perimetru (zadeklarowanego, a nieobecnego
 jeszcze w `spec`/`status` żywej granicy) i przy czerwonym werdykcie zostawia `terraform plan` oraz
-`terraform apply` w stanie `skipped` — DEC-23. Recenzent czyta werdykt w podsumowaniu przebiegu; jedyne,
+`terraform apply` w stanie `skipped` — DEC-24. Recenzent czyta werdykt w podsumowaniu przebiegu; jedyne,
 co zostaje mu do zrobienia z ręki, to check tożsamości (`--identity`, niżej), bo bramka go nie woła. Gdyby
 jeden ticket miał robić oba kroki, to jest integracja **dwóch** automatów (fabryka projektów + ten kanał), a nie
 rozszerzenie tego workflow — i wymaga osobnej decyzji, bo tworzenie projektu to inny blast-radius niż dodanie
@@ -327,7 +327,7 @@ odpalający się przy każdym onboardingu, a odruchową reakcją na taki alarm j
 wyciszenie **również** projektów, w których PGA naprawdę brakuje.
 
 **Check tożsamości (`--identity`) to jedyna część pre-flightu, której bramka NIE wykonuje**, i to jest
-decyzja, nie luka (DEC-23). Wymaga `iam.serviceAccounts.get`, którego wdrożenie nie nadaje kontom CI —
+decyzja, nie luka (DEC-24). Wymaga `iam.serviceAccounts.get`, którego wdrożenie nie nadaje kontom CI —
 wpięty byłby więc fail-closed na **każdym** wniosku, z powodu leżącego po stronie perimetru, a nie
 wnioskodawcy. Nadanie tego prawa kontu `plan`, impersonowalnemu z każdego pull requesta, oznaczałoby
 możliwość enumeracji wszystkich kont serwisowych organizacji. Recenzent uruchamia ten check z ręki,

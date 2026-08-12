@@ -144,9 +144,9 @@ Access · istnieje strefa DNS kierująca ruch API na restricted VIP · dla profi
 `private.googleapis.com` dla `*.notebooks.googleusercontent.com` · ostrzeżenie (nie blokada) o istniejących
 endpointach Vertex, bo muszą powstać **po** wejściu projektu do perimetru.
 
-**Gdzie ten pre-flight realnie stoi — patrz DEC-23.** Słowo „egzekwowany" w akapicie wyżej opisuje *rolę*
+**Gdzie ten pre-flight realnie stoi — patrz DEC-24.** Słowo „egzekwowany" w akapicie wyżej opisuje *rolę*
 narzędzia, a nie jego wpięcie: przez pewien czas ta rola była wyłącznie zapisana, bo `preflight_check.sh`
-nie miał ŻADNEGO wyzwalacza. DEC-23 opisuje bramkę, która to zdanie czyni prawdziwym, i mówi wprost, czego
+nie miał ŻADNEGO wyzwalacza. DEC-24 opisuje bramkę, która to zdanie czyni prawdziwym, i mówi wprost, czego
 ta bramka NIE obejmuje (check `--identity`, zmiana wpisu członka już obecnego w granicy).
 
 **Dlaczego.** Wymaganie „po approvalu tworzą się automatycznie odpowiednie zasoby" kusi, by onboarding provisionował
@@ -1489,7 +1489,7 @@ zatwierdzić ani zmergować**: bot proponuje, bramki oceniają, człowiek merguj
 
 ---
 
-## DEC-23 — Pre-flight jest bramką na OBU torach, pyta tożsamością `plan` i tylko o WCHODZĄCYCH
+## DEC-24 — Pre-flight jest bramką na OBU torach, pyta tożsamością `plan` i tylko o WCHODZĄCYCH
 
 **Decyzja.** `tools/preflight_check.sh` przestaje być narzędziem bez wyzwalacza. Uruchamia go
 `tools/preflight_gate.py` przez akcję złożoną `.github/actions/bramka-preflightu`, wołaną z **osobnego

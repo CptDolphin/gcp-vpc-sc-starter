@@ -72,7 +72,7 @@ jobs:
       # nie szczegół. `attribute_condition` providera pyta WYŁĄCZNIE o repozytorium, a `principalSet`
       # konta `plan` celuje w `attribute.repository` — czyli w KAŻDY workflow tego repozytorium, także
       # uruchomiony pushem na gałąź domyślną. Na tym stoi bramka pre-flightu na ścieżce apply: pyta tym
-      # samym kontem `plan`, bez rozszerzania uprawnień konta `apply` (DEC-23). Odwrotnie jest przy koncie
+      # samym kontem `plan`, bez rozszerzania uprawnień konta `apply` (DEC-24). Odwrotnie jest przy koncie
       # `watch`, które celuje w `attribute.ref` — patrz `iam-bootstrap/main.tf` i docs/2-uprawnienia-i-wif.md.
       - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.9
         with:

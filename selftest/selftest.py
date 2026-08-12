@@ -134,7 +134,7 @@ def bootstrap() -> None:
         ".github/actions/bramki-tresci/action.yml", ".github/actions/bramki-zywe/action.yml",
         # Bramka promocji: jedyna bramka WYLACZNIE mutatora — pyta o moment skutku, nie o tresc (DEC-17).
         ".github/actions/bramka-promocji/action.yml", "tools/promotion_hold.py",
-        # Bramka pre-flightu: prerekwizyty CUDZEGO projektu, na obu torach, tozsamoscia `plan` (DEC-23).
+        # Bramka pre-flightu: prerekwizyty CUDZEGO projektu, na obu torach, tozsamoscia `plan` (DEC-24).
         ".github/actions/bramka-preflightu/action.yml", "tools/preflight_gate.py",
         ".tflint.hcl", ".github/dependabot.yml", "tests/README.md",
         "tests/snow-approved.json", "tests/snow-not-approved.json", "tests/snow-self-approved.json",
@@ -3666,7 +3666,7 @@ def test_preflight() -> None:
 
 # --------------------------------------------------- bramka pre-flightu: kogo pyta i czy w ogole jedzie
 def test_bramka_preflightu() -> None:
-    """Czy pre-flight ma WYZWALACZ — i czy pyta o wlasciwy zbior (DEC-23).
+    """Czy pre-flight ma WYZWALACZ — i czy pyta o wlasciwy zbior (DEC-24).
 
     ZMIERZONY STAN WYJSCIOWY: `preflight_check.sh` nie byl wolany przez NIC. `grep -rn preflight_check`
     po `.github/`, `tools/` i pre-commicie dawal zero trafien w czymkolwiek wykonywalnym, a cztery miejsca
@@ -3767,7 +3767,7 @@ def test_bramka_preflightu() -> None:
           p_ok.returncode == 0 and "pre-flight zaliczony dla wszystkich wchodzacych" in p_ok.stdout,
           p_ok.stdout + p_ok.stderr)
 
-    # CHECK 6 SWIADOMIE NIEWPIETY (DEC-23) — mierzone ZACHOWANIEM, nie obecnoscia slowa w kodzie.
+    # CHECK 6 SWIADOMIE NIEWPIETY (DEC-24) — mierzone ZACHOWANIEM, nie obecnoscia slowa w kodzie.
     # Wymaga `iam.serviceAccounts.get`, ktorego wdrozenie nie nadaje; wpiety bylby fail-closed na KAZDYM
     # wniosku, z powodu lezacego po NASZEJ stronie. Asercja pilnuje obu kierunkow naraz: bramka ma NIE
     # pytac o konta serwisowe i JEDNOCZESNIE pytac o siec — inaczej „nie pyta o SA" spelnialby sie takze
@@ -3815,7 +3815,7 @@ def test_bramka_preflightu() -> None:
         konta = [k.get("with", {}).get("service_account") for k in job["steps"]
                  if "google-github-actions/auth" in str(k.get("uses", ""))]
         # Tozsamosc `plan` na OBU torach — konto `apply` nie ma ani jednej z rol pre-flightu, a dokladanie
-        # ich powiekszaloby zbior uprawnien, ktorych brak ZATRZYMUJE jedyna droge wdrozenia (DEC-23).
+        # ich powiekszaloby zbior uprawnien, ktorych brak ZATRZYMUJE jedyna droge wdrozenia (DEC-24).
         check(f"{plik}: job pre-flightu uwierzytelnia sie kontem PLAN",
               konta == ["${{ vars.PLAN_SERVICE_ACCOUNT }}"], str(konta))
         check(f"{plik}: job pre-flightu nie uruchamia terraforma (stoi PRZED kosztem i przed zamkiem)",

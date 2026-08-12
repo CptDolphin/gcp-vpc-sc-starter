@@ -116,7 +116,7 @@ jobs:
   # Google Access" ma tę samą odpowiedź niezależnie od pytającego. Konto `apply` nie ma ani jednej z ról
   # pre-flightu, a dokładanie ich powiększyłoby zbiór uprawnień, których brak ZATRZYMUJE jedyną drogę
   # wdrożenia — ten tryb awarii już raz wywrócił apply. Konto `plan` te role ma i jest read-only.
-  # Uzasadnienie, odrzucone warianty i to, czego bramka świadomie nie pilnuje: DEC-23.
+  # Uzasadnienie, odrzucone warianty i to, czego bramka świadomie nie pilnuje: DEC-24.
   pre-flight:
     name: pre-flight (prerekwizyty wchodzacych)
     runs-on: ubuntu-latest

@@ -3,7 +3,7 @@
 # niczego nie naprawia (granica własności, DEC-5: naprawia właściciel projektu, nie repo perimetru).
 #
 # KTO TO WOŁA. `tools/preflight_gate.py` — na OBU torach (pull request i mutator), przez akcję złożoną
-# `.github/actions/bramka-preflightu` (DEC-23). Ten skrypt orzeka o JEDNYM projekcie i celowo nie wie,
+# `.github/actions/bramka-preflightu` (DEC-24). Ten skrypt orzeka o JEDNYM projekcie i celowo nie wie,
 # który projekt dziś wchodzi do granicy; wybór kandydatów należy do bramki. Uruchomienie z ręki jest nadal
 # poprawne i jest jedyną drogą do checku 6 (`--identity`) — patrz akapit o uprawnieniach niżej.
 #
@@ -52,7 +52,7 @@
 # żywej organizacji. Nadanie go kontu `plan` — impersonowalnemu z KAŻDEGO pull requesta — dałoby prawo
 # enumeracji wszystkich kont serwisowych w organizacji pod check, który zamyka tryb awarii już zamknięty
 # przez ACM: literówkę w adresie ACM odrzuca przy apply komunikatem `invalid or non-existent`, wywracając
-# CAŁĄ zmianę, czyli głośno i na NIETKNIĘTEJ granicy. Zostawiony jako narzędzie recenzenta z ręki (DEC-23).
+# CAŁĄ zmianę, czyli głośno i na NIETKNIĘTEJ granicy. Zostawiony jako narzędzie recenzenta z ręki (DEC-24).
 # Szczegóły i tabela ról: docs/2-uprawnienia-i-wif.md.
 set -euo pipefail
 

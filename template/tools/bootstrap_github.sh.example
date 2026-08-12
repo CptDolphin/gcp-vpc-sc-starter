@@ -190,7 +190,7 @@ fi
 #
 # TO JEST PREREKWIZYT, NIE OZDOBA — ale nie z tego powodu, z którego był nim kiedyś, i ta różnica jest
 # warta przeczytania. Bramki (schema, OPA, budżet, bramki żywe, pre-flight) biegną dziś na OBU torach:
-# na pull requeście i u mutatora (DEC-16, DEC-23), więc push prosto na gałąź domyślną przechodzi przez
+# na pull requeście i u mutatora (DEC-16, DEC-24), więc push prosto na gałąź domyślną przechodzi przez
 # nie TAK SAMO. Zrobiono tak świadomie, bo ochrona gałęzi na repozytorium prywatnym bywa funkcją płatną,
 # a bramka, której istnienie zależy od planu cenowego, nie jest bramką. Ochrona gałęzi daje więc to,
 # czego bramka dać nie może: REVIEW — CODEOWNERS, drugą parę oczu i opis zmiany. Bez niej każde
