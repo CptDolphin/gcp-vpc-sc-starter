@@ -16,6 +16,13 @@
 #     it with an eTag, so two parallel applies do not corrupt anything silently: the loser fails with
 #     `Error 400: The eTag provided ... does not match`. The reason to serialize is RELIABILITY — without it
 #     roughly every overlapping run fails and has to be retried by hand (measured, see DEC-6).
+#   * bramka promocji — jedyny punkt, w którym ten workflow ZATRZYMUJE SIĘ i czeka na człowieka, i jedyna
+#     kontrola tutaj, która NIE JEST ustawieniem repozytorium: działa na każdym planie GitHuba. Zatrzymuje
+#     apply, który zacząłby egzekwować granicę wobec członka będącego dziś w dry-run — bo to jedyna zmiana
+#     w tym repo, której skutkiem jest ODMOWA RUCHU i której cofnięcie konfiguracji nie cofa natychmiast
+#     (zmierzone: 46 s do apply, 78 s do powrotu ruchu). Zwalnia ją wyłącznie ręczne uruchomienie z polem
+#     `promocje` wypełnionym listą RÓWNĄ zbiorowi oczekujących. Nie zastępuje required reviewers wyżej —
+#     tamto daje rozdział tożsamości, to daje drugi świadomy akt w momencie skutku; warstwy się składają.
 #   * KAŻDA bramka biegnie tu jeszcze raz — nie tylko reguły OPA na planie. Bramka, która stoi wyłącznie
 #     na torze `pull_request`, chroni pull requesta, a nie granicę: gałąź domyślna bywa bez ochrony
 #     (funkcja płatna na repo prywatnym), więc commit wypchnięty prosto na nią omija tamten tor w całości.
@@ -45,6 +52,18 @@ on:
       - "perimeter/**"
       - "terraform/**"
   workflow_dispatch:
+    inputs:
+      # JEDYNE LEGALNE ŹRÓDŁO ZGODY NA ROZPOCZĘCIE EGZEKWOWANIA. Pole istnieje wyłącznie przy ręcznym
+      # uruchomieniu — `push` nie ma jak go wypełnić, a `promotion_hold.py` odrzuca zatwierdzenie
+      # przyniesione przez inne zdarzenie, więc wpisanie wartości na stałe w ten plik też nie działa.
+      # Puste = apply bez promocji, czyli zdecydowana większość przebiegów.
+      promocje:
+        description: >-
+          Klucze członków (<dywizja>-<project_id>), których TEN przebieg ma zacząć egzekwować. Wpisz
+          dokładnie tych, którzy czekają na promocję — apply przechodzi tylko przy równości zbiorów.
+        required: false
+        default: ""
+        type: string
 
 permissions:
   # `write`, nie `read`: ten job publikuje kontrakt także jako asset release'u (krok „apply + publikacja").
@@ -124,6 +143,18 @@ jobs:
       # a zatrzymasz apply — nie dlatego, że bramka jest zła, tylko dlatego, że apply przestaje widzieć
       # własny stan.
       - uses: ./.github/actions/bramki-zywe
+
+      # BRAMKA MANUALNA PRZED `enforced` — jedyne miejsce w tym repozytorium, w którym apply zatrzymuje
+      # się i czeka na człowieka. Stoi tutaj, a nie na torze pull requesta, bo pyta o MOMENT skutku,
+      # nie o treść zmiany: promujący pull request ma być zielony i scalony, a zatrzymać się ma dopiero
+      # wykonanie. Szczegóły i odrzucone warianty — w nagłówku akcji oraz w DEC-17.
+      #
+      # Wykrycie idzie z porównania DEKLARACJI ze ŚWIATEM (`stage: enforced` kontra `status.resources`
+      # żywego perimetru), nie z diffa commitów: diff znika przy `workflow_dispatch` i przy ponowieniu
+      # przebiegu, czyli byłoby go brak dokładnie tam, gdzie nikt nie patrzy.
+      - uses: ./.github/actions/bramka-promocji
+        with:
+          zatwierdzone_promocje: ${{ inputs.promocje }}
 
       # We re-plan on main and apply that plan. WHY not reuse the PR artifact: main may have moved between
       # review and merge (another division's PR), and applying a stale plan would silently revert it.

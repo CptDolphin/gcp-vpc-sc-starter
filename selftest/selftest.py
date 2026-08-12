@@ -126,6 +126,8 @@ def bootstrap() -> None:
         # Bramki treści i bramki żywe jako akcje złożone: JEDNA definicja, wołana przez tor pull requesta
         # (`validate.yml`/`plan.yml`) i przez mutatora (`apply.yml`). Patrz DEC-16.
         ".github/actions/bramki-tresci/action.yml", ".github/actions/bramki-zywe/action.yml",
+        # Bramka promocji: jedyna bramka WYLACZNIE mutatora — pyta o moment skutku, nie o tresc (DEC-17).
+        ".github/actions/bramka-promocji/action.yml", "tools/promotion_hold.py",
         ".tflint.hcl", ".github/dependabot.yml", "tests/README.md",
         "tests/snow-approved.json", "tests/snow-not-approved.json", "tests/snow-self-approved.json",
         "tests/snow-wrong-project.json", "tests/dispatch-example.json",
@@ -3785,8 +3787,147 @@ def test_bramki_na_sciezce_apply() -> None:
         ("control_plane_check.py --live", "tools/control_plane_check.py --live"),
         ("lista uslug wspieranych przez VPC-SC (zywa)", "tools/check_supported_services.py"),
         ("reguly vpcsc.perimeter na plan-JSON", "--namespace vpcsc.perimeter"),
+        # Jedyna bramka WYLACZNIE mutatora — pyta o MOMENT skutku, nie o tresc zmiany (DEC-17). Stoi na tej
+        # liscie z tego samego powodu, co reszta: zeby jej zniknieciu z apply.yml odpowiadal czerwony test,
+        # a nie cisza.
+        ("bramka promocji do enforced", "tools/promotion_hold.py"),
     ):
         check(f"sciezka apply uruchamia: {opis}", wzorzec in tresc, wzorzec)
+
+
+def test_bramka_promocji() -> None:
+    """Czy apply, ktory zaczyna EGZEKWOWAC granice wobec kogos nowego, naprawde staje — i czy da sie go
+    puscic swiadomie (DEC-17).
+
+    TEN TEST JEST ANTY-TAUTOLOGICZNY Z KONSTRUKCJI: nie pyta, czy w workflowie stoja wlasciwe slowa, tylko
+    URUCHAMIA logike bramki na spreparowanych parach (deklaracja czlonkow, stan zywej granicy). Obie
+    strony porownania sa wejsciem, wiec zaden wariant nie moze zdac przez przypadek — a para „bez promocji
+    przechodzi" / „z promocja staje" jest tu jedna asercja obok drugiej. Bramka, ktora zatrzymuje wszystko,
+    jest tak samo zepsuta jak ta, ktora nie zatrzymuje niczego: pierwsza cicho przestaje stosowac
+    zmergowane zmiany.
+    """
+    print("\n== bramka promocji (swiadome uruchomienie przed enforced) ==")
+
+    baza = ROOT / "fixture-bramka-promocji"
+    (baza / "perimeter").mkdir(parents=True, exist_ok=True)
+    wzor = yaml.safe_load((ROOT / "perimeter/projects.yaml").read_text())["members"][0]
+
+    def zapisz(*wpisy) -> list:
+        """Plik czlonkow z podanych par (stage, numer projektu). Zwraca ich klucze."""
+        doc = {"schema_version": 1, "members": []}
+        for i, (stage, numer) in enumerate(wpisy):
+            w = json.loads(json.dumps(wzor))
+            w.update(project_id=f"prj-example-czlonek-{i}", project_number=numer, stage=stage)
+            doc["members"].append(w)
+        (baza / "perimeter/projects.yaml").write_text(yaml.safe_dump(doc, sort_keys=False))
+        return [f"{w['division']}-{w['project_id']}" for w in doc["members"]]
+
+    def granica(*numery) -> pathlib.Path:
+        """Odpowiedz API o zywym perimetrze — `status` to konfiguracja EGZEKWOWANA."""
+        p = baza / "perimetr.json"
+        p.write_text(json.dumps({"status": {"resources": [f"projects/{n}" for n in numery]}}))
+        return p
+
+    def bramka(perimetr, zatwierdzone="", zdarzenie="workflow_dispatch"):
+        return sh([sys.executable, "tools/promotion_hold.py", "--root", str(baza),
+                   "--policy", "perimeter/policy.yaml", "--perimetr-z-pliku", str(perimetr),
+                   "--zatwierdzone", zatwierdzone, "--zdarzenie", zdarzenie, "--kto", "tester"], cwd=ROOT)
+
+    # 1. PREMISA: zwykly apply MUSI przechodzic. Bez tej asercji „bramka dziala" bylo by prawdziwe takze
+    #    dla bramki zatrzymujacej kazdy przebieg — czyli dla zepsutej jedynej drogi wdrozenia.
+    zapisz(("dry-run", "000000000000"))
+    p = bramka(granica())
+    check("apply BEZ promocji przechodzi automatem", p.returncode == 0, p.stdout[-300:])
+
+    # 2. Ta sama granica, jedna zmieniona wartosc `stage` — i przebieg ma stanac.
+    klucze = zapisz(("enforced", "000000000000"))
+    p = bramka(granica())
+    check("apply Z promocja ZATRZYMUJE sie bez zatwierdzenia", p.returncode == 1, p.stdout[-300:])
+    check("komunikat nazywa czlonka, ktory zostanie odciety", klucze[0] in p.stdout, p.stdout[-300:])
+
+    # 3. Zwolnienie: dokladnie ten klucz, wpisany recznie.
+    p = bramka(granica(), zatwierdzone=klucze[0])
+    check("zatwierdzenie recznym uruchomieniem PRZEPUSZCZA promocje", p.returncode == 0, p.stdout[-300:])
+
+    # 4. ZGODA „NA WSZYSTKO" NIE JEST WYRAZALNA. To jest sedno konstrukcji: pole nie przyjmuje potwierdzenia,
+    #    tylko liste odcinanych. Gdyby przyjmowalo cokolwiek prawdziwego, bramka bylaby przyciskiem.
+    for udawana in ("*", "true", "yes", "all"):
+        p = bramka(granica(), zatwierdzone=udawana)
+        check(f"zgoda-atrapa {udawana!r} NIE zwalnia bramki", p.returncode == 1, p.stdout[-200:])
+
+    # 5. Zatwierdzenie nieaktualne (wskazuje kogos innego niz oczekujacy) tez zatrzymuje.
+    p = bramka(granica(), zatwierdzone="example-division-prj-example-inny")
+    check("zatwierdzenie wskazujace kogos INNEGO zatrzymuje", p.returncode == 1, p.stdout[-200:])
+
+    # 6. Dwie promocje naraz: podzbior nie wystarcza, rownosc tak. Ta para pilnuje, zeby zgoda na jednego
+    #    czlonka nie przepuszczala przy okazji drugiego, ktorego zatwierdzajacy nie widzial.
+    klucze2 = zapisz(("enforced", "000000000000"), ("enforced", "111111111111"))
+    p = bramka(granica(), zatwierdzone=klucze2[0])
+    check("zatwierdzenie PODZBIORU oczekujacych zatrzymuje", p.returncode == 1, p.stdout[-300:])
+    p = bramka(granica(), zatwierdzone=" ".join(klucze2))
+    check("zatwierdzenie ROWNE oczekujacym przepuszcza", p.returncode == 0, p.stdout[-300:])
+
+    # 7. Czlonek juz egzekwowany = brak promocji. Bez tego kazdy kolejny apply po pierwszej promocji
+    #    prosilby o zgode na cos, co juz sie stalo — i bramka zostalaby wylaczona po tygodniu.
+    zapisz(("enforced", "000000000000"))
+    p = bramka(granica("000000000000"))
+    check("ponowny apply nad JUZ egzekwowanym czlonkiem nie prosi o nic", p.returncode == 0, p.stdout[-300:])
+
+    # 8. ASYMETRIA: zdjecie egzekwowania PRZYWRACA ruch, wiec nie jest bramkowane. Bramka w te strone
+    #    wydluzalaby kazda awarie o czas szukania czlowieka.
+    zapisz(("dry-run", "000000000000"))
+    p = bramka(granica("000000000000"))
+    check("ZDJECIE egzekwowania (rewert, break-glass) idzie automatem", p.returncode == 0, p.stdout[-300:])
+
+    # 9. Zatwierdzenie ma JEDNO legalne zrodlo. Wpisane na stale w plik workflowa przyszloby ze zdarzeniem
+    #    `push` — i wtedy jest zgoda, ktorej nikt nie wyraza w momencie skutku.
+    klucze = zapisz(("enforced", "000000000000"))
+    p = bramka(granica(), zatwierdzone=klucze[0], zdarzenie="push")
+    check("zatwierdzenie przyniesione przez `push` NIE zwalnia (tylko workflow_dispatch)",
+          p.returncode == 1, p.stdout[-300:])
+
+    # 10. Perimetr, ktorego jeszcze nie ma (pierwszy apply na swiezej organizacji): pusta konfiguracja
+    #     egzekwowana, nie awaria — inaczej bramka zatrzymywalaby wdrozenie idace dokumentowana sciezka.
+    pusty = baza / "brak-perimetru.json"
+    pusty.write_text("{}")
+    zapisz(("dry-run", "000000000000"))
+    p = bramka(pusty)
+    check("brak perimetru = pusta konfiguracja egzekwowana (bootstrap przechodzi)",
+          p.returncode == 0, p.stdout[-300:])
+    zapisz(("enforced", "000000000000"))
+    p = bramka(pusty)
+    check("czlonek `enforced` od zera tez jest promocja (bootstrap staje)", p.returncode == 1, p.stdout[-300:])
+
+    # --- osadzenie w workflowie ----------------------------------------------------------------------
+    apply_wf = yaml.safe_load((ROOT / ".github/workflows/apply.yml").read_text())
+    wejscia = ((apply_wf.get(True) or apply_wf.get("on"))["workflow_dispatch"] or {}).get("inputs", {})
+    check("apply.yml ma pole `promocje` w recznym uruchomieniu", "promocje" in wejscia, str(list(wejscia)))
+
+    kroki_ap = next(j["steps"] for j in apply_wf["jobs"].values()
+                    if any("terraform" in str(k.get("run", "")) and " apply " in str(k.get("run", ""))
+                           for k in j["steps"]))
+    i_bramki = [i for i, k in enumerate(kroki_ap)
+                if str(k.get("uses", "")).endswith("/bramka-promocji")]
+    check("bramka promocji stoi w jobie APPLIKUJACYM", len(i_bramki) == 1, str(i_bramki))
+    if i_bramki:
+        # PRZED planem, wiec i przed wzieciem zamka stanu: przebieg wstrzymany nie blokuje niczyjego apply.
+        i_plan = next(i for i, k in enumerate(kroki_ap) if "terraform -chdir=terraform plan" in str(k.get("run", "")))
+        check("bramka promocji wykonuje sie PRZED planem (i przed zamkiem stanu)",
+              i_bramki[0] < i_plan, f"bramka={i_bramki} plan={i_plan}")
+        # ZATWIERDZENIE POCHODZI Z WEJSCIA URUCHOMIENIA, nie ze stalej w pliku. Wartosc wpisana na stale
+        # bylaby bramka zdejmowana jednym commitem wygladajacym na konfiguracje (runtime lapie to osobno,
+        # asercja 9 wyzej — tu pilnujemy, zeby nikt nie musial sie o tym dowiadywac z czerwonego apply).
+        podane = str(kroki_ap[i_bramki[0]].get("with", {}).get("zatwierdzone_promocje", ""))
+        check("zatwierdzenie idzie z pola uruchomienia, nie ze stalej",
+              "inputs.promocje" in podane, podane)
+
+    # ASYMETRIA WOBEC TORU PULL REQUESTA JEST DECYZJA, NIE PRZEOCZENIEM (DEC-17): promujacy pull request ma
+    # byc zielony, przejrzany i scalony — zatrzymanie nalezy sie WYKONANIU. Bramka wpieta w `plan.yml`
+    # czerwienilaby review promocji, czyli utrudniala dokladnie ten krok, ktory ma byc staranny.
+    for tor in ("plan.yml", "validate.yml"):
+        tekst = (ROOT / ".github/workflows" / tor).read_text()
+        check(f"{tor} NIE wola bramki promocji (pyta o moment, nie o tresc)",
+              "bramka-promocji" not in tekst, tor)
 
 
 def test_boundary_probe() -> None:
@@ -3927,6 +4068,7 @@ def main() -> int:
     test_workflows()
     test_workflowy_wykonywalne()
     test_bramki_na_sciezce_apply()
+    test_bramka_promocji()
     test_boundary_probe()
     test_schemas()
 
