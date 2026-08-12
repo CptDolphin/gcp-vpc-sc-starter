@@ -191,8 +191,8 @@ def dryf_z_planu(plan: dict, apply_zalega: bool) -> int:
 
 
 def komunikat_rozjazdu(nazwa: str, zywe: int, zadeklarowane: int, apply_zalega: bool,
-                       powod_zalegania: str) -> tuple[str, str] | None:
-    """`(poziom, tresc)` dla adnotacji o rozjezdzie zywej granicy z deklaracja. `None`, gdy liczby rowne.
+                       powod_zalegania: str) -> str | None:
+    """Tresc adnotacji o rozjezdzie zywej granicy z deklaracja. `None`, gdy liczby rowne.
 
     TEN SAM DYSKRYMINATOR CO `dryf_z_planu`, TYLKO PO STRONIE KOMUNIKATU — i to jest jedyny powod, dla
     ktorego ta funkcja istnieje osobno, zamiast byc f-stringiem w `zmierz`.
@@ -218,27 +218,33 @@ def komunikat_rozjazdu(nazwa: str, zywe: int, zadeklarowane: int, apply_zalega: 
     poprzedniego commita padl na numerze projektu, ktory nie istnieje, wiec czlonek warty 5 atrybutow byl
     w deklaracji i nie byl w granicy. Kontrola zadzialala, jej zdanie nie.
 
-    POZIOM ADNOTACJI ROZNI SIE CELOWO, ale ZADEN z wariantow nie wywraca joba: obserwator, ktory pada
-    wtedy, gdy jest co zglosic, jest gorszy niz jego brak (ta sama zasada co `|| true` przy budzecie
-    w `watch.yml`). `::error::` jest tu wylacznie po to, zeby na LISCIE przebiegow dalo sie odroznic
-    „czeka na apply" od „granica rozjechala sie z Gitem" bez wchodzenia w log.
+    OBA WARIANTY IDA JAKO `::warning::`, A ROZROZNIENIE NIESIE PIERWSZE SLOWO TRESCI — i to nie jest
+    kosmetyka, tylko odmowa oparcia kontroli na niezmierzonym zachowaniu platformy. Kuszace bylo dac
+    drugiemu wariantowi `::error::`, zeby odcinal sie na LISCIE przebiegow. Adnotacja poziomu error
+    prawdopodobnie nie zmienia statusu joba (status robi kod wyjscia), ale „prawdopodobnie" jest tu za
+    slabe: gdyby jednak zmieniala, `measure` staje sie czerwony, `publish` nie rusza przez `needs`,
+    metryki nie powstaja — czyli obserwator MILKNIE dokladnie w tym stanie, w ktorym ma krzyczec, i to
+    bez ani jednego alertu przez pierwsze trzy godziny (`watchdog_absent_seconds`). W calym tym
+    repozytorium kazde `::error::` stoi obok niezerowego `exit`, wiec nie ma tu ani jednego pomiaru,
+    na ktorym mozna by sie oprzec. Ryzyko asymetryczne i darmowe do usuniecia: prefiks „ROZJAZD
+    OCZEKIWANY" / „ROZJAZD NIEOCZEKIWANY" daje to samo rozroznienie na liscie, bo GitHub pokazuje tam
+    tresc adnotacji, a nie sam poziom.
     """
     if zywe == zadeklarowane:
         return None
     roznica = zywe - zadeklarowane
-    wspolne = (f"budzet {nazwa}: granica ma {zywe} atrybutow, deklaracja opisuje {zadeklarowane} "
-               f"(roznica {roznica:+d})")
+    wspolne = (f"granica ma {zywe} atrybutow, deklaracja opisuje {zadeklarowane} (roznica {roznica:+d})")
     if apply_zalega:
-        return "warning", (
-            f"{wspolne} — apply ZALEGA ({powod_zalegania}), wiec ta roznica jest OCZEKIWANA i zniknie po "
-            f"udanym apply. To NIE jest dryf: `drift_resources` jest w tym przebiegu celowo 0, a alert "
-            f"o dryfie milczy. Sprawdzaj HISTORIE PRZEBIEGOW APPLY, nie granice; jesli zaleganie przekroczy "
-            f"`apply_pending_seconds`, odezwie sie alert `apply`.")
-    return "error", (
-        f"{wspolne}, a apply NIE zalega ({powod_zalegania}) — Git i chmura powinny byc zgodne. Albo ktos "
-        f"zmienil granice poza pipelinem (patrz alert o dryfie), albo model w `attribute_budget.py` przelicza "
-        f"koszt inaczej, niz renderuje sie na ACM. Rozstrzyga porownanie REGULA PO REGULE, nie samych sum: "
-        f"docs/7-alerty.md#rozjazd-granicy-z-deklaracja")
+        return (
+            f"budzet {nazwa}: ROZJAZD OCZEKIWANY — {wspolne}; apply ZALEGA ({powod_zalegania}), wiec ta "
+            f"roznica zniknie po udanym apply. To NIE jest dryf: `drift_resources` jest w tym przebiegu "
+            f"celowo 0, a alert o dryfie milczy. Sprawdzaj HISTORIE PRZEBIEGOW APPLY, nie granice; jesli "
+            f"zaleganie przekroczy `apply_pending_seconds`, odezwie sie alert `apply`.")
+    return (
+        f"budzet {nazwa}: ROZJAZD NIEOCZEKIWANY — {wspolne}, a apply NIE zalega ({powod_zalegania}). Git "
+        f"i chmura powinny byc zgodne. Albo ktos zmienil granice poza pipelinem (patrz alert o dryfie), albo "
+        f"model w `attribute_budget.py` przelicza koszt inaczej, niz renderuje sie na ACM. Rozstrzyga "
+        f"porownanie REGULA PO REGULE, nie samych sum: docs/7-alerty.md#rozjazd-granicy-z-deklaracja")
 
 
 def wygasli_czlonkowie(projects_doc: dict, dzis: datetime.date) -> int:
@@ -425,8 +431,7 @@ def zmierz(args) -> int:
         for n in ("spec", "status"):
             komunikat = komunikat_rozjazdu(n, zywe[n], zadeklarowane[n], zaleganie > 0, powod)
             if komunikat:
-                poziom, tresc = komunikat
-                print(f"::{poziom}::{tresc}", file=sys.stderr)
+                print(f"::warning::{komunikat}", file=sys.stderr)
 
     plan = json.load(open(args.plan_json)) if os.path.exists(args.plan_json) else {}
     dryf = dryf_z_planu(plan, zaleganie > 0)

@@ -1770,21 +1770,27 @@ def test_alerty() -> None:
 
     zalega = pw.komunikat_rozjazdu("spec", 48, 53, True, "zmiana z aaaaaaaa..bbbbbbbb czeka na apply")
     nie_zalega = pw.komunikat_rozjazdu("spec", 48, 53, False, "ostatni udany apply stoi na HEAD")
-    check("rozjazd przy ZALEGAJACYM apply nie jest bledem (znika po apply)",
-          zalega[0] == "warning", str(zalega))
-    check("rozjazd przy NIEZALEGAJACYM apply jest bledem (Git i chmura powinny byc zgodne)",
-          nie_zalega[0] == "error", str(nie_zalega))
-    # ANTY-TAUTOLOGIA: sam rozny POZIOM przeszedlby takze wtedy, gdyby obie tresci byly identyczne —
-    # a to wlasnie tresc czyta dyzurny. Wariant „zalega" NIE MOZE odsylac do alertu o dryfie.
+    # ROZROZNIENIE NIESIE TRESC, NIE POZIOM ADNOTACJI — i to jest asercja na decyzje, nie na styl.
+    # `::error::` odcinalby sie na liscie przebiegow ladniej, ale gdyby (niezmierzone!) czerwienil joba,
+    # `publish` nie ruszylby przez `needs` i obserwator zamilklby dokladnie w stanie, w ktorym ma krzyczec.
+    # Stad prefiks w tresci i JEDEN poziom w `zmierz`.
+    check("producent zglasza rozjazd wylacznie jako ::warning:: (job nie moze czerwieniec)",
+          "::error::" not in watch_py.split("def zmierz(")[1].split("def opublikuj(")[0],
+          "w `zmierz` pojawil sie ::error:: — patrz docstring komunikat_rozjazdu")
+    check("rozjazd przy ZALEGAJACYM apply jest nazwany OCZEKIWANYM",
+          zalega.startswith("budzet spec: ROZJAZD OCZEKIWANY"), zalega)
+    check("rozjazd przy NIEZALEGAJACYM apply jest nazwany NIEOCZEKIWANYM",
+          nie_zalega.startswith("budzet spec: ROZJAZD NIEOCZEKIWANY"), nie_zalega)
+    # ANTY-TAUTOLOGIA: sam rozny PREFIKS przeszedlby takze wtedy, gdyby reszta obu tresci byla identyczna —
+    # a dyzurny dziala wedlug tego, co jest dalej. Wariant „zalega" NIE MOZE odsylac do alertu o dryfie.
     check("wariant „apply zalega” NIE odsyla do alertu o dryfie, tylko do historii przebiegow apply",
-          "patrz alert o dryfie" not in zalega[1] and "HISTORIE PRZEBIEGOW APPLY" in zalega[1],
-          zalega[1])
+          "patrz alert o dryfie" not in zalega and "HISTORIE PRZEBIEGOW APPLY" in zalega, zalega)
     check("wariant „apply nie zalega” odsyla do alertu o dryfie ORAZ nazywa druga przyczyne (model)",
-          "alert o dryfie" in nie_zalega[1] and "attribute_budget.py" in nie_zalega[1], nie_zalega[1])
+          "alert o dryfie" in nie_zalega and "attribute_budget.py" in nie_zalega, nie_zalega)
     check("obie tresci niosa OBIE liczby i kierunek roznicy",
-          all(x in zalega[1] for x in ("48", "53", "-5")) and
-          all(x in nie_zalega[1] for x in ("48", "53", "-5")),
-          f"{zalega[1]} || {nie_zalega[1]}")
+          all(x in zalega for x in ("48", "53", "-5")) and
+          all(x in nie_zalega for x in ("48", "53", "-5")),
+          f"{zalega} || {nie_zalega}")
     # Kotwica z komunikatu MUSI istniec — odsylacz do nieistniejacej sekcji to pol procedury. Ta sama
     # konwencja jawnych `<a id="...">`, co przy `runbook_url` alertow (wyzej): slug generowany z polskiego
     # naglowka zalezy od renderera, wiec kotwica jest zapisana wprost, a nie zgadywana.
