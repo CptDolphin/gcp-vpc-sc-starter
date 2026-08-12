@@ -675,6 +675,21 @@ tempo naszych pull requestów, a nie tempo rośnięcia granicy. Zmierzone przy w
 tę samą liczbę (`spec` 48, `status` 0), więc zmiana źródła zmienia ZNACZENIE metryki, a nie jej wartość —
 i właśnie dlatego trzeba ją było zrobić od razu, a nie „gdy liczby się rozjadą".
 
+**Korekta z 2026-08-12: rozjazd obu liczb NIE jest „tym samym objawem, o którym mówi alert o dryfie".**
+Tak brzmiało zdanie wyżej i było błędem — nie w mechanizmie, tylko w tym, co ta kontrola mówi człowiekowi.
+Rozjazd ma dwie przyczyny i dwie procedury, a przy tej częstszej **oba** alerty, do których odsyłał,
+milczą z definicji: gdy `apply` zalega, `dryf_z_planu` zwraca 0 celowo (dyskryminator „zmiana spoza Gita
+vs opóźnienie propagacji"), a alert o wieku `apply` czeka do progu `apply_pending_seconds`. Przez pierwszą
+godzinę po merge'u ta adnotacja jest więc **jedynym** sygnałem, a odsyłacz prowadził do dwóch kontroli
+z czystą tablicą — czyli uczył dyżurnego, że to fałszywy alarm. Zmierzone na żywym wdrożeniu (przebiegi
+`watch` `31565377821` i `31565606010`): „granica ma 48 atrybutów, deklaracja opisuje 53" przy
+`drift_resources = 0` i `apply_pending_seconds = 72`; przyczyną był `apply`, który padł na numerze
+projektu nieistniejącego w organizacji. Kontrola zadziałała — zawiodło jej zdanie. Od tej poprawki
+`komunikat_rozjazdu()` rozróżnia: **apply zalega** → `warning`, „różnica oczekiwana, idź do historii
+przebiegów `apply`, nie do granicy"; **apply nie zalega** → `error`, „zmiana poza pipeline'em albo rozjazd
+arytmetyki modeli — rozstrzyga porównanie regułą po regule". To jest ta sama klasa defektu, którą DEC-13
+naprawiał u siebie (puste `notificationChannels`): kontrola obecna, celująca w pustkę, brana za spokój.
+
 **Gdy żywej granicy nie da się odczytać, metryka budżetu NIE POWSTAJE.** Podstawienie liczby z deklaracji
 dałoby wartość, która wygląda poprawnie i opisuje co innego — dokładnie ten tryb awarii, który ten
 mechanizm ma tropić. Brak punktu jest uczciwszy niż zły punkt.

@@ -190,6 +190,57 @@ def dryf_z_planu(plan: dict, apply_zalega: bool) -> int:
     return zmiany
 
 
+def komunikat_rozjazdu(nazwa: str, zywe: int, zadeklarowane: int, apply_zalega: bool,
+                       powod_zalegania: str) -> tuple[str, str] | None:
+    """`(poziom, tresc)` dla adnotacji o rozjezdzie zywej granicy z deklaracja. `None`, gdy liczby rowne.
+
+    TEN SAM DYSKRYMINATOR CO `dryf_z_planu`, TYLKO PO STRONIE KOMUNIKATU — i to jest jedyny powod, dla
+    ktorego ta funkcja istnieje osobno, zamiast byc f-stringiem w `zmierz`.
+
+    Rozjazd tych dwoch liczb ma DWIE zupelnie rozne przyczyny i dwie rozne procedury, a jedno zdanie dla
+    obu wysyla dyzurnego pod zly adres w tym z nich, ktory jest czestszy:
+
+      * `apply` ZALEGA — w Gicie jest zmergowana zmiana, ktorej nie ma jeszcze w chmurze. Roznica jest
+        wtedy OCZEKIWANA i znika sama po udanym apply. Wysylanie tu do alertu o dryfie jest gorsze niz
+        cisza, bo ten alert MILCZY Z DEFINICJI: `dryf_z_planu` zwraca w tym stanie 0 celowo (patrz jego
+        docstring), a alert o wieku `apply` ma prog `apply_pending_seconds` (godzina) — czyli przez cala
+        pierwsza godzine rozjazd budzetu jest JEDYNYM sygnalem, a odsylacz prowadzi do dwoch kontroli
+        pokazujacych czysta tablice. Dyzurny, ktory raz je sprawdzi i nic nie znajdzie, nauczy sie tej
+        adnotacji nie czytac.
+      * `apply` NIE ZALEGA — Git i chmura powinny byc zgodne, a nie sa. To jest objaw realny i ma dwa
+        zrodla, oba warte obudzenia czlowieka: zmiana wprowadzona poza pipelinem albo rozjazd ARYTMETYKI
+        obu modeli (`attribute_budget.py` modeluje renderer; gdy renderer sie zmieni, a model nie —
+        ostrzezenie wyglada identycznie jak dryf). Tu odeslanie do alertu o dryfie jest trafne.
+
+    ZMIERZONE, DLACZEGO TO NIE JEST HIPOTETYCZNE (2026-08-12, przebiegi `watch` 31565377821 i 31565606010):
+    „granica ma 48 atrybutow, deklaracja opisuje 53 — patrz alert o dryfie", przy `drift_resources = 0`
+    i `apply_pending_seconds = 72`. Przyczyna byla prawdziwa i dokladnie z pierwszej kategorii: `apply`
+    poprzedniego commita padl na numerze projektu, ktory nie istnieje, wiec czlonek warty 5 atrybutow byl
+    w deklaracji i nie byl w granicy. Kontrola zadzialala, jej zdanie nie.
+
+    POZIOM ADNOTACJI ROZNI SIE CELOWO, ale ZADEN z wariantow nie wywraca joba: obserwator, ktory pada
+    wtedy, gdy jest co zglosic, jest gorszy niz jego brak (ta sama zasada co `|| true` przy budzecie
+    w `watch.yml`). `::error::` jest tu wylacznie po to, zeby na LISCIE przebiegow dalo sie odroznic
+    „czeka na apply" od „granica rozjechala sie z Gitem" bez wchodzenia w log.
+    """
+    if zywe == zadeklarowane:
+        return None
+    roznica = zywe - zadeklarowane
+    wspolne = (f"budzet {nazwa}: granica ma {zywe} atrybutow, deklaracja opisuje {zadeklarowane} "
+               f"(roznica {roznica:+d})")
+    if apply_zalega:
+        return "warning", (
+            f"{wspolne} — apply ZALEGA ({powod_zalegania}), wiec ta roznica jest OCZEKIWANA i zniknie po "
+            f"udanym apply. To NIE jest dryf: `drift_resources` jest w tym przebiegu celowo 0, a alert "
+            f"o dryfie milczy. Sprawdzaj HISTORIE PRZEBIEGOW APPLY, nie granice; jesli zaleganie przekroczy "
+            f"`apply_pending_seconds`, odezwie sie alert `apply`.")
+    return "error", (
+        f"{wspolne}, a apply NIE zalega ({powod_zalegania}) — Git i chmura powinny byc zgodne. Albo ktos "
+        f"zmienil granice poza pipelinem (patrz alert o dryfie), albo model w `attribute_budget.py` przelicza "
+        f"koszt inaczej, niz renderuje sie na ACM. Rozstrzyga porownanie REGULA PO REGULE, nie samych sum: "
+        f"docs/7-alerty.md#rozjazd-granicy-z-deklaracja")
+
+
 def wygasli_czlonkowie(projects_doc: dict, dzis: datetime.date) -> int:
     """Ile wpisow ma `review_by` w przeszlosci. Ta sama arytmetyka co `expiry-sweep.yml`.
 
@@ -368,11 +419,14 @@ def zmierz(args) -> int:
         historia = historia_procentow(args.project, g_token, args.history_days, teraz) if g_token else \
             {"spec": [], "status": []}
         prognoza = {k: round(dni_do_sciany(historia[k], procenty[k]), 2) for k in procenty}
+        # Rozjazd zywej granicy z deklaracja: JEDNA liczba, DWIE przyczyny, dwie procedury. Rozroznienie
+        # robi `komunikat_rozjazdu` — patrz jego docstring, bo to jest miejsce, w ktorym ta kontrola raz
+        # juz wyslala dyzurnego pod alert milczacy z definicji.
         for n in ("spec", "status"):
-            if zywe[n] != zadeklarowane[n]:
-                print(f"::warning::budzet {n}: granica ma {zywe[n]} atrybutow, deklaracja opisuje "
-                      f"{zadeklarowane[n]} — to jest rozjazd Gita z chmura, patrz alert o dryfie",
-                      file=sys.stderr)
+            komunikat = komunikat_rozjazdu(n, zywe[n], zadeklarowane[n], zaleganie > 0, powod)
+            if komunikat:
+                poziom, tresc = komunikat
+                print(f"::{poziom}::{tresc}", file=sys.stderr)
 
     plan = json.load(open(args.plan_json)) if os.path.exists(args.plan_json) else {}
     dryf = dryf_z_planu(plan, zaleganie > 0)
