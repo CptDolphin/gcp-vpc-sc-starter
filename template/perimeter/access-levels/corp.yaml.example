@@ -10,6 +10,42 @@
 # warstwy: `schemas/access-level.schema.json` w CI i test w selfteście.
 # Pole `title` jest wolnym tekstem — tam myślniki i spacje są w porządku.
 
+# ================================================================================================
+# UZBROJENIE (`armed`) — pole, które odróżnia poziom DZIAŁAJĄCY od poziomu, który tylko tak wygląda
+# ================================================================================================
+# Poziom oparty na zakresach IP ma dokładnie jeden tryb awarii, którego NIE WIDAĆ: zakres przestaje
+# pasować (zmienił się koncentrator VPN, doszło biuro, dostawca przenumerował pulę NAT) — a obiekt
+# w Access Context Managerze wygląda identycznie jak przedtem. Pusty zbiór dopasowań jest nieodróżnialny
+# od „nikt nie próbował". Dowiadujesz się w dniu, w którym reguła zaczyna egzekwować: ruch dywizji ginie.
+#
+# Ten sam kształt bierze się z placeholderów, których nikt nie podmienił. Zakresy dokumentacyjne
+# (RFC 5737: 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24; RFC 3849: 2001:db8::/32) nie należą do
+# ŻADNEGO hosta na świecie, więc poziom na nich oparty nie autoryzuje NIKOGO — mimo że w konsoli
+# i w `describe` wygląda na kompletny.
+#
+#   armed: false  = „ten poziom dziś nie wpuszcza nikogo i wiemy o tym"  → wymaga `unarmed_reason`
+#   armed: true   = „ktoś realnie może stąd przyjść"                     → przy `ip_subnetworks` wymaga
+#                   `source_of_truth` + `reviewed` (skąd wartość i kiedy potwierdzona)
+#   (brak pola)   = `true`
+#
+# Egzekwują to `precondition` w terraform/perimeter.tf (renderer — warstwa, której nie da się pominąć):
+#   * zakres wyłącznie dokumentacyjny bez `armed: false`             -> plan CZERWONY
+#   * `armed: false` bez `unarmed_reason`                            -> plan CZERWONY
+#   * kompozycja `armed: true` z nieuzbrojonym składnikiem           -> plan CZERWONY (nieosiągalność
+#                                                                       dziedziczy się przez AND)
+#   * poziom `armed: false` referowany przez konfigurację EGZEKWOWANĄ -> plan CZERWONY, chyba że niesie
+#                                                                       `unarmed_accepted_until` z datą
+#                                                                       w przyszłości (świadomy, wygasający
+#                                                                       zapis „ta reguła nie wpuszcza
+#                                                                       dziś nikogo i to jest OK")
+#   * `armed: true` + `ip_subnetworks` bez `source_of_truth`/`reviewed` -> plan CZERWONY
+#
+# CZEGO TO NIE ROBI: nie sprawdza, czy zakres jest PRAWDZIWY — tego z konfiguracji nie da się orzec.
+# Odpowiedzią na „skąd wiesz, że wartość jest aktualna" jest para: (1) `reviewed` + `review_interval_days`,
+# czyli zegar, który po N dniach czerwieni plan i zmusza sieć do potwierdzenia, oraz (2) KANAREK — reguła
+# sondująca, która sama generuje ruch przez ten poziom (patrz `policy.yaml` §baseline_ingress i DEC-19).
+# Zegar wykrywa zaniedbanie, kanarek wykrywa rozjazd.
+
 schema_version: 1
 
 access_levels:
@@ -17,9 +53,33 @@ access_levels:
     title: "Corporate network"
     # Zakresy podmień na własne. Trzymamy je w repo (a nie w zmiennej CI), bo to informacja jawna
     # i chcemy widzieć w PR, gdy ktoś dokłada nowy zakres — to jest realne poszerzenie granicy.
+    #
+    # DOPÓKI STOJĄ TU PLACEHOLDERY, POZIOM JEST NIEUZBROJONY — i musi to mówić wprost, bo inaczej
+    # wygląda na gotowy. Po podmianie na własne zakresy: `armed: true` + `source_of_truth` + `reviewed`
+    # (wzór niżej, przy `corp_network_armed_example`).
+    armed: false
+    unarmed_reason: "zakresy sa placeholderami RFC 5737 — podmien je na wlasne pule VPN/NAT i uzbroj poziom"
     ip_subnetworks:
       - "203.0.113.0/24" # TEST-NET-3 (RFC 5737) — placeholder, podmień
       - "198.51.100.0/24" # TEST-NET-2 (RFC 5737) — placeholder, podmień
+
+  # --- jak wygląda TEN SAM poziom po uzbrojeniu ---------------------------------------------------
+  # Zostawiony zakomentowany, bo przykład z działającym zakresem musiałby nieść cudzą sieć. Trzy pola
+  # ponad sam zakres i każde odpowiada na inne pytanie recenzenta:
+  #   source_of_truth      — SKĄD ta wartość: nazwa obiektu na firewallu, puli NAT, koncentratora VPN.
+  #                          „Z maila od Marka" to też odpowiedź, tylko widać, ile jest warta.
+  #   reviewed             — KIEDY człowiek od sieci ostatni raz potwierdził, że zakres nadal jest ich.
+  #   review_interval_days — po ilu dniach potwierdzenie się przeterminowuje. Po tym czasie plan pada
+  #                          na poziomie referowanym przez konfigurację EGZEKWOWANĄ (tam, gdzie cisza
+  #                          kosztuje), a dla pozostałych zostaje ostrzeżeniem.
+  # - name: corp_network_armed_example
+  #   title: "Corporate network"
+  #   armed: true
+  #   source_of_truth: "firewall object CORP-VPN-EGRESS + NAT pool DC1-OUT (CMDB CI-000123)"
+  #   reviewed: "2026-08-12"
+  #   review_interval_days: 180
+  #   ip_subnetworks:
+  #     - "<WASZ_ZAKRES_VPN>/24"
 
   # --- device-trust: WYMAGA PŁATNEJ LICENCJI, dlatego domyślnie WYŁĄCZONE -------------------------
   # Silniejsze niż IP (laptop w kawiarni na VPN nadal spełnia corp_network), więc to jest docelowy warunek
@@ -40,6 +100,13 @@ access_levels:
     title: "Break-glass (incident only)"
     # Wąski zakres bastionu/stanowiska awaryjnego. NIE jest przypisywany do żadnego członka w normalnym
     # trybie — używa go wyłącznie procedura break-glass, a każde użycie zostawia ślad w audit-logach.
+    #
+    # NIEUZBROJONY = PROCEDURA BREAK-GLASS NIE JEST GOTOWA. To rozróżnienie jest tu ważniejsze niż gdzie
+    # indziej: poziom awaryjny sprawdza się dopiero w awarii, więc „wygląda na gotowy" jest tu tożsame
+    # z „dowiemy się o tym w najgorszym możliwym momencie". Dopóki `armed: false`, zielony plan i zielone
+    # bramki NIE znaczą „mamy break-glass" — znaczą „mamy plik".
+    armed: false
+    unarmed_reason: "procedura break-glass nieuzbrojona: brak adresu bastionu, placeholder RFC 5737 nie wpuszcza nikogo"
     ip_subnetworks:
       - "192.0.2.10/32" # TEST-NET-1 (RFC 5737) — placeholder, podmień
 
@@ -72,6 +139,13 @@ access_levels:
     # korpo-sieć. Przestawienie tego jednego słowa na `OR` daje „region PL/DE ALBO korpo-sieć", czyli
     # wpuszcza dowolny adres z regionu; API przyjmuje taką zmianę bez ostrzeżenia (zmierzone). Dlatego OR
     # wymaga pola `or_reason` — schema, reguła OPA i `precondition` renderera pilnują tego niezależnie.
+    #
+    # NIEUZBROJENIE DZIEDZICZY SIĘ PRZEZ `AND`, I TO JEST NAJŁATWIEJSZY DO PRZEOCZENIA WARIANT DEFEKTU:
+    # ten poziom nie ma ani jednego zakresu IP we własnej treści, więc „przegląd zakresów" go pomija —
+    # a mimo to nie wpuszcza nikogo, bo wymaga `corp_network`. Renderer nie pozwala tu na `armed: true`,
+    # dopóki `corp_network` jest nieuzbrojony (osobna `precondition`, komunikat wskazuje oba poziomy).
+    armed: false
+    unarmed_reason: "kompozycja wymaga corp_network, ktory jest nieuzbrojony — AND dziedziczy nieosiagalnosc"
     combining_function: AND
     regions:
       - PL
@@ -99,6 +173,48 @@ access_levels:
   #     # dlatego ten poziom trzymaj wąsko i tylko tam, gdzie naprawdę potrzeba tożsamościowego zawężenia.
   #     - "user:example.person@example.com"
   #     - "serviceAccount:sa-notebook@prj-example.iam.gserviceaccount.com"
+
+  # --- KANAREK: para poziomów, którymi MIERZY SIĘ, czy access level w ogóle wpuszcza --------------
+  #
+  # PROBLEM, KTÓRY TO ROZWIĄZUJE. Odmowę granicy da się zaobserwować z dowolnego miejsca — wystarczy
+  # zawołać chronione API spoza perimetru. ŚCIEŻKI POZYTYWNEJ tak nie zmierzysz: żeby zobaczyć, że
+  # poziom kogoś WPUSZCZA, trzeba przyjść z miejsca, które go spełnia. Przy warunku `ip_subnetworks`
+  # znaczy to „z waszej sieci", a pipeline CI stoi zwykle poza nią. Skutek: w większości wdrożeń nikt
+  # nigdy nie zaobserwował, żeby jakikolwiek access level cokolwiek przepuścił — a to jest połowa
+  # działania tej kontroli i połowa, której awaria (za wąski zakres) odcina ludzi.
+  #
+  # KANAREK to para poziomów RÓŻNIĄCYCH SIĘ JEDNĄ RZECZĄ — tożsamością, którą wymieniają — plus para
+  # reguł baseline różniących się WYŁĄCZNIE tym, który z tych poziomów jest ich źródłem (`policy.yaml`
+  # §baseline_ingress). Sonda woła tę samą metodę read-only na tym samym projekcie tą samą tożsamością,
+  # dwa razy. Jedno wywołanie ma PRZEJŚĆ, drugie dostać odmowę VPC-SC. Werdykt jest wtedy odporny na
+  # wszystkie wspólne przyczyny: brak roli IAM, wyłączone API, zepsuty projekt i nieobecną regułę dałyby
+  # ten sam wynik w OBU wywołaniach, więc różnica może pochodzić już tylko z access levelu.
+  #
+  # GDZIE TO NAPRAWDĘ ZARABIA — u was, nie w przykładzie. Kanarek uruchomiony z runnera stojącego
+  # W WASZEJ SIECI i celujący w `corp_network` przestaje przechodzić w dniu, w którym zakres przestaje
+  # pasować — czyli wykrywa dokładnie tę awarię, której `describe` nie widzi, i wykrywa ją ZANIM
+  # zobaczy ją dywizja. To jest odpowiedź na „skąd wiemy, że zakres jest aktualny" mocniejsza niż data
+  # w polu `reviewed`: zamiast czekać na ruch, który może nigdy nie przyjść, generujemy własny.
+  #
+  # KOSZT: dwie reguły baseline (~10 atrybutów z 6000) i jedno wywołanie read-only na przebieg sondy.
+  # RYZYKO: poziom „match" autoryzuje WYŁĄCZNIE tożsamość pipeline'u i wyłącznie na metodę, którą
+  # wskazuje reguła kanarka — nie dotykaj nim niczego, co czyta dane dywizji.
+  #
+  # - name: ci_probe_match
+  #   title: "Canary: identity the probe actually uses"
+  #   armed: true
+  #   members:
+  #     - "serviceAccount:<PLAN_SA>@<ADMIN_PROJECT>.iam.gserviceaccount.com"
+  #
+  # - name: ci_probe_mismatch
+  #   title: "Canary: a different, existing identity the probe never uses"
+  #   armed: true
+  #   # ACM waliduje ISTNIENIE tożsamości, więc to nie może być konto zmyślone — bierzemy inne konto
+  #   # platformy. Poziom jest osiągalny w zasadzie (ktoś MOŻE go spełnić), tylko nie przez sondę:
+  #   # to jest różnica między „warunek nie do spełnienia" a „warunek niespełniony przez to wywołanie",
+  #   # i dzięki niej negatyw mierzy access level, a nie martwy zapis.
+  #   members:
+  #     - "serviceAccount:<APPLY_SA>@<ADMIN_PROJECT>.iam.gserviceaccount.com"
 
   # --- geografia: odrzucenie ruchu z regionów, w których nie działamy ----------------------------
   # Kody ISO 3166-1 alfa-2. To NIE jest zabezpieczenie kryptograficzne (VPN je omija), ale tanio ucina

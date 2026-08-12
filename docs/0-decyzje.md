@@ -1135,3 +1135,115 @@ reguły `vpcsc.onboarding` na pełnym zbiorze członków, i wymaga od niej `--co
   Rozważone przy #1979 (martwy członek produkuje fałszywy dowód czystego okna). Odrzucone: identyfikatora
   projektu w GCP **nie da się użyć ponownie** po skasowaniu, więc scenariusz „ten sam `project_id`, inny
   projekt" jest niewyrażalny, a kontrakt zyskałby pole, którego nikt nie czyta.
+
+---
+
+## DEC-19 — Access level deklaruje UZBROJENIE, a ścieżkę pozytywną mierzy kanarek, nie log
+
+**Decyzja.** Access level dostaje pole `armed` i trzy pola atestacyjne, a materiał dostaje **kanarka** —
+parę reguł baseline różniących się wyłącznie wymaganym poziomem. Trzy warstwy, każda na inne pytanie:
+
+1. **`armed: false` + `unarmed_reason`** — poziom mówi wprost, że dziś nie wpuszcza nikogo. Wymuszone tam,
+   gdzie da się to orzec maszynowo: zakresy wyłącznie dokumentacyjne (RFC 5737 `192.0.2.0/24`,
+   `198.51.100.0/24`, `203.0.113.0/24`; RFC 3849 `2001:db8::/32`) oraz kompozycja `AND` nad nieuzbrojonym
+   składnikiem. Poziom nieuzbrojony **referowany przez konfigurację EGZEKWOWANĄ** wywraca plan, chyba że
+   niesie `unarmed_accepted_until` z datą w przyszłości — świadomy, **wygasający** zapis.
+2. **`source_of_truth` + `reviewed` + `review_interval_days`** — uzbrojony poziom z zakresami IP musi
+   powiedzieć, skąd wartość i kiedy człowiek od sieci ją potwierdził. Przeterminowana atestacja czerwieni
+   plan **na poziomie stojącym w konfiguracji egzekwowanej**; poza nią zostaje informacją.
+3. **Kanarek** (`policy.yaml` §baseline_ingress, `boundary-probe.yml -f kanarek=…`) — dwie reguły
+   read-only różniące się **wyłącznie** access levelem, wołane tą samą tożsamością pipeline'u. Jedno
+   wywołanie ma przejść, drugie dostać odmowę VPC-SC.
+
+**Problem, który to zamyka — i dlaczego nie widać go w żadnym przeglądzie.** Access level z zakresem IP ma
+tryb awarii bez objawu: zakres przestaje pasować (zmienił się koncentrator VPN, doszło biuro, dostawca
+przenumerował pulę NAT), a obiekt w ACM wygląda identycznie jak przedtem. `describe` pokazuje treść, którą
+sami wysłaliśmy. Audit-log zapisuje **naruszenia**, nie wpuszczenia — więc „nikt tędy nie wszedł" i „nikt
+nie próbował" mają w logach ten sam obraz: pusty. Dowiadujesz się w dniu promocji, gdy ruch dywizji ginie.
+
+**Zmierzone (organizacja labu, 2026-08-12).** Wszystkie cztery poziomy stały na adresach dokumentacyjnych
+albo je dziedziczyły, a jedyna reguła **członkowska** w konfiguracji EGZEKWOWANEJ wskazywała
+`corp_network_and_region`, czyli `regions [PL, DE] AND corp_network(203.0.113.0/24, 198.51.100.0/24)`.
+Reguła stała w konfiguracji, która realnie blokuje, i **nie autoryzowała nikogo**. To ta sama klasa co
+reguła baseline bez `sources` — z jedną różnicą: tamtą dało się złapać kształtem reguły, tę widać
+wyłącznie w treści danych, więc nie łapała jej żadna z bramek.
+
+**Dlaczego ścieżki pozytywnej nie da się zmierzyć „zwykłym" sposobem.** Odmowę widać z dowolnego miejsca —
+wystarczy zawołać chronione API spoza perimetru. Żeby zobaczyć **wpuszczenie**, trzeba przyjść z miejsca,
+które poziom spełnia, a przy warunku `ip_subnetworks` znaczy to „z waszej sieci". Pipeline CI stoi poza
+nią. Trzy kandydatury na adres, z którego dałoby się sondować, i powód odrzucenia każdej — inny:
+
+* **Adres runnera dostawcy CI.** Nieznany przed przebiegiem i rotujący. Opublikowana lista zakresów
+  obejmuje **całą flotę CI dostawcy**, więc wpisanie jej do poziomu autoryzowałoby cudze pipeline'y —
+  poszerzenie granicy o rząd wielkości większe niż cokolwiek, co ta bramka chroni.
+* **Stała maszyna z zarezerwowanym adresem w regionie objętym warunkiem.** Technicznie spełnia OBA
+  warunki (`ip_subnetworks` i `regions`) i jest jedynym wariantem dającym uczciwy pomiar poziomu
+  sieciowego. Koszt: rezerwacja adresu ~5 USD/mies. utrzymywana bez przerwy, plus maszyna. Odrzucone
+  **z ceną w ręku**, nie „bo drogo": cały tor dowodowy tej granicy działa dotąd bez ani jednej maszyny,
+  a stały koszt pojawia się tu wyłącznie po to, żeby raz na jakiś czas udowodnić własność, którą kanarek
+  pokazuje za darmo. Wariant zostaje zapisany jako dostępny — w organizacji z własnym runnerem w sieci
+  korporacyjnej znika sam z siebie, bo ten runner JUŻ tam stoi.
+* **Adres człowieka/laptopa.** Jeden, nierotowalny i osobowy: spalony blokadą zostaje spalony, a wpisany
+  do konfiguracji wiąże całą granicę z jedną osobą fizyczną. Nie wchodzi niezależnie od wygody.
+
+**Dlaczego kanarek jest tożsamościowy, a mimo to nie jest obejściem kontroli sieciowej.** Poziom
+autoryzujący **wyłącznie** tożsamością nie dokłada nic ponad `ingressFrom.identities` reguły — a przy
+scenariuszu, dla którego access level w ogóle istnieje (skradzione poświadczenie użyte z cudzej sieci),
+zdejmuje jedyną obronę. Gdyby więc kanarkiem zastąpić warunek sieciowy w regule dywizji, byłoby to
+obejście, i tak to nazywamy. Kanarek jest czym innym w trzech wymiarach naraz i każdy z nich jest
+sprawdzalny w pliku: (a) stoi na **własnych** regułach `canary-*`, nigdy na regule dywizji;
+(b) tożsamością jest **konto pipeline'u**, nie konto aplikacji — to samo, które i tak ma regułę baseline;
+(c) celem są **dwie metody read-only opisujące konfigurację logowania**, nie dane. Kanarek nie zastępuje
+warunku sieciowego — mierzy **mechanizm**: czy access level, gdy jest spełniony, przepuszcza.
+
+**Dlaczego para, a nie pojedyncza sonda.** Pojedyncze „przeszło" nie mówi nic: ta sama metoda przechodzi
+też wtedy, gdy reguła jest szersza, niż wygląda, gdy perimetr nie obejmuje projektu i gdy usługa wypadła
+z `restricted_services`. Para różni się **jedną** rzeczą — poziomem wymaganym przez regułę — więc każda
+WSPÓLNA przyczyna (brak roli IAM, wyłączone API, zepsuty projekt, nieobecna reguła) daje ten sam wynik po
+obu stronach i nie potrafi wyprodukować rozjazdu. Rozjazd może pochodzić już tylko z access levelu.
+Stan `kanarek=rozbrojony` (obie sondy odmówione) jest **osobnym, zielonym** przelotem, a nie czerwonym:
+„para działa" znaczy coś dopiero wtedy, gdy widzieliśmy tę samą parę również NIE działającą.
+
+**Odpowiedź na „skąd wiadomo, że zakres jest nadal aktualny" — dwa różne narzędzia na dwie różne awarie.**
+`reviewed` + `review_interval_days` wykrywa **zaniedbanie procesu**: nikt od pół roku nie potwierdził
+wartości. Kanarek wykrywa **rozjazd faktyczny**: uruchomiony z runnera stojącego w sieci korporacyjnej
+i celujący w poziom z realnym zakresem przestaje przechodzić w dniu, w którym zakres przestaje pasować —
+zanim zobaczy to dywizja, bez czytania jakiegokolwiek logu. Zegar bez kanarka daje odhaczoną datę przy
+martwym zakresie; kanarek bez zegara nie pokrywa poziomów, których nie da się sondować (break-glass,
+device-trust). Dopiero razem mówią „ten poziom działa i ktoś za to odpowiada".
+
+### Alternatywy odrzucone
+
+- *Wykrywanie „nikt nie wszedł przez ten poziom od N dni" z logów.* Wariant pierwszego wyboru i odrzucony
+  po sprawdzeniu, co w tych logach jest. VPC-SC loguje **naruszenia**; wpisu „wpuszczono, bo access level
+  X pasował" nie ma. Wnioskowanie o wpuszczeniu wymagałoby **Data Access audit logs** na usługach
+  chronionych w każdym projekcie członkowskim — domyślnie wyłączonych i płatnych od wolumenu, a przy
+  kilkuset projektach to najdroższa pozycja całego wdrożenia. Do tego sygnał nie ma wartości
+  diagnostycznej: „zero wejść w N dni" jest **normalnym** stanem poprawnie zawężonej reguły (nikt nie
+  próbował), więc alert świeciłby na każdej cichej regule i zostałby wyciszony — a awaria, która nas
+  interesuje, i tak nie objawia się ciszą, tylko **serią odmów**, którą istniejący tor naruszeń już widzi.
+  Kanarek zamienia problem obserwacji w problem generacji: zamiast czekać na ruch, który może nigdy nie
+  przyjść, produkujemy własny, deterministyczny.
+- *Bramka zakazująca `ip_subnetworks` w poziomach referowanych przez konfigurację egzekwowaną.* Zamienia
+  defekt danych w zakaz prymitywu. Warunek sieciowy jest tu jedyną kontrolą **strukturalnie zdolną**
+  odciąć dostęp z nieznanej sieci (ani IAM Deny, ani PAB nie mają na wejściu pojęcia adresu), więc bramka
+  wypychająca go z użycia osłabia granicę pod pozorem sprzątania.
+- *Uznanie zakresów dokumentacyjnych za błąd także w dry-run.* Dry-run jest miejscem na konfigurację
+  niedokończoną — po to istnieje. Twarda bramka tam zmusiłaby do wpisywania realnych zakresów, zanim
+  ktokolwiek je potwierdzi, czyli produkowałaby dokładnie te wartości „na teraz", których ten mechanizm
+  ma nie dopuścić do konfiguracji egzekwowanej.
+- *Doliczenie RFC 1918 do zakresów-atrap.* Adres prywatny bywa **poprawną** wartością dla ruchu z sieci
+  korporacyjnej przez interconnect. Wspólny worek zamieniłby bramkę wykrywającą placeholder w bramkę
+  odrzucającą realny wzorzec — i nauczyłby ludzi ją obchodzić.
+- *`armed` liczone automatycznie zamiast deklarowanego.* Maszyna umie orzec „ten zakres jest
+  dokumentacyjny", nie umie orzec „ten zakres jest wasz i nadal działa". Pole wyliczane zgadywałoby
+  odpowiedź na drugie pytanie i dawałoby zielone światło każdemu zakresowi, który tylko wygląda realnie —
+  czyli dokładnie temu, przed czym ten mechanizm ma chronić.
+- *Domknięcie przechodnie nieuzbrojenia liczone w rendererze.* HCL nie ma rekurencji, więc wyszłoby albo
+  niepełne, albo rozwinięte na sztywną głębokość (a poziom „głębokość 4" pojawi się w dniu, w którym nikt
+  o tej granicy nie pamięta). Warunek lokalny „rodzic nieuzbrojonego dziecka też jest nieuzbrojony"
+  domyka się **indukcyjnie**, jest pełny dla dowolnego łańcucha i daje komunikat wskazujący oba poziomy.
+- *Kanarek jako osobny workflow.* Wtedy jest osobnym przebiegiem, osobnym uprawnieniem i osobną rzeczą do
+  zapomnienia. W `boundary-probe.yml` dokłada się do sondy, która i tak jest jedynym miejscem
+  produkującym zdania o świecie, i dziedziczy jej kluczową własność: werdykt stawiany z **treści**
+  odpowiedzi, nie z kodu błędu.
