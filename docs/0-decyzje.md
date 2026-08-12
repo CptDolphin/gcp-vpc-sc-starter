@@ -1864,3 +1864,89 @@ Nagłówek `boundary-probe.yml` mówi teraz wprost, czego ten workflow **nie mie
 * **Zostawienie zasady „bez maszyny" i uznanie egressu za nieweryfikowalny** — odrzucone, bo to zamienia
   ograniczenie budżetowe w milczącą lukę: perimetr bez zmierzonego egressu chroni kierunek łatwiejszy
   do zmierzenia, a nie ten, dla którego został wdrożony.
+
+---
+
+## DEC-26 — O kanale alertu pytamy „czy da się udowodnić doręczenie", a nie „jaki ma status"
+
+### Kontekst
+
+Dwa miejsca w tym starterze kazały operatorowi potwierdzić po pierwszym `apply`, że kanał e-mail jest
+zweryfikowany, i podawały do tego komendę:
+
+```
+gcloud alpha monitoring channels list --project=<PROJEKT> --format='table(...,verificationStatus)'
+```
+
+Kolumna wraca **pusta** i żadna zmiana formatu tego nie naprawia. Zmierzone na żywym API, cztery odczyty:
+
+* `GET .../notificationChannels/<id>` nie niesie klucza `verificationStatus` w ogóle — dla **wszystkich**
+  kanałów, także `pubsub`;
+* jawna maska `?fields=name,type,verificationStatus` też go nie zwraca, więc nie jest przycięty przez
+  formatowanie `gcloud`;
+* pozostałe pola tego samego odczytu (`type`, `displayName`, `enabled`) przychodzą poprawnie — **kontrola
+  pozytywna metody**: odczyt działa, brakuje wyłącznie tego jednego pola;
+* w `gcloud alpha monitoring channels` **nie ma** podkomendy `verify` ani `send-verification-code`, więc
+  procedura naprawcza dopisana obok tamtej komendy również nie istnieje.
+
+Pole jest enumem proto3: wartość domyślna `VERIFICATION_STATUS_UNSPECIFIED` nie serializuje się do JSON-a,
+a Google opisuje ją jako „stan nieznany, pominięty **albo nieadekwatny** (kanały, które weryfikacji ani nie
+wspierają, ani nie wymagają)". **Brak pola nie jest więc zdaniem „kanał niezweryfikowany".**
+
+Rozstrzygnęła to kontrola na kanale jednorazowym: świeżo utworzony kanał e-mail → `:sendVerificationCode`
+(HTTP 200, czyli Google przyjął żądanie) → ponowny odczyt. Gdyby kanał weryfikacji wymagał, stałby po tym
+kroku w stanie `UNVERIFIED` — to wartość **niedomyślna**, która serializuje się zawsze. Pole **nadal nie
+istniało**. Nie ma zatem wersji API, formatu ani flagi, w której tamta komenda zaczyna odpowiadać na własne
+pytanie; API o doręczalności skrzynki nie mówi **nic**.
+
+Metoda `:getVerificationCode` mówi tylko, czy kanał jest `VERIFIED`, i robi to czterema rozróżnialnymi
+odpowiedziami (`200` + kod · `400 … from an unverified channel` · `400 … for a channel of this type` ·
+`404` z JSON-em „Channel does not exist"). Piąta odpowiedź jest pułapką: **`404` ze stroną HTML** znaczy
+„nie ma takiej metody", a nie „nie ma takiego kanału” — to ta sama klasa fałszywego pomiaru co nieistniejąca
+komenda `gcloud` z wygaszonym stderr.
+
+### Decyzja
+
+**Kontrolą kanałów jest `tools/kanaly_check.py`, a jej pytanie brzmi: czy każda polityka `CRITICAL` ma co
+najmniej jeden kanał, którego DORĘCZENIE potwierdza maszyna.** Kanał dowodliwy to `pubsub` z istniejącym
+tematem i grantem `roles/pubsub.publisher` dla agenta powiadomień Monitoringu (odbiór widać potem
+w subskrypcji) albo kanał w stanie `VERIFIED`. Kanał `email` jest raportowany jako
+**NIEROZSTRZYGNIĘTY** — nigdy jako sprawny i nigdy jako zepsuty.
+
+**Doręczenie na skrzynkę potwierdza wyłącznie człowiek**, po teście negatywnym z `docs/7-alerty.md`:
+polityka testowa na własnej metryce → punkt powyżej progu → maszynowe potwierdzenie na Pub/Sub → jedno
+zdanie od odbiorcy skrzynki → sprzątnięcie. Ten krok zostaje w procedurze jako krok człowieka, tak samo
+jak GitHub App kanału dywizji (DEC-7) — a nie jest udawany automatem.
+
+`WARNING` nie podlega wymogowi kanału dowodliwego świadomie: przy sygnale czytanym w godzinach pracy koszt
+drugiego toru przewyższa szkodę z jego braku.
+
+### Konsekwencje
+
+* Wdrożenie bez `channels.machine` ma alerty `CRITICAL`, których doręczenia **nikt nie umie sprawdzić** —
+  i teraz to widać, bo `kanaly_check.py` kończy się kodem `1`. Wcześniej wyglądało to identycznie jak
+  konfiguracja poprawna.
+* Kanał maszynowy przestaje być „miłym dodatkiem dla SIEM-u", a staje się **warunkiem sprawdzalności**
+  alertu krytycznego. Nadal jest opcjonalny w schemacie: brak alertów to bezpieczna degradacja
+  (`alerting.yaml` §BRAK TEGO PLIKU), ale alert krytyczny bez toru dowodliwego już nią nie jest.
+* Narzędzie raportuje osobno `enabled: false`. To **drugi** tryb awarii: kanał wyłączony nie dostarcza
+  nic niezależnie od tego, czy jest dowodliwy, a oba pytania mylą się ze sobą w każdym raporcie „czy jest".
+* Stan „nie udało się odczytać" ma własny kod wyjścia (`2`) i nie jest zamiatany pod `0`.
+
+### Alternatywy odrzucone
+
+* **Poprawienie samej komendy** (inna wersja API, `gcloud beta`, inna maska pól) — odrzucone **pomiarem**:
+  pole nie pojawia się nigdzie, także po zainicjowaniu weryfikacji. Poprawiona komenda dawałaby ten sam
+  pusty wynik z nowym poczuciem, że sprawdzenie zostało wykonane.
+* **Uznanie braku pola za „kanał niezweryfikowany" i wysłanie człowieka po link weryfikacyjny** —
+  odrzucone, bo to wniosek z milczenia API. Brak pola znaczy „nie wiesz”; procedura oparta na tym wniosku
+  kazałaby szukać maila, którego może w ogóle nie być, i kończyłaby się zdaniem „chyba działa".
+* **Zastąpienie e-maila kanałem, który weryfikacji nie wymaga** (webhook, Pub/Sub jako jedyny) —
+  odrzucone: żaden z nich nie budzi człowieka, a `CRITICAL` ma trafić do człowieka. Kanał maszynowy jest
+  **dodatkiem dowodowym**, nie zamiennikiem odbiorcy.
+* **Wymuszenie `channels.machine` w schemacie jako pola wymaganego** — odrzucone, bo wywraca wdrożenie,
+  które świadomie nie ma Pub/Suba, w momencie walidacji pliku, zamiast powiedzieć mu, co przez to traci.
+  Werdykt narzędzia jest czytelniejszy niż błąd schematu i nie blokuje startu.
+* **Sprawdzanie doręczenia przez `sendVerificationCode` przy każdym apply** — odrzucone: metoda wysyła
+  wiadomość do odbiorcy i nie zwraca nic poza `200` (zmierzone: pustą odpowiedź `{}`), więc kosztuje mail
+  za każdym razem i nie odpowiada na żadne pytanie.

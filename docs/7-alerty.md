@@ -524,14 +524,56 @@ curl -sS -H "Authorization: Bearer $(gcloud auth print-access-token)" \
   "https://monitoring.googleapis.com/v3/projects/<PROJEKT>/alertPolicies" >/dev/null   # sanity
 ```
 
-Incydenty czyta się z Cloud Console (`Monitoring → Alerting → Incidents`) albo z API
-`projects.alertPolicies` + `incidents` — a najpewniejszym dowodem jest wiadomość, która **doszła
-do kanału**. Jeśli kanał e-mail jest `UNVERIFIED`, incydent się otworzy i **nie dojdzie nic**:
+Cloud Monitoring **nie ma publicznego API do incydentów** (`/v3/projects/<p>/incidents` → 404
+`Method not found`), więc dowodem odpalenia jest wiadomość, która **doszła do kanału** — i tu kończy
+się to, co widać z konsoli, a zaczyna to, co da się zapisać w runbooku.
+
+<a id="czy-kanal-dostarcza"></a>
+
+### Czy kanał w ogóle dostarcza — pytanie postawione tak, żeby dało się odpowiedzieć
+
+Stała tu wcześniej komenda pytająca o `verificationStatus`. **Ona nie działa i nie da się jej naprawić**
+— kolumna wraca pusta, bo API tego pola NIE ZWRACA (enum proto3, wartość domyślna nie serializuje się).
+Google definiuje tę wartość jako „stan nieznany, pominięty **albo nieadekwatny**", więc puste pole nie
+znaczy „niezweryfikowany" — znaczy „nie wiesz". Zmierzone: jawna maska `?fields=…,verificationStatus`
+też go nie zwraca, a po `:sendVerificationCode` (HTTP 200) pole **nadal nie istnieje**, choć
+`UNVERIFIED` jest wartością niedomyślną i musiałaby się wtedy pojawić. Kontrola pozytywna metody:
+`type`, `displayName` i `enabled` z tego samego odczytu przychodzą poprawnie (DEC-26).
+
+Zamiast tego:
 
 ```bash
-gcloud alpha monitoring channels list --project=<PROJEKT> \
-  --format='table(displayName,type,verificationStatus)'
+python3 tools/kanaly_check.py --project <PROJEKT>
 ```
+
+Narzędzie odpowiada na pytanie rozstrzygalne — **czy każda polityka `CRITICAL` ma kanał, którego
+doręczenie potwierdza maszyna** — i nie udaje, że wie cokolwiek o skrzynkach pocztowych. Kod wyjścia:
+`0` = ma, `1` = któraś nie ma, `2` = nie udało się odczytać (to NIE jest „ok").
+
+### Doręczenie na skrzynkę — jedyny krok, którego nie zrobi automat
+
+Żadne API Google nie potwierdzi, że mail doszedł. Dowodem jest człowiek, więc test wygląda tak:
+
+1. **Załóż politykę testową na własnej metryce**, wpiętą we wszystkie kanały, z nazwą, która mówi
+   wprost, czym jest — incydent zobaczą wszyscy odbiorcy i nikt nie może wziąć go za zdarzenie na
+   granicy. Nie odpalaj do tego celu polityki produkcyjnej: jej metryki czyta jednocześnie sweeper
+   i raport naruszeń, więc sztuczny punkt zostaje w danych, z których ktoś inny wyciąga wnioski.
+2. **Napisz punkt powyżej progu** (`duration: 0s` → incydent w ok. 2 min).
+3. **Potwierdź maszynowo tor Pub/Sub** — wiadomość niesie pełny obiekt incydentu:
+   ```bash
+   gcloud pubsub subscriptions pull <SUBSKRYPCJA> --project=<PROJEKT> --limit=20 --format=json \
+     | python3 -c 'import base64,json,sys; [print(json.loads(base64.b64decode(m["message"]["data"]))["incident"]["policy_name"]) for m in json.load(sys.stdin)]'
+   ```
+   Bez `--auto-ack`: wiadomości zostają w subskrypcji dla tego, kto czyta ją po Tobie.
+4. **Zapytaj odbiorcę skrzynki jednym zdaniem**, czy dostał wiadomość — z godziną i tytułem polityki.
+   To jest pełen dowód i nie ma dla niego zamiennika.
+5. **Zamknij incydent i posprzątaj**: punkt poniżej progu, potem `DELETE` polityki i deskryptora
+   metryki. Polityka założona z ręki nie jest w stanie Terraforma, więc nie zniknie sama i nie pokaże
+   się w `plan`.
+
+Jeśli krok 3 przeszedł, a krok 4 nie — awaria jest **w kanale pocztowym**, nie w alertingu: alert
+odpalił i Monitoring rozesłał powiadomienia. Odwrotnie (3 nie, 4 tak) nie zdarza się bez zmiany
+konfiguracji kanału maszynowego.
 
 **Warunek `condition_absent` (watchdog) ma własną pułapkę:** jest znaczący dopiero **po pierwszym
 zapisie**. Metryka, do której nigdy nic nie napisano, nie jest „nieobecna" — jest nieznana, i alert nie

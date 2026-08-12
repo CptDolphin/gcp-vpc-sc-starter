@@ -136,6 +136,9 @@ def bootstrap() -> None:
         "tools/sonda_egress_wewnetrzna.py", "tools/sonda_egress_startup.sh",
         "tools/perimeter_watch.py", "terraform/alerts.tf",
         "perimeter/alerting.yaml", "schemas/alerting.schema.json",
+        # Czy alert CRITICAL ma kanal, ktorego DORECZENIE potwierdza maszyna (DEC-26). Poprzednia
+        # kontrola pytala o `verificationStatus` — pole, ktorego API nie zwraca.
+        "tools/kanaly_check.py",
         ".github/workflows/watch.yml",
         # Bramki treści i bramki żywe jako akcje złożone: JEDNA definicja, wołana przez tor pull requesta
         # (`validate.yml`/`plan.yml`) i przez mutatora (`apply.yml`). Patrz DEC-16.
@@ -1777,6 +1780,96 @@ def test_monitoring() -> None:
 
 
 # --------------------------------------------------------------------- alerty granicy
+def test_kanaly_check() -> None:
+    """Czy narzedzie o kanalach POTRAFI powiedziec „nie wiem" — bo tylko to odroznia je od poprzednika.
+
+    Poprzednia kontrola (`--format='table(...,verificationStatus)'`) zwracala pusta kolumne i operator
+    czytal z niej, co chcial. Test, ktory sprawdza wylacznie sciezke pozytywna, przeszedlby takze na
+    implementacji mapujacej „nie jest VERIFIED" na BLAD albo na OK — czyli na dokladnie tym bledzie,
+    dla ktorego to narzedzie powstalo. Dlatego mierzymy WSZYSTKIE piec odpowiedzi API, i osobno to,
+    ze dwa rozne `404` nie sklejaja sie w jeden werdykt.
+
+    Odpowiedzi sa ZMIERZONE na zywym API (DEC-26), nie wymyslone; siec jest tu zaslepiona, bo mierzymy
+    logike werdyktu, a nie API Google.
+    """
+    print("\n== kanaly_check ==")
+    sciezka = ROOT / "tools" / "kanaly_check.py"
+    check("kanaly_check: narzedzie rozpakowane i wykonywalne",
+          sciezka.exists() and os.access(sciezka, os.X_OK))
+    if not sciezka.exists():
+        return
+
+    spec = importlib.util.spec_from_file_location("kanaly_check", sciezka)
+    modul = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(modul)
+
+    # Piec odpowiedzi `:getVerificationCode` zmierzonych na zywym API — para (kod HTTP, tresc).
+    odpowiedzi = {
+        "VERIFIED": (200, '{"code":"REDAGOWANE","expireTime":"2026-01-01T00:00:00Z"}'),
+        "nie-VERIFIED": (400, '{"error":{"status":"FAILED_PRECONDITION","message":'
+                              '"Cannot generate a verification code from an unverified channel."}}'),
+        "typ-bez-weryfikacji": (400, '{"error":{"status":"FAILED_PRECONDITION","message":'
+                                     '"Cannot generate verification codes for a channel of this type."}}'),
+        "kanalu-nie-ma": (404, '{"error":{"status":"NOT_FOUND","message":"Channel does not exist."}}'),
+        "metody-nie-ma": (404, "<!DOCTYPE html><html><title>Error 404 (Not Found)!!1</title>"),
+    }
+    werdykty = {}
+    for etykieta, odpowiedz in odpowiedzi.items():
+        modul.zadanie = lambda *a, _o=odpowiedz, **k: _o
+        werdykty[etykieta] = modul.sprawdz_email("projects/p/notificationChannels/1", "t", "p")
+
+    check("kanaly_check: VERIFIED -> DOWODLIWY",
+          werdykty["VERIFIED"][0] == modul.DOWODLIWY, str(werdykty["VERIFIED"]))
+    # NAJWAZNIEJSZA ASERCJA TEGO TESTU. „Nie jest VERIFIED" to stan NIEROZSTRZYGNIETY: brak pola
+    # `verificationStatus` znaczy „nie wiesz", a nie „niezweryfikowany" (zmierzone: pole nie pojawia
+    # sie takze po `:sendVerificationCode`). Zmapowanie tego na BLAD wskrzesza dokladnie ten falszywy
+    # wniosek, ktory ta decyzja usuwa; zmapowanie na DOWODLIWY jest jeszcze gorsze.
+    check("kanaly_check: „nie jest VERIFIED” NIE jest ani bledem, ani dowodem (wniosek z milczenia API)",
+          werdykty["nie-VERIFIED"][0] == modul.NIEROZSTRZYGNIETY, str(werdykty["nie-VERIFIED"]))
+    check("kanaly_check: typ bez weryfikacji tez nie jest bledem",
+          werdykty["typ-bez-weryfikacji"][0] == modul.NIEROZSTRZYGNIETY,
+          str(werdykty["typ-bez-weryfikacji"]))
+    check("kanaly_check: kanal wpiety w polityke, ktorego NIE MA -> BLAD",
+          werdykty["kanalu-nie-ma"][0] == modul.BLAD, str(werdykty["kanalu-nie-ma"]))
+    check("kanaly_check: brak METODY (404 z HTML) tez -> BLAD, nie ciche „ok”",
+          werdykty["metody-nie-ma"][0] == modul.BLAD, str(werdykty["metody-nie-ma"]))
+    # Oba `404` konczą sie BLEDEM, ale z ROZNYCH powodow — sklejenie ich zostawia operatora z „nie ma
+    # kanalu" w sytuacji, w ktorej to API sie zmienilo. To ta sama pulapka co nieistniejaca komenda
+    # `gcloud` z wygaszonym stderr: wygodne zero wynikow, ktore wyglada jak zdanie o swiecie.
+    check("kanaly_check: „nie ma kanalu” i „nie ma metody” maja ROZNE uzasadnienia",
+          werdykty["kanalu-nie-ma"][1] != werdykty["metody-nie-ma"][1])
+
+    # --- kanal maszynowy: grant dla AGENTA POWIADOMIEN, nie dla tozsamosci apply -----------------
+    agent = modul.AGENT_POWIADOMIEN.format(numer="123456789012")
+    modul.gcloud = lambda *a, **k: json.dumps(
+        {"bindings": [{"role": "roles/pubsub.publisher", "members": [f"serviceAccount:{agent}"]}]})
+    check("kanaly_check: temat z grantem dla agenta powiadomien -> DOWODLIWY",
+          modul.sprawdz_pubsub("projects/p/topics/t", "123456789012")[0] == modul.DOWODLIWY)
+    # Temat ISTNIEJE, polityka go wskazuje, a powiadomienie nie wyjdzie. Dokladnie ten tryb awarii,
+    # ktory z listy kanalow wyglada identycznie jak konfiguracja poprawna.
+    modul.gcloud = lambda *a, **k: json.dumps(
+        {"bindings": [{"role": "roles/pubsub.viewer", "members": [f"serviceAccount:{agent}"]}]})
+    check("kanaly_check: temat BEZ grantu publikacji -> BLAD (nie „jest temat, wiec ok”)",
+          modul.sprawdz_pubsub("projects/p/topics/t", "123456789012")[0] == modul.BLAD)
+
+    def pada(*a, **k):
+        raise RuntimeError("PERMISSION_DENIED")
+    modul.gcloud = pada
+    check("kanaly_check: brak uprawnienia do odczytu IAM tematu -> BLAD, nie „brak grantu”",
+          modul.sprawdz_pubsub("projects/p/topics/t", "123456789012")[0] == modul.BLAD)
+
+    # --- procedura w dokumentacji ma NIESC krok czlowieka, bo automat go nie zrobi ----------------
+    alerty = (ROOT / "docs/7-alerty.md").read_text()
+    check("docs/7: martwa komenda o verificationStatus USUNIETA z procedury",
+          "verificationStatus)'" not in alerty, "stara komenda nadal zalecana")
+    check("docs/7: test negatywny wskazuje narzedzie, ktore odpowiada na swoje pytanie",
+          "tools/kanaly_check.py" in alerty)
+    check("docs/7: test negatywny niesie krok CZLOWIEKA (doreczenia na skrzynke nie potwierdzi automat)",
+          "Zapytaj odbiorcę skrzynki" in alerty)
+    check("docs/7: test negatywny konczy sie SPRZATANIEM polityki zalozonej z reki",
+          "nie jest w stanie Terraforma" in alerty)
+
+
 def test_alerty() -> None:
     """Cztery objawy zepsutej granicy mają mieć alert, runbook i producenta, który liczy to samo.
 
@@ -5342,6 +5435,7 @@ def main() -> int:
     test_kanal_ticketowy()
     test_poswiadczenie_kanalu()
     test_monitoring()
+    test_kanaly_check()
     test_alerty()
     test_brownfield()
     test_external_egress_and_guard()
