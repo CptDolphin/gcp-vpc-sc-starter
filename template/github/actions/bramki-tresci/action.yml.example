@@ -305,17 +305,57 @@ runs:
           *) echo "::notice::$czytaj — promocja czlonka bedzie odrzucona na braku dowodu" ;;
         esac
 
+    # STAN ZASTOSOWANY — drugie wejście bramki promocji, obok dowodu naruszeń wyżej.
+    #
+    # PO CO. Warunki promocji (okno dry-run, dowód, zero naruszeń) odpowiadają na pytanie „co się zepsuje,
+    # jeśli TERAZ włączymy egzekwowanie". Zadane po samym `stage: enforced` obowiązują też długo po tym,
+    # jak decyzja zapadła — a wtedy naruszenia są już ODMOWAMI, czyli dowodem, że granica działa. Bez tego
+    # kroku pierwszy promowany członek czerwieni KAŻDY kolejny pull request (zmierzone: 18 odmów w oknie
+    # i „promocja po 2 dniach dry-run" na wnioskach, które promocji nie dotyczyły). Kontrakt mówi, co
+    # ostatni apply NAPRAWDĘ włączył, więc dopiero różnica repo↔kontrakt jest PRZEJŚCIEM.
+    #
+    # DLACZEGO ASSET RELEASE'U, A NIE BUCKET. Kontrakt publikuje się w dwóch miejscach (contract.tf) —
+    # bucket wymaga tożsamości w GCP, a ten zestaw bramek ma zostać wykonywalny BEZ ani jednego
+    # poświadczenia w chmurze; `contents: read`, którym pobieramy asset, workflow i tak ma.
+    #
+    # DLACZEGO KROK NIE PADA PRZY BRAKU KONTRAKTU. Repozytorium przed pierwszym apply (i repozytorium
+    # z wyłączoną sekcją `contract`) nie ma czego pobrać. `collect_declarations.py` bez `--contract`
+    # zostawia `applied_stages_known: false`, a reguła traktuje „nie wiem" jak przejście — czyli żąda
+    # dowodu. Degradacja idzie w stronę SUROWSZĄ: brak pliku nie może rozbrajać bramki, bo wtedy
+    # wyłącznikiem całej kontroli byłoby usunięcie artefaktu.
+    - name: stan zastosowany (kontrakt z ostatniego apply, jeśli jest)
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token_gh }}
+      run: |
+        if gh release download contract --pattern contract.json --dir stan; then
+          python3 - <<'PY'
+        import json
+        d = json.load(open("stan/contract.json"))
+        print("etapy ZASTOSOWANE wg kontraktu:")
+        for m in d.get("members", []):
+            print(f"  {m['division']}-{m['project_id']}: {m['stage']}")
+        PY
+        else
+          echo "::notice::brak release'u \`contract\` — stan zastosowany nieznany, bramka promocji zostaje uzbrojona dla KAZDEGO czlonka enforced"
+        fi
+
     # The rego rules need context (policy + profiles + members + today), so we build one document first.
-    # `--violations` dokładamy TYLKO wtedy, gdy dowód naprawdę leży na dysku — `collect_declarations.py`
-    # bez tej flagi zostawia mapę pustą, czyli fail-closed dla każdej promocji.
+    # `--violations` i `--contract` dokładamy TYLKO wtedy, gdy pliki naprawdę leżą na dysku —
+    # `collect_declarations.py` bez nich zostawia pustą mapę naruszeń i `applied_stages_known: false`,
+    # czyli fail-closed dla każdej promocji.
     - name: collect declarations
       shell: bash
       run: |
+        argumenty=()
         if [ -f dowod/violations.json ]; then
-          python3 tools/collect_declarations.py --violations dowod/violations.json > declarations.json
-        else
-          python3 tools/collect_declarations.py > declarations.json
+          argumenty+=(--violations dowod/violations.json)
         fi
+        if [ -f stan/contract.json ]; then
+          argumenty+=(--contract stan/contract.json)
+        fi
+        echo "collect_declarations.py ${argumenty[*]}"
+        python3 tools/collect_declarations.py "${argumenty[@]}" > declarations.json
 
     # `conftest verify` to TESTY JEDNOSTKOWE REGUŁ, i na ścieżce apply mają one osobne znaczenie: reguła
     # usunięta z `policy/onboarding.rego` nie odrzuca już niczego, a `conftest test` niżej byłby wtedy

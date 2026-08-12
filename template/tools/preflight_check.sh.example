@@ -5,6 +5,8 @@
 # Każdy check zamyka konkretny tryb awarii:
 #   1. projekt istnieje, jest ACTIVE i numer zgadza się z ID → literówka w numerze dodałaby do perimetru
 #      CUDZY projekt, a projekt w trakcie kasowania (soft-delete, 30 dni) wnosi do niego MARTWY NUMER
+#   1b. (ostrzeżenie) projekt ma konto rozliczeniowe → bez niego wpis wejdzie do perimetru i reguły powstaną,
+#      ale projekt nie uruchomi obciążenia, które te reguły autoryzują; NIE blokujemy — powód przy checku
 #   2. projekt nie jest w innej konfiguracji EGZEKWOWANEJ → twarde ograniczenie ACM; apply padłby po review
 #   3. podsieci mają Private Google Access        → bez tego ruch do API nie pójdzie przez restricted VIP
 #   4. strefa DNS kieruje googleapis.com na restricted VIP → jw., najczęstsza cicha awaria onboardingu
@@ -28,7 +30,9 @@
 # woła „wilk", rozbraja sam siebie.
 #
 # Uprawnienia (read-only): cloudasset.viewer, compute.networkViewer, dns.reader, iam.serviceAccountViewer
-# — docs/2-uprawnienia-i-wif.md
+# — docs/2-uprawnienia-i-wif.md. Check 1b potrzebuje dodatkowo `billing.resourceAssociations.list`; NIE jest
+# on w tym zestawie ŚWIADOMIE — to uprawnienie z innej domeny administracyjnej (billing), a check jest tylko
+# ostrzeżeniem, więc jego brak degraduje się do „nie zweryfikowano", a nie blokuje pre-flightu.
 set -euo pipefail
 
 # DLACZEGO to jest pierwsza linijka kodu, a nie szczegół. gcloud, natrafiając na wyłączone API, proponuje
@@ -157,6 +161,41 @@ else
   else
     ok "projekt istnieje, jest ACTIVE, numer zgodny"
   fi
+fi
+
+# 1b. konto rozliczeniowe — OSTRZEŻENIE, NIE BLOKADA, i ta severity jest WYNIKIEM POMIARU, nie ostrożności.
+#
+# DLACZEGO check w ogóle istnieje: bez niego pre-flight o billingu MILCZY. Zmierzone na żywej organizacji —
+# projekt bez konta rozliczeniowego dostaje wyjście BAJT W BAJT identyczne z projektem, który je ma, łącznie
+# z linią `pre-flight zaliczony`. Recenzent czytający werdykt nie ma z czego się dowiedzieć, że pytanie
+# w ogóle padło. Milczenie jest tu problemem, nie severity.
+#
+# DLACZEGO UWAGA, A NIE BŁĄD — I NIE PODNOŚ TEGO POŹNIEJ „bo wygląda na przeoczenie". Hipotezę „brak
+# billingu = wywołania API się odbijają" ZMIERZONO i OBALONO, dwa razy i dwiema różnymi drogami:
+#   * ścieżka ODCZYTU przechodzi na projekcie bez billingu (`storage buckets list` → `Listed 0 items.`,
+#     exit 0) — czyli dokładnie ta ścieżka, którą mierzy się blokadę granicy;
+#   * `services enable aiplatform.googleapis.com` na projekcie bez billingu KOŃCZY SIĘ SUKCESEM (rc=0).
+# Członkostwo w perimetrze działa na płaszczyźnie API i konta rozliczeniowego nie wymaga. Twardy BŁĄD
+# zatrzymywałby więc kandydata POPRAWNEGO — a to jest ta sama pomyłka, przed którą broni się nagłówek tego
+# pliku przy checkach 3 i 4: check, który wywraca legalny wniosek, kończy się `--warn-only`, czyli
+# wyciszeniem RÓWNIEŻ tych przypadków, w których naprawdę coś jest nie tak.
+#
+# CO ZATEM MÓWIMY: że projekt bez billingu nie uruchomi obciążenia, które ta reguła właśnie autoryzuje —
+# więc wniosek jest prawdopodobnie pomyłką — i zostawiamy decyzję recenzentowi, zamiast zgadywać za niego.
+#
+# CZWARTY STAN TAK SAMO JAK WSZĘDZIE: nieodczytany billing to NIE jest „billingu nie ma". Odczyt wymaga
+# uprawnienia do powiązania rozliczeniowego (`billing.resourceAssociations.list`), którego read-only zestaw
+# z nagłówka NIE zawiera — więc „nie udało się zapytać" musi być widoczne jako osobny stan, inaczej brak
+# jednej roli u recenzenta zamieniłby się w fałszywe ostrzeżenie o cudzym projekcie.
+g beta billing projects describe "$PROJECT_ID" --format='value(billingEnabled)'
+if [ "$GRC" -ne 0 ]; then
+  uwaga "nie zweryfikowano konta rozliczeniowego (odczyt nie powiódł się — wymaga billing.resourceAssociations.list): $GERR"
+elif [ -z "$GOUT" ]; then
+  uwaga "nie odczytałem pola billingEnabled — nie wiem, czy projekt ma konto rozliczeniowe (nieodczytanego stanu nie zamiatam pod OK)"
+elif [ "$GOUT" = "True" ]; then
+  ok "konto rozliczeniowe podpięte"
+else
+  uwaga "projekt NIE MA konta rozliczeniowego (billingEnabled=$GOUT) — członkostwo w perimetrze i tak zadziała (zmierzone), ale projekt nie uruchomi obciążenia, które autoryzują jego reguły; potwierdź, że to zamierzone"
 fi
 
 # 2. kolizja perimetrów — projekt może należeć tylko do JEDNEJ konfiguracji EGZEKWOWANEJ.

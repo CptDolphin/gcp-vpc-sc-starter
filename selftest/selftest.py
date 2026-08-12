@@ -2166,6 +2166,58 @@ def test_rego() -> None:
     # Realne deklaracje ze startera muszą przechodzić bramki onboardingu.
     decl = sh([sys.executable, "tools/collect_declarations.py", "--today", "2026-07-28"], cwd=ROOT)
     check("collect_declarations.py dziala", decl.returncode == 0, decl.stderr[-500:])
+
+    # --- odczyt stanu ZASTOSOWANEGO z kontraktu ------------------------------------------------------
+    #
+    # `applied_stages_known` jest wejściem bramki bezpieczeństwa, więc każdy powód, dla którego kontraktu
+    # nie da się zaufać, musi dawać `False` — i musi to robić CICHO POD WZGLĘDEM KODU WYJŚCIA, a głośno
+    # w treści. Wywrócenie narzędzia zamieniłoby uszkodzony artefakt pobierany po sieci w czerwone
+    # WSZYSTKIM pull requestom; `False` czyni surowszą wyłącznie bramkę promocji.
+    def etapy_dla(kontrakt, plik: str) -> tuple[dict, bool, int]:
+        (ROOT / plik).write_text(json.dumps(kontrakt) if not isinstance(kontrakt, str) else kontrakt)
+        r = sh([sys.executable, "tools/collect_declarations.py", "--contract", plik], cwd=ROOT)
+        if r.returncode != 0:
+            return {}, False, r.returncode
+        d = json.loads(r.stdout)
+        return d.get("applied_stages", {}), d.get("applied_stages_known"), r.returncode
+
+    dobry_kontrakt = {
+        "schema_version": 1,
+        "members_published": True,
+        "members": [{"division": "example-division", "project_id": "prj-x", "stage": "enforced"},
+                    {"division": "example-division", "project_id": "prj-y", "stage": "dry-run"}],
+    }
+    etapy, znany, rc = etapy_dla(dobry_kontrakt, "kontrakt-ok.json")
+    check("collect_declarations --contract: etapy odczytane, klucz jak w projects_file.klucz()",
+          rc == 0 and znany is True
+          and etapy == {"example-division-prj-x": "enforced", "example-division-prj-y": "dry-run"},
+          f"rc={rc} znany={znany} etapy={etapy}")
+
+    # Bez flagi w ogóle — stan nieznany, bramka uzbrojona. To jest zachowanie każdej ścieżki, która
+    # kontraktu nie poda (pre-commit u dewelopera, repo przed pierwszym apply).
+    d = json.loads(decl.stdout)
+    check("collect_declarations bez --contract: applied_stages_known = false",
+          d.get("applied_stages_known") is False and d.get("applied_stages") == {},
+          str({k: d.get(k) for k in ("applied_stages", "applied_stages_known")}))
+
+    # Cztery powody nieufności. Każdy osobno, bo każdy da się „naprawić" tak, że pozostałe nadal przechodzą.
+    for opis, kontrakt, plik in (
+        ("publish_members: false (pusta lista jest dwuznaczna)",
+         dict(dobry_kontrakt, members_published=False, members=[]), "kontrakt-bez-listy.json"),
+        ("nieznana wersja schematu (pole `stage` moze znaczyc co innego)",
+         dict(dobry_kontrakt, schema_version=99), "kontrakt-zla-wersja.json"),
+        ("wpis czlonka bez `stage` (czesciowa mapa = poprawny werdykt ze zlego powodu)",
+         dict(dobry_kontrakt, members=[{"division": "d", "project_id": "p"}]), "kontrakt-bez-stage.json"),
+        ("plik nieczytelny (uszkodzone pobranie)", '{"schema_version": 1, "mem', "kontrakt-uszkodzony.json"),
+    ):
+        etapy, znany, rc = etapy_dla(kontrakt, plik)
+        check(f"collect_declarations --contract: {opis} -> stan NIEZNANY",
+              rc == 0 and znany is False and etapy == {}, f"rc={rc} znany={znany} etapy={etapy}")
+
+    # ANTY-TAUTOLOGIA dla całej czwórki wyżej: narzędzie, które zawsze mówi „nie wiem", przeszłoby je
+    # wszystkie. Pozytyw jest o linijkę wyżej, ale bez tej asercji łatwo go usunąć razem z regresją.
+    check("collect_declarations --contract: dobry kontrakt DAJE znany stan (test anty-tautologiczny)",
+          etapy_dla(dobry_kontrakt, "kontrakt-ok2.json")[1] is True)
     (ROOT / "declarations.json").write_text(decl.stdout)
     p = sh(["conftest", "test", "--policy", "policy", "--namespace", "vpcsc.onboarding", "declarations.json"], cwd=ROOT)
     check("przykladowy czlonek przechodzi bramki onboardingu", p.returncode == 0, p.stdout[-1200:])
@@ -2253,6 +2305,43 @@ def test_rego() -> None:
     polityka = yaml.safe_load((ROOT / "perimeter/policy.yaml").read_text())
     check("policy.yaml deklaruje sekcje control_plane_projects (nie da sie jej po cichu usunac)",
           isinstance(polityka.get("control_plane_projects"), list), str(sorted(polityka.keys())))
+
+    # --- bramka promocji pyta o PRZEJŚCIE, nie o stan (kontrakt = etapy zastosowane) -----------------
+    #
+    # Reguła związana wyłącznie z `stage: enforced` obowiązuje DOPÓKI członek jest enforced — także długo
+    # po tym, jak decyzja zapadła. A wtedy naruszenia w oknie są ODMOWAMI (granica działa), więc członek
+    # działający zgodnie z przeznaczeniem odrzuca każdy niezwiązany pull request. Trzy przebiegi niżej
+    # trzymają razem trzy własności, których żadna z osobna nie odróżnia naprawy od wyłączenia bramki.
+    def z_kontraktem(doc: dict, etapy, znany: bool) -> dict:
+        d = json.loads(json.dumps(doc))
+        d["applied_stages"] = etapy
+        d["applied_stages_known"] = znany
+        return d
+
+    promowany = json.loads(decl.stdout)
+    promowany["members"][name]["stage"] = "enforced"
+    # Brudne okno: 30 wpisów. Przed promocją to prognoza ryzyka, po niej — liczba odmów.
+    promowany["violations_last_window"] = {name: 30}
+
+    p = onboarding_na(z_kontraktem(promowany, {name: "dry-run"}, True), "przejscie-bez-dowodu.json")
+    check("PRZEJSCIE do enforced bez czystego okna jest ODRZUCANE (kontrakt mowi dry-run)",
+          p.returncode != 0, p.stdout[-800:])
+
+    p = onboarding_na(z_kontraktem(promowany, {name: "enforced"}, True), "juz-egzekwowany.json")
+    check("czlonek JUZ egzekwowany nie blokuje niezwiazanego wniosku mimo 30 odmow",
+          p.returncode == 0, p.stdout[-800:])
+
+    # FAIL-CLOSED. Gdyby brak wiedzy o stanie zastosowanym przepuszczał, wyłącznikiem tej bramki byłoby
+    # NIEPOBRANIE kontraktu — czyli usunięcie pliku. Degradacja ma iść w stronę surowszą.
+    p = onboarding_na(z_kontraktem(promowany, {}, False), "stan-nieznany.json")
+    check("brak wiedzy o stanie zastosowanym zachowuje sie jak PRZEJSCIE (fail-closed)",
+          p.returncode != 0, p.stdout[-800:])
+
+    # Kontrakt czytelny, ale członka w nim nie ma — pierwszy apply tego wpisu. „Nie ma go" nie może
+    # znaczyć „już włączony": to najostrzejszy możliwy stan, a wygląda jak brak danych.
+    p = onboarding_na(z_kontraktem(promowany, {"inna-dywizja-inny-projekt": "enforced"}, True),
+                      "stan-bez-czlonka.json")
+    check("czlonek NIEOBECNY w kontrakcie tez jest przejsciem", p.returncode != 0, p.stdout[-800:])
 
     # NEGATYW na plan-JSON: reguła z ANY_IDENTITY i z method="*" musi paść.
     bad_plan = {
@@ -2806,6 +2895,14 @@ case "$*" in
     [ "${STUB_PROJECT_FAIL:-}" = "1" ] && awaria \\
       "ERROR: (gcloud.projects.describe) User [x@example.com] does not have permission to access projects instance [prj-example:get] (or it may not exist)."
     printf '%s\\t%s\\n' "123456789012" "${STUB_LIFECYCLE-ACTIVE}" ;;
+  # `beta billing projects describe` NIE wpada w galaz `projects describe ` wyzej: tamten wzorzec jest
+  # zakotwiczony na poczatku `$*`, a tu `$*` zaczyna sie od `beta billing`. Trzy wartosci zamiast dwoch,
+  # bo check ma trzy wyjscia: True (jest), False (nie ma) i PUSTE (nie odczytalem) — a to ostatnie musi
+  # dac inny komunikat niz „nie ma", inaczej brak jednej roli u recenzenta wyglada jak wada cudzego projektu.
+  *"billing projects describe "*)
+    [ "${STUB_FAIL:-}" = "billing" ] && awaria \\
+      "ERROR: (gcloud.beta.billing.projects.describe) PERMISSION_DENIED: caller lacks billing.resourceAssociations.list"
+    printf '%s\\n' "${STUB_BILLING-True}" ;;
   *"service-accounts describe "*)
     for arg in "$@"; do case " $STUB_SA_OK " in *" $arg "*) exit 0 ;; esac; done
     exit 1 ;;
@@ -2886,6 +2983,59 @@ def test_preflight() -> None:
     check("preflight: nieudany odczyt projektu cytuje odpowiedz API i nazywa obie mozliwosci",
           p.returncode != 0 and "NIE ISTNIEJE albo brak dostępu" in p.stdout
           and "or it may not exist" in p.stdout, p.stdout + p.stderr)
+
+    # ------------------------------------------------------------------ konto rozliczeniowe (check 1b)
+    # ZMIERZONE NA ZYWEJ ORGANIZACJI: przed tym checkiem projekt BEZ konta rozliczeniowego dostawal wyjscie
+    # BAJT W BAJT takie samo jak projekt, ktory je ma — z linia `pre-flight zaliczony` wlacznie. Pre-flight
+    # o billingu po prostu MILCZAL, wiec recenzent nie mial z czego sie dowiedziec, ze pytanie nie padlo.
+    #
+    # SEVERITY JEST TU CZESCIA ASERCJI, NIE SZCZEGOLEM. Sprawdzamy JEDNOCZESNIE, ze ostrzezenie pada
+    # I ze kod wyjscia zostaje ZEROWY. Hipoteze „brak billingu = wywolania API sie odbijaja" zmierzono
+    # i obalono (odczyt przechodzi; `services enable` na chronionej usludze konczy sie sukcesem), wiec
+    # twardy BLAD zatrzymywalby kandydata POPRAWNEGO. Ta asercja istnieje po to, zeby ktos „poprawiajacy
+    # przeoczenie" na `problem` wywrocil test, zamiast po cichu zamienic ostrzezenie w blokade.
+    p = sh(baza, cwd=ROOT, env=env)
+    check("preflight: konto rozliczeniowe PODPIETE = OK", p.returncode == 0
+          and "konto rozliczeniowe podpięte" in p.stdout, p.stdout + p.stderr)
+
+    p_bez = sh(baza, cwd=ROOT, env=dict(env, STUB_BILLING="False"))
+    check("preflight: BRAK konta rozliczeniowego = UWAGA, ale pre-flight NIE JEST blokowany",
+          p_bez.returncode == 0 and "UWAGA" in p_bez.stdout
+          and "NIE MA konta rozliczeniowego" in p_bez.stdout, p_bez.stdout + p_bez.stderr)
+
+    # ANTY-TAUTOLOGIA CZESC 1 — check musi CZYTAC wartosc, a nie wypisywac stalej. Gdyby byl no-opem,
+    # oba przebiegi dalyby identyczne wyjscie i asercja wyzej zzielieniala by na samej obecnosci slowa.
+    check("preflight: wyjscie dla projektu Z billingiem ROZNI SIE od wyjscia BEZ (check nie jest no-opem)",
+          p.stdout != p_bez.stdout, p.stdout + "\n---\n" + p_bez.stdout)
+
+    # Nieodczytany billing to NIE jest „billingu nie ma". Odczyt wymaga uprawnienia z domeny billingu,
+    # ktorego read-only zestaw recenzenta swiadomie nie zawiera — wiec brak roli ma byc widoczny jako
+    # osobny stan, a nie jako ostrzezenie o CUDZYM projekcie, ktorego nikt nie umie potem naprawic.
+    p = sh(baza, cwd=ROOT, env=dict(env, STUB_FAIL="billing"))
+    check("preflight: NIEODCZYTANY billing cytuje odpowiedz i nie udaje 'brak billingu'",
+          p.returncode == 0 and "nie zweryfikowano konta rozliczeniowego" in p.stdout
+          and "billing.resourceAssociations.list" in p.stdout, p.stdout + p.stderr)
+
+    p = sh(baza, cwd=ROOT, env=dict(env, STUB_BILLING=""))
+    check("preflight: PUSTE billingEnabled = 'nie odczytalem', nie ciche OK ani 'nie ma'",
+          p.returncode == 0 and "nie odczytałem pola billingEnabled" in p.stdout, p.stdout + p.stderr)
+
+    # ANTY-TAUTOLOGIA CZESC 2 — rozbroj DOKLADNIE linie werdyktu i powtorz TEN SAM przypadek.
+    # Podmiana calego lancucha, nie wyrazenie regularne: gdy linia sie zmieni, podmiana nie zajdzie
+    # i test padnie glosno, zamiast po cichu zzielieniec na nieaktualnej kotwicy.
+    zrodlo_b = (ROOT / "tools/preflight_check.sh").read_text()
+    linia_bill = [w for w in zrodlo_b.splitlines() if 'uwaga "projekt NIE MA konta rozliczeniowego' in w]
+    check("preflight: linia werdyktu o billingu istnieje (kotwica anty-tautologii)",
+          len(linia_bill) == 1, str(linia_bill))
+    if len(linia_bill) == 1:
+        rozbrojony = ROOT / "tools/preflight_rozbrojony.sh"
+        rozbrojony.write_text(zrodlo_b.replace(linia_bill[0], '  ok "ROZBROJONE — bez sprawdzenia billingu"'))
+        p = sh(["bash", "tools/preflight_rozbrojony.sh", "--project", "prj-example", "--number", "123456789012"],
+               cwd=ROOT, env=dict(env, STUB_BILLING="False"))
+        check("preflight: po ROZBROJENIU projekt BEZ billingu nie dostaje ani slowa (asercja nie jest pusta)",
+              p.returncode == 0 and "NIE MA konta rozliczeniowego" not in p.stdout
+              and "ROZBROJONE" in p.stdout, p.stdout + p.stderr)
+        rozbrojony.unlink()
 
     p = sh(baza + ["--identity", "serviceAccount:sa-example@prj-example.iam.gserviceaccount.com"], cwd=ROOT, env=env)
     check("preflight: ISTNIEJACE konto serwisowe przechodzi", p.returncode == 0, p.stdout + p.stderr)
@@ -3076,6 +3226,43 @@ def test_workflows() -> None:
     check("validate: nazwa pobieranego artefaktu = nazwa publikowanej przez raport",
           nazwa_up is not None and nazwa_down is not None and nazwa_up.group(1) == nazwa_down.group(1),
           f"upload={nazwa_up and nazwa_up.group(1)} download={nazwa_down and nazwa_down.group(1)}")
+
+    # DRUGIE WEJŚCIE TEJ SAMEJ BRAMKI: STAN ZASTOSOWANY (kontrakt). Bramka promocji pyta o PRZEJŚCIE do
+    # `enforced`, a nie o stan — więc bez `--contract` KAŻDY członek już egzekwowany wygląda jak promocja
+    # trwająca w tej chwili i odrzuca cudze wnioski własnymi odmowami.
+    #
+    # GUARD ENUMERUJE ŚCIEŻKI Z PLIKÓW, a nie z listy wpisanej tutaj — i to jest cała jego wartość. Ten sam
+    # zestaw reguł uruchamiają dziś cztery różne miejsca (tor pull requesta, tor mutatora i dwa kanały
+    # wejścia), a pominięcie wejścia w JEDNYM z nich jest niewidoczne: przebieg pada na cudzym członku,
+    # komunikatem o promocji, w workflow, który promocji nie dotyczy. ZMIERZONE — dokładnie tak wyglądała
+    # awaria kanału ticketowego po pierwszej promocji w organizacji. Guard z listą nazw przegapiłby piątą
+    # ścieżkę dopisaną jutro; guard czytający pliki nie ma jak.
+    # CZYTAMY WYŁĄCZNIE CIAŁA `run:`, nie tekst pliku. Komentarz tłumaczący, po co jest `--contract`,
+    # zaliczyłby asercję tekstową także w pliku, z którego flagę usunięto — czyli guard zdawałby się na
+    # własną dokumentację. To ta sama pułapka, przed którą ostrzega nagłówek `tekst_wykonywany`.
+    def komendy(nazwa: str) -> str:
+        wf = yaml.safe_load((ROOT / ".github/workflows" / nazwa).read_text())
+        return "\n".join(str(k.get("run") or "") for k, _ in kroki_workflow(wf))
+
+    ogladane, bez_stanu = [], []
+    for plik in sorted((ROOT / ".github/workflows").glob("*.yml")):
+        wykonywane = komendy(plik.name)
+        # Interesują nas WYŁĄCZNIE ścieżki, które oceniają PEŁNY zbiór członków regułami onboardingu.
+        # `contrib/validate-local.sh` buduje wejście po swojemu (jeden zgłaszany członek) i dlatego tu
+        # nie wchodzi — tam „nie wiem" jest poprawną, najsurowszą odpowiedzią.
+        if "collect_declarations.py" not in wykonywane or "--namespace vpcsc.onboarding" not in wykonywane:
+            continue
+        ogladane.append(plik.name)
+        if "--contract" not in wykonywane:
+            bez_stanu.append(plik.name)
+    check("kazda sciezka uruchamiajaca bramki onboardingu podaje stan zastosowany (--contract)",
+          not bez_stanu, f"bez --contract: {bez_stanu}")
+
+    # ANTY-TAUTOLOGIA guardu wyżej: pusta pętla przechodzi każdy warunek „nie znaleziono naruszeń".
+    # Ścieżki są dziś cztery (validate, apply, intake, external-intake); próg 3 zostawia miejsce na
+    # świadome usunięcie jednej, a wywraca się, gdy rozpoznawanie ścieżek przestanie działać.
+    check("guard stanu zastosowanego oglada co najmniej trzy sciezki (nie jest pusta petla)",
+          len(ogladane) >= 3, str(ogladane))
 
     ext = (ROOT / ".github/workflows/external-intake.yml").read_text()
     # Kanał zewnętrzny ma dwa niezbywalne zabezpieczenia: change_ref musi wskazywać repozytorium, które

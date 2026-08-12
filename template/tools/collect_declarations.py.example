@@ -9,6 +9,7 @@ istnieje" byłaby niewyrażalna.
 Użycie:
     python3 tools/collect_declarations.py                       > declarations.json
     python3 tools/collect_declarations.py --violations v.json   > declarations.json
+    python3 tools/collect_declarations.py --contract c.json     > declarations.json
     python3 tools/collect_declarations.py --today 2026-08-15    # do testów okna dry-run
 
 Członkowie przychodzą z JEDNEGO pliku `perimeter/projects.yaml` (DEC-12), a czyta go `tools/projects_file.py`
@@ -36,12 +37,72 @@ def load_dir(path: pathlib.Path) -> dict:
     return {f.stem: yaml.safe_load(f.read_text()) for f in sorted(path.glob("*.yaml"))}
 
 
+# Wersja schematu kontraktu, którą to narzędzie umie przeczytać. Kontrakt w innej wersji traktujemy jak
+# jego BRAK, a nie „pewnie pola się nie zmieniły": pole `stage` jest tu wejściem bramki bezpieczeństwa,
+# więc zgadywanie kształtu po numerze, którego nie znamy, jest dokładnie tym, czego wersjonowanie miało
+# zabronić. Podniesienie wersji w terraform/contract.tf wymaga świadomego podniesienia jej TUTAJ.
+WERSJA_KONTRAKTU = 1
+
+
+def etapy_z_kontraktu(sciezka: pathlib.Path) -> tuple[dict, bool]:
+    """Mapa klucz_członka → etap ZASTOSOWANY, plus flaga „dało się to ustalić".
+
+    Kontrakt (`terraform/contract.tf`) publikuje po KAŻDYM apply m.in. `division`, `project_id` i `stage`
+    każdego członka. To jedyne w tym repozytorium źródło mówiące, co NAPRAWDĘ zostało włączone — pliki
+    w `perimeter/` mówią, czego chcemy. Bramka promocji potrzebuje różnicy między jednym a drugim, bo
+    pyta o PRZEJŚCIE do `enforced`, a nie o sam stan `enforced` (patrz policy/onboarding.rego).
+
+    ZWRACAMY FLAGĘ, A NIE SAMĄ MAPĘ. Pusta mapa jest dwuznaczna: „kontraktu nie ma" kontra „kontrakt jest
+    i nie publikuje członków". Reguła OPA musi te przypadki traktować tak samo (fail-closed), ale musi też
+    móc odróżnić je od „kontrakt jest, członków publikuje, tego akurat w nim nie ma" — bo to trzecie jest
+    normalnym stanem członka przed pierwszym apply i również ma żądać dowodu.
+
+    KAŻDY POWÓD, DLA KTÓREGO NIE UMIEMY ODCZYTAĆ ETAPÓW, DAJE `False` — nie wyjątek. Wywrócenie się tutaj
+    zamieniłoby uszkodzony artefakt (a jest pobierany po sieci) w czerwone WSZYSTKIM pull requestom;
+    `False` czyni surowszą wyłącznie bramkę promocji, czyli degraduje w stronę bezpieczną i wąską.
+    Powód idzie na stderr — cicha degradacja bezpiecznej strony też jest cicha.
+    """
+    try:
+        dokument = json.loads(sciezka.read_text())
+    except (OSError, ValueError) as e:
+        print(f"kontrakt nieczytelny ({e}) — stan zastosowany NIEZNANY, bramka promocji zostaje uzbrojona",
+              file=sys.stderr)
+        return {}, False
+
+    if dokument.get("schema_version") != WERSJA_KONTRAKTU:
+        print(f"kontrakt w wersji {dokument.get('schema_version')!r}, umiem {WERSJA_KONTRAKTU} — "
+              "stan zastosowany NIEZNANY", file=sys.stderr)
+        return {}, False
+
+    # `is not True`, nie `not …`: pole musi być JAWNIE prawdziwe. Brak pola (stary kontrakt) albo `null`
+    # znaczy „nie wiadomo, czy lista członków jest kompletna", a niekompletna lista wygląda dokładnie tak
+    # samo jak lista, na której członka nie ma — czyli dałaby fałszywe „to nie jest przejście".
+    if dokument.get("members_published") is not True:
+        print("kontrakt nie publikuje listy członków (publish_members: false) — stan zastosowany NIEZNANY",
+              file=sys.stderr)
+        return {}, False
+
+    try:
+        # Klucz składany DOKŁADNIE tak jak w projects_file.klucz() — ten sam ciąg jest adresem zasobu
+        # w stanie Terraform i kluczem mapy `members`, więc druga definicja byłaby drugim zbiorem członków.
+        etapy = {f"{m['division']}-{m['project_id']}": m["stage"] for m in dokument["members"]}
+    except (KeyError, TypeError) as e:
+        # Wpis bez `stage` albo bez pary dywizja/projekt czyni CAŁĄ listę niewiarygodną: nie wiadomo, czy
+        # brakuje jednego pola, czy kontrakt opisuje coś innego niż myślimy. Częściowa mapa dałaby ciche
+        # „tego członka nie ma w kontrakcie" — czyli poprawny werdykt z niepoprawnego powodu.
+        print(f"kontrakt ma wpis członka bez wymaganych pól ({e}) — stan zastosowany NIEZNANY",
+              file=sys.stderr)
+        return {}, False
+    return etapy, True
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default="perimeter", help="katalog z deklaracjami")
     ap.add_argument("--today", default=datetime.date.today().isoformat(),
                     help="data odniesienia dla okna dry-run (domyślnie dziś)")
     ap.add_argument("--violations", help="JSON {nazwa_członka: liczba_naruszeń} z violations-report")
+    ap.add_argument("--contract", help="contract.json z ostatniego apply — STAN ZASTOSOWANY (etap per członek)")
     args = ap.parse_args()
 
     root = pathlib.Path(args.root)
@@ -64,6 +125,12 @@ def main() -> int:
     violations = {}
     if args.violations:
         violations = json.loads(pathlib.Path(args.violations).read_text())
+
+    # Brak `--contract` = stan zastosowany NIEZNANY, a nie „nic nie jest jeszcze enforced". Różnica jest
+    # cała w tym, że bramka promocji zostaje wtedy uzbrojona (fail-closed), zamiast przepuszczać.
+    applied_stages, applied_known = ({}, False)
+    if args.contract:
+        applied_stages, applied_known = etapy_z_kontraktu(pathlib.Path(args.contract))
 
     # CZŁONKOWIE IDĄ DO OPA W DWÓCH POSTACIACH I TO NIE JEST REDUNDANCJA — to jedyny sposób, żeby bramka
     # duplikatu miała czego pilnować.
@@ -90,6 +157,11 @@ def main() -> int:
             # Brak klucza dla członka ≠ zero naruszeń. Reguła promotion_gate traktuje brak wpisu jako
             # „brak dowodu” i blokuje promocję — inaczej wystarczyłoby nie uruchomić raportu.
             "violations_last_window": violations,
+            # STAN ZASTOSOWANY. Dzięki tym dwóm polom bramka promocji pyta o PRZEJŚCIE (repo mówi
+            # `enforced`, ostatni apply mówił co innego), a nie o stan — inaczej członek, dla którego
+            # granica działa, odrzucałby każdy kolejny pull request własnymi odmowami.
+            "applied_stages": applied_stages,
+            "applied_stages_known": applied_known,
         },
         sys.stdout,
         indent=2,
