@@ -22,6 +22,26 @@ Wszystkie warunki muszą być spełnione (bramka `promotion_gate` w `policy/onbo
 > **Nie skracaj okna „bo zielono od trzech dni".** Dry-run rejestruje tylko to, co faktycznie zaszło.
 > Najczęstszy tryb awarii po promocji to zadanie, które uruchamia się raz w miesiącu.
 
+### Dokąd te warunki sięgają: do momentu WŁĄCZENIA, nie na zawsze
+
+Bramka pyta o **przejście**, a nie o stan (DEC-18). Warunki 1–3 obowiązują dopóty, dopóki repo deklaruje
+`enforced`, a ostatni apply opublikował dla tego członka co innego — czyli dopóki decyzja jest przed nami.
+Gdy kontrakt (`gh release download contract`) potwierdzi `stage: enforced`, granica **już działa** i te
+same liczby znaczą co innego: naruszenia w oknie to teraz **odmowy**, czyli dowód, że perimetr robi swoje.
+Bramka je wtedy przemilcza; od patrzenia na nie jest alert `vpcsc-violations-enforced`, nie `validate`.
+
+Praktyczne konsekwencje przy diagnozie:
+
+- **`validate` czerwony komunikatem o promocji na PR-ze, który promocji nie dotyczy** = stan zastosowany
+  jest nieznany. Sprawdź, czy istnieje release `contract` i czy `policy.yaml` ma sekcję `contract`
+  z `publish_members: true`. To jest **świadome fail-closed**: brak wiedzy o stanie zastosowanym uzbraja
+  bramkę dla każdego członka `enforced`, żeby wyłącznikiem kontroli nie było usunięcie pliku.
+- **Członek promowany, ale apply jeszcze nie przeszedł** (kolejka single-flight, czerwony przebieg):
+  kontrakt nadal mówi `dry-run`, więc bramka pilnuje wniosku dalej — i tak ma być, bo granica realnie
+  nie jest jeszcze włączona.
+- **Wyjątek `promotion_waivers` po zastosowanej promocji jest zbędny.** Zdejmij go — jeśli `validate`
+  bez niego jest zielony, wyjątek nie pokrywał ryzyka, tylko maskował pytanie o stan.
+
 ### Gdy warunku naprawdę nie da się spełnić — wyjątek, nie obniżenie baseline
 
 Prędzej czy później trafi się przypadek, w którym okno obserwacji nie da się przeczekać (migracja
@@ -110,7 +130,27 @@ gh workflow run violations-report.yml -f days=14
 4. Bramki muszą przejść. Jeśli `promotion_gate` odrzuca — nie obchodź go zmianą `dry_run_since`. To pole jest
    datą wejścia do dry-run, nie parametrem do dostrojenia.
 
-5. Merge → apply czeka na zatwierdzenie w environment `perimeter-apply`.
+5. **Merge NIE JEST promocją — apply zatrzyma się sam.** Po scaleniu `apply.yml` rusza, wykonuje bramki
+   i **staje na bramce promocji**, zanim weźmie zamek stanu. Przebieg jest CZERWONY i wypisuje, kogo ten
+   apply zacząłby egzekwować. To jest zamierzone: promocja to jedyna zmiana w tym repozytorium, której
+   skutkiem jest odmowa ruchu (DEC-17).
+
+   Przeczytaj listę z podsumowania przebiegu i uruchom apply ręcznie, wpisując **dokładnie tych** członków:
+
+```bash
+gh workflow run apply.yml -f promocje="<dywizja>-<project_id>" && gh run watch
+```
+
+   Lista musi być **równa** zbiorowi oczekujących promocji — nie podzbiorem ani nadzbiorem. Jeśli w
+   międzyczasie ktoś scalił drugą promocję, bramka stanie ponownie: masz wtedy zatwierdzić obie świadomie
+   albo zrewertować jedną. Drugie wyjście z zatrzymanego apply jest zawsze dostępne i nie wymaga niczyjej
+   zgody: `git revert <commit promocji> && git push` — zdejmowanie egzekwowania nie jest bramkowane.
+
+   Environment `perimeter-apply` **nie jest** tą bramką: wymagani recenzenci to funkcja płatna dla
+   repozytoriów prywatnych i na planie bez niej environment zostaje bez ani jednej reguły ochrony
+   (`tools/bootstrap_github.sh` odczytuje to z API i mówi o tym wprost). Gdy wasz plan ją ma — zostawcie
+   włączoną; obie warstwy się składają, bo dają co innego: recenzent to **druga tożsamość**, bramka
+   promocji to **drugi świadomy akt w momencie skutku**.
 
 6. **Zmierz po apply** (done = zmierzone). Najpierw ta sama sonda co w kroku 0b, tylko z drugim
    oczekiwaniem — to jest **jedyny** dowód, że granica cokolwiek blokuje:

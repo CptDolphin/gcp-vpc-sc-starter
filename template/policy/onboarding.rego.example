@@ -1,7 +1,8 @@
 # Bramki na DEKLARACJACH (pliki YAML w perimeter/), zanim cokolwiek trafi do planu.
 #
 # Wejście buduje tools/collect_declarations.py:
-#   { "policy": {...}, "profiles": {...}, "members": {...}, "members_list": [...], "today": "YYYY-MM-DD" }
+#   { "policy": {...}, "profiles": {...}, "members": {...}, "members_list": [...], "today": "YYYY-MM-DD",
+#     "violations_last_window": {...}, "applied_stages": {...}, "applied_stages_known": bool }
 #
 # `members` to mapa klucz→wpis (klucz = `<dywizja>-<project_id>`, ten sam ciąg, który jest adresem zasobu
 # w stanie Terraform), `members_list` to surowa lista z `perimeter/projects.yaml`. Obie opisują ten sam
@@ -238,6 +239,65 @@ control_plane_exception_justified(m) if {
 }
 
 # --- promocja do enforced ---------------------------------------------------------------------------
+#
+# BRAMKI NIŻEJ PYTAJĄ O PRZEJŚCIE, A NIE O STAN — i to jest cała różnica między bramką a blokadą repozytorium.
+#
+# Trzy warunki promocji (okno dry-run, istnienie raportu, zero naruszeń) odpowiadają na jedno pytanie:
+# „CO SIĘ ZEPSUJE, JEŚLI TERAZ WŁĄCZYMY EGZEKWOWANIE DLA TEGO CZŁONKA". Zadane wyłącznie po `m.stage ==
+# "enforced"` obowiązują jednak DOPÓKI członek jest enforced — czyli także długo po tym, jak decyzja
+# zapadła i została zastosowana. A wtedy te same liczby znaczą coś dokładnie odwrotnego:
+#
+#   * liczba naruszeń przestaje być prognozą ryzyka i staje się LICZBĄ ODMÓW, czyli miarą tego, że granica
+#     robi swoje. Odmowa egzekwowana zapisuje wpis `VpcServiceControlAuditMetadata` tak samo jak naruszenie
+#     dry-run (pole `dryRun` istnieje WYŁĄCZNIE przy dry-run, więc raport liczy oba świadomie);
+#   * liczba dni w dry-run przestaje być oknem obserwacji, a staje się historią — niezmienialną i rosnącą.
+#
+# Skutek reguły pytającej o stan: członek, którego granica działa zgodnie z przeznaczeniem, ODRZUCA KAŻDY
+# KOLEJNY pull request w repozytorium, niezależnie od tego, czego ten PR dotyczy. Bramka mająca chronić
+# przed promocją bez dowodu zamienia się w blokadę repo wyzwalaną przez poprawne działanie granicy.
+# ZMIERZONE po pierwszej promocji: 2 odrzucenia (18 naruszeń w oknie + „promocja po 2 dniach dry-run")
+# na wnioskach, które o promocji nie mówiły ani słowa; przez pierwszą dobę repo stało na wyjątku
+# `promotion_waivers` założonym wyłącznie po to, żeby dało się cokolwiek zmergować.
+#
+# PRZEJŚCIE ROZPOZNAJEMY PO STANIE ZASTOSOWANYM, NIE PO DIFFIE. Źródłem jest `contract.json` — artefakt
+# publikowany przez KAŻDY apply (bucket kontraktów + asset release'u), niosący `stage` per członek.
+# Promocja trwa dopóty, dopóki repo deklaruje `enforced`, a ostatni apply opublikował dla tego członka
+# coś innego (albo nie opublikował go wcale). Gdy kontrakt też mówi `enforced`, granica JEST już włączona
+# i pytanie „co się zepsuje, jeśli włączymy" nie ma adresata.
+
+# --- stan ZASTOSOWANY (kontrakt z ostatniego apply) -------------------------------------------------
+#
+# DLACZEGO NIE DIFF `perimeter/projects.yaml` WOBEC GAŁĘZI DOMYŚLNEJ, choć to najbardziej dosłowne
+# odczytanie słowa „przejście": te same bramki wykonują się na DWÓCH torach — pull request i mutator
+# (DEC-16). Na torze apply nie ma czego z czym porównać, bo apply chodzi już na gałęzi domyślnej, po
+# merge'u. Bramka diffowa dawałaby więc inny werdykt przed merge'em i po nim, a to jest dokładnie ta
+# asymetria, przed którą DEC-16 powstał. Diff mówi też o GIcie, a nie o GRANICY: zmergowana promocja,
+# której apply nie zastosował (padł, czeka w kolejce), zniknęłaby z diffu i przestała być pilnowana,
+# choć w rzeczywistości nic jeszcze nie zostało włączone.
+#
+# `applied_stages_known` JEST OSOBNYM POLEM, a nie „pusta mapa = nie wiemy". Pusta mapa jest dwuznaczna:
+# znaczy albo „kontraktu nie ma", albo „kontrakt jest i nie ma w nim ANI JEDNEGO członka" (repo przed
+# pierwszym apply, albo `publish_members: false`). Pierwszy przypadek musi uzbrajać bramkę, drugi też —
+# ale rozstrzygać to po kształcie danych znaczyłoby zgadywać, a tu zgadywanie kosztuje albo cichy
+# fail-open, albo ścianę. `collect_declarations.py` ustawia tę flagę WYŁĄCZNIE, gdy kontrakt dało się
+# przeczytać, ma znaną wersję schematu i realnie publikuje listę członków.
+etapy_zastosowane := object.get(input, "applied_stages", {})
+
+default stan_zastosowany_znany := false
+
+stan_zastosowany_znany if object.get(input, "applied_stages_known", false) == true
+
+# FAIL-CLOSED PRZEZ KONSTRUKCJĘ: `default … := false` znaczy „nie wiemy = granica NIE jest jeszcze
+# włączona = to jest przejście = żądaj dowodu". Odwrotna domyślność (brak kontraktu → „już włączone")
+# zamieniłaby tę bramkę w wyłącznik uruchamiany USUNIĘCIEM PLIKU: wystarczyłoby nie opublikować
+# kontraktu, żeby promować bez ani jednego dowodu. Cena tej domyślności jest realna i świadoma — ścieżka,
+# która nie poda `--contract`, jest dla każdego członka `enforced` tak samo surowa jak przed tą zmianą.
+default granica_juz_wlaczona(_) := false
+
+granica_juz_wlaczona(name) if {
+	stan_zastosowany_znany
+	object.get(etapy_zastosowane, name, "") == "enforced"
+}
 
 # WYJĄTEK OD BRAMKI PROMOCJI — dlaczego w ogóle istnieje.
 #
@@ -290,9 +350,16 @@ wyjatek_pokrywa_naruszen(name) := n if {
 
 # Okno obserwacji: minimum dni w dry-run. Bez tej bramki „promocja" staje się formalnością zaraz po
 # merge'u wniosku — a wtedy cała dwustopniowość jest teatrem (DEC-4).
+#
+# `not granica_juz_wlaczona(name)` — bo po zastosowaniu promocji ta reguła nie pilnuje już niczego, co da
+# się zmienić: liczba dni od `dry_run_since` jest historią, a jedynym sposobem jej „naprawienia" byłoby
+# cofnięcie członka do dry-run. Bez tego warunku pierwsza promocja przed upływem okna (za zgodą, przez
+# `promotion_waivers`) blokowała repozytorium jeszcze przez resztę okna — po decyzji, na którą już nikt
+# nie ma wpływu.
 deny contains msg if {
 	some name, m in input.members
 	m.stage == "enforced"
+	not granica_juz_wlaczona(name)
 	days := days_between(m.dry_run_since, input.today)
 	days < input.policy.onboarding.dry_run_min_days
 	not wyjatek_zwalnia_z_okna(name)
@@ -308,16 +375,26 @@ deny contains msg if {
 # TEJ reguły wyjątek NIE zwalnia i to jest świadome: „nie zmierzyliśmy" nie jest stanem, o którym da się
 # podjąć decyzję. Wyjątek mówi „widzieliśmy N naruszeń i bierzemy je na siebie" — więc najpierw musi być co
 # zobaczyć. Zwolnienie z dowodu zamieniłoby wyjątek w wyłącznik całej bramki.
+#
+# `not granica_juz_wlaczona(name)` — dowód jest warunkiem DECYZJI o włączeniu. Po jej zastosowaniu brak
+# raportu (np. przebieg raportu padł albo artefakt wygasł) nie mówi już nic o tym członku, a wywracałby
+# każdy pull request w repozytorium: przy jednym torze bramek dotyczy to także zgłoszeń z kanałów wejścia,
+# które artefaktu dowodu nie pobierają w ogóle.
 deny contains msg if {
 	some name, m in input.members
 	m.stage == "enforced"
+	not granica_juz_wlaczona(name)
 	not input.violations_last_window[name]
 	msg := sprintf("projects.yaml[%s]: brak raportu naruszeń dla okna obserwacji — promocja bez dowodu, że jest czysto", [name])
 }
 
+# `not granica_juz_wlaczona(name)` — po włączeniu granicy te wpisy to ODMOWY, czyli metryka sukcesu.
+# Reguła bez tego warunku czyta je jako ryzyko i odrzuca wnioski niezwiązane z promocją; obserwacją tych
+# odmów zajmuje się alert `vpcsc-violations-enforced` (terraform/alerts.tf), a nie bramka na pull requeście.
 deny contains msg if {
 	some name, m in input.members
 	m.stage == "enforced"
+	not granica_juz_wlaczona(name)
 	count := input.violations_last_window[name]
 	count > 0
 	count > wyjatek_pokrywa_naruszen(name)

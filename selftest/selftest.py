@@ -126,6 +126,8 @@ def bootstrap() -> None:
         # Bramki treści i bramki żywe jako akcje złożone: JEDNA definicja, wołana przez tor pull requesta
         # (`validate.yml`/`plan.yml`) i przez mutatora (`apply.yml`). Patrz DEC-16.
         ".github/actions/bramki-tresci/action.yml", ".github/actions/bramki-zywe/action.yml",
+        # Bramka promocji: jedyna bramka WYLACZNIE mutatora — pyta o moment skutku, nie o tresc (DEC-17).
+        ".github/actions/bramka-promocji/action.yml", "tools/promotion_hold.py",
         ".tflint.hcl", ".github/dependabot.yml", "tests/README.md",
         "tests/snow-approved.json", "tests/snow-not-approved.json", "tests/snow-self-approved.json",
         "tests/snow-wrong-project.json", "tests/dispatch-example.json",
@@ -2133,6 +2135,58 @@ def test_rego() -> None:
     # Realne deklaracje ze startera muszą przechodzić bramki onboardingu.
     decl = sh([sys.executable, "tools/collect_declarations.py", "--today", "2026-07-28"], cwd=ROOT)
     check("collect_declarations.py dziala", decl.returncode == 0, decl.stderr[-500:])
+
+    # --- odczyt stanu ZASTOSOWANEGO z kontraktu ------------------------------------------------------
+    #
+    # `applied_stages_known` jest wejściem bramki bezpieczeństwa, więc każdy powód, dla którego kontraktu
+    # nie da się zaufać, musi dawać `False` — i musi to robić CICHO POD WZGLĘDEM KODU WYJŚCIA, a głośno
+    # w treści. Wywrócenie narzędzia zamieniłoby uszkodzony artefakt pobierany po sieci w czerwone
+    # WSZYSTKIM pull requestom; `False` czyni surowszą wyłącznie bramkę promocji.
+    def etapy_dla(kontrakt, plik: str) -> tuple[dict, bool, int]:
+        (ROOT / plik).write_text(json.dumps(kontrakt) if not isinstance(kontrakt, str) else kontrakt)
+        r = sh([sys.executable, "tools/collect_declarations.py", "--contract", plik], cwd=ROOT)
+        if r.returncode != 0:
+            return {}, False, r.returncode
+        d = json.loads(r.stdout)
+        return d.get("applied_stages", {}), d.get("applied_stages_known"), r.returncode
+
+    dobry_kontrakt = {
+        "schema_version": 1,
+        "members_published": True,
+        "members": [{"division": "example-division", "project_id": "prj-x", "stage": "enforced"},
+                    {"division": "example-division", "project_id": "prj-y", "stage": "dry-run"}],
+    }
+    etapy, znany, rc = etapy_dla(dobry_kontrakt, "kontrakt-ok.json")
+    check("collect_declarations --contract: etapy odczytane, klucz jak w projects_file.klucz()",
+          rc == 0 and znany is True
+          and etapy == {"example-division-prj-x": "enforced", "example-division-prj-y": "dry-run"},
+          f"rc={rc} znany={znany} etapy={etapy}")
+
+    # Bez flagi w ogóle — stan nieznany, bramka uzbrojona. To jest zachowanie każdej ścieżki, która
+    # kontraktu nie poda (pre-commit u dewelopera, repo przed pierwszym apply).
+    d = json.loads(decl.stdout)
+    check("collect_declarations bez --contract: applied_stages_known = false",
+          d.get("applied_stages_known") is False and d.get("applied_stages") == {},
+          str({k: d.get(k) for k in ("applied_stages", "applied_stages_known")}))
+
+    # Cztery powody nieufności. Każdy osobno, bo każdy da się „naprawić" tak, że pozostałe nadal przechodzą.
+    for opis, kontrakt, plik in (
+        ("publish_members: false (pusta lista jest dwuznaczna)",
+         dict(dobry_kontrakt, members_published=False, members=[]), "kontrakt-bez-listy.json"),
+        ("nieznana wersja schematu (pole `stage` moze znaczyc co innego)",
+         dict(dobry_kontrakt, schema_version=99), "kontrakt-zla-wersja.json"),
+        ("wpis czlonka bez `stage` (czesciowa mapa = poprawny werdykt ze zlego powodu)",
+         dict(dobry_kontrakt, members=[{"division": "d", "project_id": "p"}]), "kontrakt-bez-stage.json"),
+        ("plik nieczytelny (uszkodzone pobranie)", '{"schema_version": 1, "mem', "kontrakt-uszkodzony.json"),
+    ):
+        etapy, znany, rc = etapy_dla(kontrakt, plik)
+        check(f"collect_declarations --contract: {opis} -> stan NIEZNANY",
+              rc == 0 and znany is False and etapy == {}, f"rc={rc} znany={znany} etapy={etapy}")
+
+    # ANTY-TAUTOLOGIA dla całej czwórki wyżej: narzędzie, które zawsze mówi „nie wiem", przeszłoby je
+    # wszystkie. Pozytyw jest o linijkę wyżej, ale bez tej asercji łatwo go usunąć razem z regresją.
+    check("collect_declarations --contract: dobry kontrakt DAJE znany stan (test anty-tautologiczny)",
+          etapy_dla(dobry_kontrakt, "kontrakt-ok2.json")[1] is True)
     (ROOT / "declarations.json").write_text(decl.stdout)
     p = sh(["conftest", "test", "--policy", "policy", "--namespace", "vpcsc.onboarding", "declarations.json"], cwd=ROOT)
     check("przykladowy czlonek przechodzi bramki onboardingu", p.returncode == 0, p.stdout[-1200:])
@@ -2220,6 +2274,43 @@ def test_rego() -> None:
     polityka = yaml.safe_load((ROOT / "perimeter/policy.yaml").read_text())
     check("policy.yaml deklaruje sekcje control_plane_projects (nie da sie jej po cichu usunac)",
           isinstance(polityka.get("control_plane_projects"), list), str(sorted(polityka.keys())))
+
+    # --- bramka promocji pyta o PRZEJŚCIE, nie o stan (kontrakt = etapy zastosowane) -----------------
+    #
+    # Reguła związana wyłącznie z `stage: enforced` obowiązuje DOPÓKI członek jest enforced — także długo
+    # po tym, jak decyzja zapadła. A wtedy naruszenia w oknie są ODMOWAMI (granica działa), więc członek
+    # działający zgodnie z przeznaczeniem odrzuca każdy niezwiązany pull request. Trzy przebiegi niżej
+    # trzymają razem trzy własności, których żadna z osobna nie odróżnia naprawy od wyłączenia bramki.
+    def z_kontraktem(doc: dict, etapy, znany: bool) -> dict:
+        d = json.loads(json.dumps(doc))
+        d["applied_stages"] = etapy
+        d["applied_stages_known"] = znany
+        return d
+
+    promowany = json.loads(decl.stdout)
+    promowany["members"][name]["stage"] = "enforced"
+    # Brudne okno: 30 wpisów. Przed promocją to prognoza ryzyka, po niej — liczba odmów.
+    promowany["violations_last_window"] = {name: 30}
+
+    p = onboarding_na(z_kontraktem(promowany, {name: "dry-run"}, True), "przejscie-bez-dowodu.json")
+    check("PRZEJSCIE do enforced bez czystego okna jest ODRZUCANE (kontrakt mowi dry-run)",
+          p.returncode != 0, p.stdout[-800:])
+
+    p = onboarding_na(z_kontraktem(promowany, {name: "enforced"}, True), "juz-egzekwowany.json")
+    check("czlonek JUZ egzekwowany nie blokuje niezwiazanego wniosku mimo 30 odmow",
+          p.returncode == 0, p.stdout[-800:])
+
+    # FAIL-CLOSED. Gdyby brak wiedzy o stanie zastosowanym przepuszczał, wyłącznikiem tej bramki byłoby
+    # NIEPOBRANIE kontraktu — czyli usunięcie pliku. Degradacja ma iść w stronę surowszą.
+    p = onboarding_na(z_kontraktem(promowany, {}, False), "stan-nieznany.json")
+    check("brak wiedzy o stanie zastosowanym zachowuje sie jak PRZEJSCIE (fail-closed)",
+          p.returncode != 0, p.stdout[-800:])
+
+    # Kontrakt czytelny, ale członka w nim nie ma — pierwszy apply tego wpisu. „Nie ma go" nie może
+    # znaczyć „już włączony": to najostrzejszy możliwy stan, a wygląda jak brak danych.
+    p = onboarding_na(z_kontraktem(promowany, {"inna-dywizja-inny-projekt": "enforced"}, True),
+                      "stan-bez-czlonka.json")
+    check("czlonek NIEOBECNY w kontrakcie tez jest przejsciem", p.returncode != 0, p.stdout[-800:])
 
     # NEGATYW na plan-JSON: reguła z ANY_IDENTITY i z method="*" musi paść.
     bad_plan = {
@@ -3105,6 +3196,43 @@ def test_workflows() -> None:
           nazwa_up is not None and nazwa_down is not None and nazwa_up.group(1) == nazwa_down.group(1),
           f"upload={nazwa_up and nazwa_up.group(1)} download={nazwa_down and nazwa_down.group(1)}")
 
+    # DRUGIE WEJŚCIE TEJ SAMEJ BRAMKI: STAN ZASTOSOWANY (kontrakt). Bramka promocji pyta o PRZEJŚCIE do
+    # `enforced`, a nie o stan — więc bez `--contract` KAŻDY członek już egzekwowany wygląda jak promocja
+    # trwająca w tej chwili i odrzuca cudze wnioski własnymi odmowami.
+    #
+    # GUARD ENUMERUJE ŚCIEŻKI Z PLIKÓW, a nie z listy wpisanej tutaj — i to jest cała jego wartość. Ten sam
+    # zestaw reguł uruchamiają dziś cztery różne miejsca (tor pull requesta, tor mutatora i dwa kanały
+    # wejścia), a pominięcie wejścia w JEDNYM z nich jest niewidoczne: przebieg pada na cudzym członku,
+    # komunikatem o promocji, w workflow, który promocji nie dotyczy. ZMIERZONE — dokładnie tak wyglądała
+    # awaria kanału ticketowego po pierwszej promocji w organizacji. Guard z listą nazw przegapiłby piątą
+    # ścieżkę dopisaną jutro; guard czytający pliki nie ma jak.
+    # CZYTAMY WYŁĄCZNIE CIAŁA `run:`, nie tekst pliku. Komentarz tłumaczący, po co jest `--contract`,
+    # zaliczyłby asercję tekstową także w pliku, z którego flagę usunięto — czyli guard zdawałby się na
+    # własną dokumentację. To ta sama pułapka, przed którą ostrzega nagłówek `tekst_wykonywany`.
+    def komendy(nazwa: str) -> str:
+        wf = yaml.safe_load((ROOT / ".github/workflows" / nazwa).read_text())
+        return "\n".join(str(k.get("run") or "") for k, _ in kroki_workflow(wf))
+
+    ogladane, bez_stanu = [], []
+    for plik in sorted((ROOT / ".github/workflows").glob("*.yml")):
+        wykonywane = komendy(plik.name)
+        # Interesują nas WYŁĄCZNIE ścieżki, które oceniają PEŁNY zbiór członków regułami onboardingu.
+        # `contrib/validate-local.sh` buduje wejście po swojemu (jeden zgłaszany członek) i dlatego tu
+        # nie wchodzi — tam „nie wiem" jest poprawną, najsurowszą odpowiedzią.
+        if "collect_declarations.py" not in wykonywane or "--namespace vpcsc.onboarding" not in wykonywane:
+            continue
+        ogladane.append(plik.name)
+        if "--contract" not in wykonywane:
+            bez_stanu.append(plik.name)
+    check("kazda sciezka uruchamiajaca bramki onboardingu podaje stan zastosowany (--contract)",
+          not bez_stanu, f"bez --contract: {bez_stanu}")
+
+    # ANTY-TAUTOLOGIA guardu wyżej: pusta pętla przechodzi każdy warunek „nie znaleziono naruszeń".
+    # Ścieżki są dziś cztery (validate, apply, intake, external-intake); próg 3 zostawia miejsce na
+    # świadome usunięcie jednej, a wywraca się, gdy rozpoznawanie ścieżek przestanie działać.
+    check("guard stanu zastosowanego oglada co najmniej trzy sciezki (nie jest pusta petla)",
+          len(ogladane) >= 3, str(ogladane))
+
     ext = (ROOT / ".github/workflows/external-intake.yml").read_text()
     # Kanał zewnętrzny ma dwa niezbywalne zabezpieczenia: change_ref musi wskazywać repozytorium, które
     # NAPRAWDĘ wysłało dispatch, a stage jest nadpisywany na dry-run niezależnie od treści payloadu.
@@ -3720,8 +3848,147 @@ def test_bramki_na_sciezce_apply() -> None:
         ("control_plane_check.py --live", "tools/control_plane_check.py --live"),
         ("lista uslug wspieranych przez VPC-SC (zywa)", "tools/check_supported_services.py"),
         ("reguly vpcsc.perimeter na plan-JSON", "--namespace vpcsc.perimeter"),
+        # Jedyna bramka WYLACZNIE mutatora — pyta o MOMENT skutku, nie o tresc zmiany (DEC-17). Stoi na tej
+        # liscie z tego samego powodu, co reszta: zeby jej zniknieciu z apply.yml odpowiadal czerwony test,
+        # a nie cisza.
+        ("bramka promocji do enforced", "tools/promotion_hold.py"),
     ):
         check(f"sciezka apply uruchamia: {opis}", wzorzec in tresc, wzorzec)
+
+
+def test_bramka_promocji() -> None:
+    """Czy apply, ktory zaczyna EGZEKWOWAC granice wobec kogos nowego, naprawde staje — i czy da sie go
+    puscic swiadomie (DEC-17).
+
+    TEN TEST JEST ANTY-TAUTOLOGICZNY Z KONSTRUKCJI: nie pyta, czy w workflowie stoja wlasciwe slowa, tylko
+    URUCHAMIA logike bramki na spreparowanych parach (deklaracja czlonkow, stan zywej granicy). Obie
+    strony porownania sa wejsciem, wiec zaden wariant nie moze zdac przez przypadek — a para „bez promocji
+    przechodzi" / „z promocja staje" jest tu jedna asercja obok drugiej. Bramka, ktora zatrzymuje wszystko,
+    jest tak samo zepsuta jak ta, ktora nie zatrzymuje niczego: pierwsza cicho przestaje stosowac
+    zmergowane zmiany.
+    """
+    print("\n== bramka promocji (swiadome uruchomienie przed enforced) ==")
+
+    baza = ROOT / "fixture-bramka-promocji"
+    (baza / "perimeter").mkdir(parents=True, exist_ok=True)
+    wzor = yaml.safe_load((ROOT / "perimeter/projects.yaml").read_text())["members"][0]
+
+    def zapisz(*wpisy) -> list:
+        """Plik czlonkow z podanych par (stage, numer projektu). Zwraca ich klucze."""
+        doc = {"schema_version": 1, "members": []}
+        for i, (stage, numer) in enumerate(wpisy):
+            w = json.loads(json.dumps(wzor))
+            w.update(project_id=f"prj-example-czlonek-{i}", project_number=numer, stage=stage)
+            doc["members"].append(w)
+        (baza / "perimeter/projects.yaml").write_text(yaml.safe_dump(doc, sort_keys=False))
+        return [f"{w['division']}-{w['project_id']}" for w in doc["members"]]
+
+    def granica(*numery) -> pathlib.Path:
+        """Odpowiedz API o zywym perimetrze — `status` to konfiguracja EGZEKWOWANA."""
+        p = baza / "perimetr.json"
+        p.write_text(json.dumps({"status": {"resources": [f"projects/{n}" for n in numery]}}))
+        return p
+
+    def bramka(perimetr, zatwierdzone="", zdarzenie="workflow_dispatch"):
+        return sh([sys.executable, "tools/promotion_hold.py", "--root", str(baza),
+                   "--policy", "perimeter/policy.yaml", "--perimetr-z-pliku", str(perimetr),
+                   "--zatwierdzone", zatwierdzone, "--zdarzenie", zdarzenie, "--kto", "tester"], cwd=ROOT)
+
+    # 1. PREMISA: zwykly apply MUSI przechodzic. Bez tej asercji „bramka dziala" bylo by prawdziwe takze
+    #    dla bramki zatrzymujacej kazdy przebieg — czyli dla zepsutej jedynej drogi wdrozenia.
+    zapisz(("dry-run", "000000000000"))
+    p = bramka(granica())
+    check("apply BEZ promocji przechodzi automatem", p.returncode == 0, p.stdout[-300:])
+
+    # 2. Ta sama granica, jedna zmieniona wartosc `stage` — i przebieg ma stanac.
+    klucze = zapisz(("enforced", "000000000000"))
+    p = bramka(granica())
+    check("apply Z promocja ZATRZYMUJE sie bez zatwierdzenia", p.returncode == 1, p.stdout[-300:])
+    check("komunikat nazywa czlonka, ktory zostanie odciety", klucze[0] in p.stdout, p.stdout[-300:])
+
+    # 3. Zwolnienie: dokladnie ten klucz, wpisany recznie.
+    p = bramka(granica(), zatwierdzone=klucze[0])
+    check("zatwierdzenie recznym uruchomieniem PRZEPUSZCZA promocje", p.returncode == 0, p.stdout[-300:])
+
+    # 4. ZGODA „NA WSZYSTKO" NIE JEST WYRAZALNA. To jest sedno konstrukcji: pole nie przyjmuje potwierdzenia,
+    #    tylko liste odcinanych. Gdyby przyjmowalo cokolwiek prawdziwego, bramka bylaby przyciskiem.
+    for udawana in ("*", "true", "yes", "all"):
+        p = bramka(granica(), zatwierdzone=udawana)
+        check(f"zgoda-atrapa {udawana!r} NIE zwalnia bramki", p.returncode == 1, p.stdout[-200:])
+
+    # 5. Zatwierdzenie nieaktualne (wskazuje kogos innego niz oczekujacy) tez zatrzymuje.
+    p = bramka(granica(), zatwierdzone="example-division-prj-example-inny")
+    check("zatwierdzenie wskazujace kogos INNEGO zatrzymuje", p.returncode == 1, p.stdout[-200:])
+
+    # 6. Dwie promocje naraz: podzbior nie wystarcza, rownosc tak. Ta para pilnuje, zeby zgoda na jednego
+    #    czlonka nie przepuszczala przy okazji drugiego, ktorego zatwierdzajacy nie widzial.
+    klucze2 = zapisz(("enforced", "000000000000"), ("enforced", "111111111111"))
+    p = bramka(granica(), zatwierdzone=klucze2[0])
+    check("zatwierdzenie PODZBIORU oczekujacych zatrzymuje", p.returncode == 1, p.stdout[-300:])
+    p = bramka(granica(), zatwierdzone=" ".join(klucze2))
+    check("zatwierdzenie ROWNE oczekujacym przepuszcza", p.returncode == 0, p.stdout[-300:])
+
+    # 7. Czlonek juz egzekwowany = brak promocji. Bez tego kazdy kolejny apply po pierwszej promocji
+    #    prosilby o zgode na cos, co juz sie stalo — i bramka zostalaby wylaczona po tygodniu.
+    zapisz(("enforced", "000000000000"))
+    p = bramka(granica("000000000000"))
+    check("ponowny apply nad JUZ egzekwowanym czlonkiem nie prosi o nic", p.returncode == 0, p.stdout[-300:])
+
+    # 8. ASYMETRIA: zdjecie egzekwowania PRZYWRACA ruch, wiec nie jest bramkowane. Bramka w te strone
+    #    wydluzalaby kazda awarie o czas szukania czlowieka.
+    zapisz(("dry-run", "000000000000"))
+    p = bramka(granica("000000000000"))
+    check("ZDJECIE egzekwowania (rewert, break-glass) idzie automatem", p.returncode == 0, p.stdout[-300:])
+
+    # 9. Zatwierdzenie ma JEDNO legalne zrodlo. Wpisane na stale w plik workflowa przyszloby ze zdarzeniem
+    #    `push` — i wtedy jest zgoda, ktorej nikt nie wyraza w momencie skutku.
+    klucze = zapisz(("enforced", "000000000000"))
+    p = bramka(granica(), zatwierdzone=klucze[0], zdarzenie="push")
+    check("zatwierdzenie przyniesione przez `push` NIE zwalnia (tylko workflow_dispatch)",
+          p.returncode == 1, p.stdout[-300:])
+
+    # 10. Perimetr, ktorego jeszcze nie ma (pierwszy apply na swiezej organizacji): pusta konfiguracja
+    #     egzekwowana, nie awaria — inaczej bramka zatrzymywalaby wdrozenie idace dokumentowana sciezka.
+    pusty = baza / "brak-perimetru.json"
+    pusty.write_text("{}")
+    zapisz(("dry-run", "000000000000"))
+    p = bramka(pusty)
+    check("brak perimetru = pusta konfiguracja egzekwowana (bootstrap przechodzi)",
+          p.returncode == 0, p.stdout[-300:])
+    zapisz(("enforced", "000000000000"))
+    p = bramka(pusty)
+    check("czlonek `enforced` od zera tez jest promocja (bootstrap staje)", p.returncode == 1, p.stdout[-300:])
+
+    # --- osadzenie w workflowie ----------------------------------------------------------------------
+    apply_wf = yaml.safe_load((ROOT / ".github/workflows/apply.yml").read_text())
+    wejscia = ((apply_wf.get(True) or apply_wf.get("on"))["workflow_dispatch"] or {}).get("inputs", {})
+    check("apply.yml ma pole `promocje` w recznym uruchomieniu", "promocje" in wejscia, str(list(wejscia)))
+
+    kroki_ap = next(j["steps"] for j in apply_wf["jobs"].values()
+                    if any("terraform" in str(k.get("run", "")) and " apply " in str(k.get("run", ""))
+                           for k in j["steps"]))
+    i_bramki = [i for i, k in enumerate(kroki_ap)
+                if str(k.get("uses", "")).endswith("/bramka-promocji")]
+    check("bramka promocji stoi w jobie APPLIKUJACYM", len(i_bramki) == 1, str(i_bramki))
+    if i_bramki:
+        # PRZED planem, wiec i przed wzieciem zamka stanu: przebieg wstrzymany nie blokuje niczyjego apply.
+        i_plan = next(i for i, k in enumerate(kroki_ap) if "terraform -chdir=terraform plan" in str(k.get("run", "")))
+        check("bramka promocji wykonuje sie PRZED planem (i przed zamkiem stanu)",
+              i_bramki[0] < i_plan, f"bramka={i_bramki} plan={i_plan}")
+        # ZATWIERDZENIE POCHODZI Z WEJSCIA URUCHOMIENIA, nie ze stalej w pliku. Wartosc wpisana na stale
+        # bylaby bramka zdejmowana jednym commitem wygladajacym na konfiguracje (runtime lapie to osobno,
+        # asercja 9 wyzej — tu pilnujemy, zeby nikt nie musial sie o tym dowiadywac z czerwonego apply).
+        podane = str(kroki_ap[i_bramki[0]].get("with", {}).get("zatwierdzone_promocje", ""))
+        check("zatwierdzenie idzie z pola uruchomienia, nie ze stalej",
+              "inputs.promocje" in podane, podane)
+
+    # ASYMETRIA WOBEC TORU PULL REQUESTA JEST DECYZJA, NIE PRZEOCZENIEM (DEC-17): promujacy pull request ma
+    # byc zielony, przejrzany i scalony — zatrzymanie nalezy sie WYKONANIU. Bramka wpieta w `plan.yml`
+    # czerwienilaby review promocji, czyli utrudniala dokladnie ten krok, ktory ma byc staranny.
+    for tor in ("plan.yml", "validate.yml"):
+        tekst = (ROOT / ".github/workflows" / tor).read_text()
+        check(f"{tor} NIE wola bramki promocji (pyta o moment, nie o tresc)",
+              "bramka-promocji" not in tekst, tor)
 
 
 def test_boundary_probe() -> None:
@@ -3862,6 +4129,7 @@ def main() -> int:
     test_workflows()
     test_workflowy_wykonywalne()
     test_bramki_na_sciezce_apply()
+    test_bramka_promocji()
     test_boundary_probe()
     test_schemas()
 
