@@ -122,6 +122,38 @@ resource "google_access_context_manager_access_level" "level" {
       error_message = "Access level ${each.key}: brak jakiegokolwiek warunku — poziom bez warunku nie ogranicza niczego. Dodaj ip_subnetworks/members/regions/device_policy/required_access_levels albo custom_expression."
     }
 
+    # `combining_function: OR` = ALTERNATYWA warunków. Diff jest jednosłowny i wygląda kosmetycznie, a
+    # polityka po nim jest SŁABSZA: poziom `region PL/DE ORAZ korpo-sieć` zamienia się w `region PL/DE ALBO
+    # korpo-sieć`, czyli przepuszcza dowolny adres z regionu. ZMIERZONE na żywym ACM: API przyjmuje taką
+    # zmianę bez ostrzeżenia (`combiningFunction: OR` wraca w odpowiedzi 200), więc jedyne miejsce, gdzie
+    # ktokolwiek może to zauważyć, jest PRZED apply.
+    #
+    # Dlaczego opt-in tekstem, a nie zakaz: „korpo-sieć ALBO zarządzane urządzenie" to poprawny i częsty
+    # wymóg (laptop w domu na zarządzanym sprzęcie). Zakaz wypchnąłby ten wzorzec do `custom_expression`,
+    # czyli w miejsce trudniejsze do audytu. Wymóg `or_reason` zamienia jednosłowny diff w zdanie
+    # o osłabieniu — recenzent czyta powód, a nie domyśla się intencji.
+    precondition {
+      condition     = lookup(each.value, "combining_function", "AND") != "OR" || length(lookup(each.value, "or_reason", "")) >= 20
+      error_message = "Access level ${each.key}: `combining_function: OR` czyni z warunków ALTERNATYWĘ (słabsza polityka). Dopisz `or_reason` (min. 20 znaków) wyjaśniające, dlaczego alternatywa jest tu zamierzona."
+    }
+
+    # OR bez drugiego warunku nie robi NIC — `combiningFunction` łączy warunki między sobą, a atrybuty
+    # wewnątrz jednego warunku i tak są zawsze ANDowane. Poziom z jednym warunkiem i `OR` w deklaracji
+    # wygląda w pliku jak decyzja, a jest nieporozumieniem; przy dołożeniu drugiego warunku ożywa jako
+    # osłabienie, którego nikt świadomie nie wprowadził. Renderer produkuje dziś dokładnie dwa warunki:
+    # bezpośredni (gdy są atrybuty) i kompozycyjny (gdy jest `required_access_levels`).
+    precondition {
+      condition = lookup(each.value, "combining_function", "AND") != "OR" || (
+        anytrue([
+          contains(keys(each.value), "ip_subnetworks"),
+          contains(keys(each.value), "members"),
+          contains(keys(each.value), "regions"),
+          contains(keys(each.value), "negate"),
+          contains(keys(each.value), "device_policy"),
+        ]) && length(lookup(each.value, "required_access_levels", [])) > 0
+      )
+      error_message = "Access level ${each.key}: `combining_function: OR` przy jednym warunku nie zmienia niczego (OR łączy warunki, nie atrybuty w jednym warunku). Usuń je albo dołóż drugi warunek."
+    }
   }
 }
 
