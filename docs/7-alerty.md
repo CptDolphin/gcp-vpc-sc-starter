@@ -130,8 +130,8 @@ atrybuty z **żywej granicy** (`servicePerimeters.get`), a nie z plików YAML. P
 w granicy, a czego nie ma w Gicie — zdublowane reguły po nieudanym odzysku stanu, ręczne dopiski, dryf.
 Bramka na PR-ze odpowiada na pytanie „czy moja zmiana się zmieści" (i tam deklaracja jest właściwa, bo
 zmiany w chmurze jeszcze nie ma); alert odpowiada na pytanie „ile zostało w granicy". Obie liczby lądują
-w podsumowaniu przebiegu `watch.yml` obok siebie — ich rozjazd to ten sam objaw, o którym mówi alert
-o dryfie.
+w podsumowaniu przebiegu `watch.yml` obok siebie, a ich rozjazd jest osobną kontrolą — z **dwiema**
+przyczynami i dwiema procedurami: [rozjazd granicy z deklaracją](#rozjazd-granicy-z-deklaracja).
 
 **Nie myl z drugą pulą:** wpisy członków konsumują osobny limit 40 000 „protected resources" **na politykę**.
 Ten alert go nie dotyczy.
@@ -157,6 +157,88 @@ uderzysz w limit w tym miesiącu. Konsolidacja profili to praca na tygodnie, wi�
 planowanie, a nie reakcja. Prognoza to regresja liniowa z 30 dni; przy krótszej historii albo braku wzrostu
 producent publikuje sentynelę 3650 dni i alert **nie odpala** — brak prognozy jest lepszy niż prognoza
 z trzech punktów.
+
+---
+
+<a id="rozjazd-granicy-z-deklaracja"></a>
+
+## rozjazd granicy z deklaracją
+
+**To nie jest alert — to adnotacja w przebiegu `watch.yml`.** Nie budzi nikogo i nie ma polityki w Cloud
+Monitoring. Jest tu, bo jako jedyna widzi pewien stan **od razu**, podczas gdy oba alerty, które go
+docelowo złapią, mają progi czasowe.
+
+```
+budzet spec: ROZJAZD OCZEKIWANY   — granica ma 48 atrybutow, deklaracja opisuje 53 (roznica -5); apply ZALEGA (...)
+budzet spec: ROZJAZD NIEOCZEKIWANY — granica ma 48 atrybutow, deklaracja opisuje 53 (roznica -5), a apply NIE zalega (...)
+```
+
+Pierwsza liczba to koszt policzony z **żywej granicy** (`servicePerimeters.get`), druga — z **deklaracji**
+w `perimeter/**` (`attribute_budget.py`). Mają być równe. **Rozstrzyga drugie słowo komunikatu** —
+producent rozróżnia dwa przypadki, bo mają różne procedury.
+
+Oba idą jako `::warning::` i **żaden nie czerwieni przebiegu**. Nie dlatego, że drugi jest mniej ważny —
+dlatego, że `measure` z czerwonym statusem zatrzymuje `publish` przez `needs`, więc metryki by nie powstały
+i obserwator zamilkłby dokładnie w stanie, w którym ma krzyczeć. Wagę niesie prefiks, nie poziom adnotacji.
+
+### „ROZJAZD OCZEKIWANY" — apply zalega
+
+W Gicie jest zmergowana zmiana, której jeszcze nie ma w chmurze. Różnica jest **oczekiwana** i zniknie po
+udanym `apply`. **Nie szukaj tu dryfu — nie znajdziesz go, i to jest zamierzone:**
+
+* `drift_resources` jest w takim przebiegu **celowo 0** (dyskryminator „zmiana spoza Gita vs opóźnienie
+  propagacji" — patrz [dryf granicy](#dryf-granicy), sekcja o niestrzelaniu po każdym apply),
+* alert `apply` odezwie się dopiero po `apply_pending_seconds` (domyślnie godzina).
+
+Czyli przez pierwszą godzinę po merge'u ta adnotacja jest **jedynym** sygnałem. Idź do **historii przebiegów
+`apply`**, nie do granicy:
+
+```bash
+gh run list --workflow=apply.yml --limit=5 --json conclusion,headSha,createdAt,databaseId
+gh run view <ID> --log-failed        # gdy ostatni jest czerwony
+```
+
+Nic nie rób „na granicy". Napraw przyczynę czerwonego `apply` i zmerguj poprawkę — różnica zamknie się sama.
+
+**Zmierzone, żeby to nie było teorią** (2026-08-12, przebiegi `watch` `31565377821` i `31565606010`):
+„granica ma 48, deklaracja 53" przy `drift_resources = 0` i `apply_pending_seconds = 72`. Przyczyną był
+`apply`, który padł na numerze projektu nieistniejącego w organizacji — członek warty 5 atrybutów był
+w deklaracji i nie było go w granicy. Kolejny `apply`, zdejmujący ten wpis, zamknął różnicę po ~9 minutach.
+Adnotacja odsyłała wtedy do alertu o dryfie, czyli do kontroli, która w tym stanie milczy z definicji; to
+jest defekt naprawiony właśnie tą sekcją i rozróżnieniem w komunikacie.
+
+### „ROZJAZD NIEOCZEKIWANY" — apply nie zalega
+
+Git i chmura **powinny** być zgodne, a nie są. Dwa źródła, oba warte reakcji:
+
+1. **ktoś zmienił granicę poza pipeline'em** — to jest [dryf granicy](#dryf-granicy) i ma własny alert
+   CRITICAL na kanale bezpieczeństwa. Zacznij od niego;
+2. **modele rozjechały się arytmetycznie** — `attribute_budget.py` modeluje renderer z `terraform/locals.tf`.
+   Gdy renderer się zmienia (kolaps reguł, `*` zamiast listy, nowe pole w API), a model nie — komunikat
+   wygląda **identycznie** jak dryf, choć w granicy nie ma nic obcego.
+
+**Rozstrzyga porównanie regułą po regule, nie sum.** Równe sumy nie dowodzą parytetu — dwa błędy potrafią
+się znieść:
+
+```bash
+gcloud access-context-manager perimeters describe <NAZWA> --policy=<NUMER> --format=json > /tmp/zywa.json
+python3 tools/collect_declarations.py | python3 tools/attribute_budget.py --format json
+python3 - <<'PY'
+import json, sys; sys.path.insert(0, "tools")
+import perimeter_watch as pw
+p = json.load(open("/tmp/zywa.json"))
+for k in ("spec", "status"):
+    cfg = p.get(k) or {}
+    print(f"== {k}: razem {pw.koszt_konfiguracji(cfg)}")
+    for r in (cfg.get("ingressPolicies") or []) + (cfg.get("egressPolicies") or []):
+        print("  ", r.get("title"), pw.koszt_konfiguracji(
+            {"ingressPolicies": [r]} if "ingressFrom" in r else {"egressPolicies": [r]}))
+PY
+```
+
+Zestaw wynik z `per_member` i `baseline_fixed` z raportu deklaracyjnego. Reguła, która występuje po jednej
+stronie i nie po drugiej — albo kosztuje inaczej — wskazuje, którą stronę naprawiać. Poprawka modelu idzie
+**najpierw do startera** (`.starter-sync`), bo inaczej granica chodzi na innym kodzie niż jego źródło.
 
 ---
 

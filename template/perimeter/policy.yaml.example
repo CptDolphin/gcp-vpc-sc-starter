@@ -221,6 +221,48 @@ baseline_ingress:
         # dokładnie tę jedną, której używa `gcloud logging read`.
         methods: ["LoggingServiceV2.ListLogEntries"]
 
+  # --- KANAREK ACCESS LEVELU (opcjonalny, domyślnie WYŁĄCZONY) -----------------------------------
+  #
+  # CO MIERZY. Odmowę granicy widać z każdego miejsca. Ścieżki POZYTYWNEJ — „poziom kogoś wpuścił" —
+  # nie widać nigdzie: audit-log zapisuje NARUSZENIA, nie wpuszczenia, a `describe` pokazuje treść,
+  # którą sami wysłaliśmy. Efekt jest taki, że w typowym wdrożeniu NIKT nigdy nie zaobserwował, żeby
+  # access level cokolwiek przepuścił. Awaria tej połowy (zakres przestał pasować) nie wpuszcza
+  # obcych — ODCINA WŁASNYCH, i to dopiero w dniu promocji.
+  #
+  # JAK. Dwie reguły różniące się WYŁĄCZNIE wymaganym access levelem, na dwóch nieszkodliwych metodach
+  # read-only, wołane tą samą tożsamością pipeline'u. Jedna ma przejść, druga dostać odmowę VPC-SC
+  # (`boundary-probe.yml -f kanarek=uzbrojony`). Wszystkie WSPÓLNE przyczyny odmowy — brak roli, wyłączone
+  # API, zepsuty projekt, nieobecna reguła — dają ten sam wynik po obu stronach, więc rozjazd może
+  # pochodzić już tylko z poziomu. Kontrola anty-tautologiczna to ten sam przelot z `kanarek=rozbrojony`.
+  #
+  # GDZIE TO ZARABIA U WAS. Kanarek uruchamiany z runnera stojącego W WASZEJ SIECI, celujący w poziom
+  # z waszym realnym zakresem, przestaje przechodzić w dniu, w którym zakres przestaje pasować —
+  # czyli wykrywa rozjazd ZANIM zobaczy go dywizja, bez czytania jakichkolwiek logów. Pole `reviewed`
+  # w access levelu wykrywa zaniedbanie procesu; kanarek wykrywa rozjazd faktyczny.
+  #
+  # KOSZT I RYZYKO. ~10 atrybutów z 6000 i jedno wywołanie read-only na przebieg sondy. Poziom `match`
+  # autoryzuje WYŁĄCZNIE tożsamość pipeline'u i wyłącznie na wskazaną metodę — nie rozszerzaj go na nic,
+  # co czyta dane dywizji. Reguły są `baseline`, więc dotyczą każdego członka: wybierz metody, których
+  # wyciek nie znaczy nic (listowanie metryk log-based i sinków — konfiguracja, nie dane).
+  #
+  # WŁĄCZENIE: odkomentuj poniższe DWIE reguły i parę poziomów `ci_probe_*` w access-levels/corp.yaml.
+  #
+  # - title: canary-level-match
+  #   identities:
+  #     - "serviceAccount:sa-vpcsc-plan@<PROJEKT>.iam.gserviceaccount.com"
+  #   access_levels: ["ci_probe_match"]
+  #   operations:
+  #     - service: logging.googleapis.com
+  #       methods: ["MetricsServiceV2.ListLogMetrics"]
+  #
+  # - title: canary-level-mismatch
+  #   identities:
+  #     - "serviceAccount:sa-vpcsc-plan@<PROJEKT>.iam.gserviceaccount.com"
+  #   access_levels: ["ci_probe_mismatch"]
+  #   operations:
+  #     - service: logging.googleapis.com
+  #       methods: ["ConfigServiceV2.ListSinks"]
+
 # Monitoring perimetru — metryki log-based i alerty (terraform/monitoring.tf).
 #
 # DLACZEGO to jest tutaj, a nie „w monitoringu": perimetr bez alertu jest granicą, o której dowiesz się od

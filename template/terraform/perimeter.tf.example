@@ -154,6 +154,86 @@ resource "google_access_context_manager_access_level" "level" {
       )
       error_message = "Access level ${each.key}: `combining_function: OR` przy jednym warunku nie zmienia niczego (OR łączy warunki, nie atrybuty w jednym warunku). Usuń je albo dołóż drugi warunek."
     }
+
+    # --- UZBROJENIE: pięć barier na jeden defekt „poziom wygląda na gotowy i nie wpuszcza nikogo" ---
+    #
+    # Nazwa `armed` jest CZĘŚCIĄ mechanizmu, nie ozdobą: bramka nie umie orzec, czy zakres jest
+    # prawdziwy (tego z konfiguracji orzec się NIE DA), umie za to wymusić, żeby ktoś to powiedział
+    # wprost i podpisał datą. Rozróżnienie „świadomy placeholder" vs „niedokończona robota" jest całą
+    # treścią tej kontroli — bo jedno i drugie renderuje się na identyczny obiekt w ACM.
+
+    # 1. Zakresy wyłącznie dokumentacyjne = poziom, którego nikt nie spełni. Musi to powiedzieć.
+    precondition {
+      condition = !(
+        length(lookup(each.value, "ip_subnetworks", [])) > 0 &&
+        alltrue([
+          for c in lookup(each.value, "ip_subnetworks", []) :
+          anytrue([for p in local.documentation_prefixes : startswith(lower(c), p)])
+        ])
+      ) || lookup(each.value, "armed", true) == false
+      error_message = "Access level ${each.key}: wszystkie `ip_subnetworks` to zakresy DOKUMENTACYJNE (RFC 5737 / RFC 3849) — nie ma ich żaden host, więc ten poziom nie autoryzuje nikogo. Podmień je na własne (wtedy `armed: true` + `source_of_truth` + `reviewed`) albo zadeklaruj `armed: false` z `unarmed_reason`."
+    }
+
+    # 2. Nieuzbrojenie bez powodu jest nieodróżnialne od zapomnianego pliku.
+    precondition {
+      condition     = lookup(each.value, "armed", true) || length(lookup(each.value, "unarmed_reason", "")) >= 30
+      error_message = "Access level ${each.key}: `armed: false` wymaga `unarmed_reason` (min. 30 znaków) — inaczej nie da się odróżnić decyzji od niedokończonej konfiguracji."
+    }
+
+    # 3. NIEOSIĄGALNOŚĆ DZIEDZICZY SIĘ PRZEZ `AND`. Kompozycja bez własnych zakresów IP wypada z każdego
+    #    „przeglądu zakresów", a nie wpuszcza nikogo, bo wymaga poziomu, którego nikt nie spełnia. Warunek
+    #    jest LOKALNY (rodzic vs jego bezpośrednie dzieci) i domyka się indukcyjnie: skoro każdy rodzic
+    #    nieuzbrojonego dziecka sam musi być nieuzbrojony, to żaden łańcuch kompozycji tego nie przemyci.
+    #    HCL nie ma rekurencji, więc domknięcie przechodnie liczone wprost byłoby tu albo niepełne,
+    #    albo rozwinięte na sztywną głębokość — indukcja jest i pełna, i czytelna w komunikacie.
+    precondition {
+      condition = lookup(each.value, "armed", true) == false || alltrue([
+        for lvl in lookup(each.value, "required_access_levels", []) :
+        lookup(lookup(local.access_levels, lvl, {}), "armed", true)
+      ])
+      error_message = "Access level ${each.key}: `armed: true`, ale składnik z `required_access_levels` jest nieuzbrojony. `AND` wymaga OBU warunków, więc ta kompozycja też nie wpuszcza nikogo — oznacz ją `armed: false` z `unarmed_reason` albo uzbrój składnik."
+    }
+
+    # 4. FAIL-CLOSED TAM, GDZIE TO KOSZTUJE: poziom nieuzbrojony referowany przez konfigurację
+    #    EGZEKWOWANĄ. W dry-run niedokończona konfiguracja jest na miejscu — po to jest dry-run.
+    #    W konfiguracji, która realnie blokuje, reguła oparta na takim poziomie nie autoryzuje nikogo,
+    #    a wygląda w konsoli na obecną. Furtka istnieje (bo „ta reguła świadomie dziś nie wpuszcza
+    #    nikogo" bywa poprawnym stanem etapu wdrożenia), ale WYGASA — zapis bez daty zostaje na zawsze.
+    precondition {
+      condition = lookup(each.value, "armed", true) || !contains(
+        local.access_levels_referenced_by_enforced,
+        "accessPolicies/${local.policy_id}/accessLevels/${each.key}"
+        ) || timecmp(
+        "${lookup(each.value, "unarmed_accepted_until", "1970-01-01")}T23:59:59Z", plantimestamp()
+      ) > 0
+      error_message = "Access level ${each.key}: jest NIEUZBROJONY, a referuje go reguła w konfiguracji EGZEKWOWANEJ — ta reguła nie autoryzuje dziś nikogo. Uzbrój poziom albo dopisz `unarmed_accepted_until: RRRR-MM-DD` (data w przyszłości) jako świadomy, wygasający zapis."
+    }
+
+    # 5. ATESTACJA ZAKRESU: skąd wartość i kiedy potwierdzona. Bez tego „zakres jest aktualny" jest
+    #    zdaniem bez autora i bez daty — a zakres, który przestał pasować, wygląda identycznie jak
+    #    działający. Zegar jest twardy TYLKO dla poziomów stojących w konfiguracji egzekwowanej: tam
+    #    cisza kosztuje odcięcie ludzi, a w dry-run kosztuje ostrzeżenie.
+    precondition {
+      condition = !(lookup(each.value, "armed", true) && length(lookup(each.value, "ip_subnetworks", [])) > 0) || (
+        length(lookup(each.value, "source_of_truth", "")) >= 10 && length(lookup(each.value, "reviewed", "")) > 0
+      )
+      error_message = "Access level ${each.key}: uzbrojony poziom z `ip_subnetworks` wymaga `source_of_truth` (skąd zakres: firewall/NAT/VPN/CMDB) i `reviewed` (kiedy sieć to potwierdziła)."
+    }
+
+    precondition {
+      condition = !(
+        lookup(each.value, "armed", true) &&
+        length(lookup(each.value, "ip_subnetworks", [])) > 0 &&
+        contains(local.access_levels_referenced_by_enforced, "accessPolicies/${local.policy_id}/accessLevels/${each.key}")
+        ) || timecmp(
+        timeadd(
+          "${lookup(each.value, "reviewed", "1970-01-01")}T00:00:00Z",
+          "${lookup(each.value, "review_interval_days", local.access_level_review_default_days) * 24}h"
+        ),
+        plantimestamp()
+      ) > 0
+      error_message = "Access level ${each.key}: atestacja zakresu (`reviewed`) jest przeterminowana, a poziom stoi w konfiguracji EGZEKWOWANEJ. Potwierdź zakres z zespołem sieciowym i podnieś `reviewed` — albo wydłuż `review_interval_days`, jeśli to świadoma decyzja."
+    }
   }
 }
 

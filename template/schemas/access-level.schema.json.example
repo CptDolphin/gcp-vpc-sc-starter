@@ -49,6 +49,88 @@
                 ]
               }
             }
+          },
+          {
+            "$comment": "`armed: false` = poziom dziś nie wpuszcza nikogo. Powód jest obowiązkowy, bo bez niego nie da się odróżnić decyzji od niedokończonej roboty — a to jest CAŁA różnica między świadomym placeholderem a defektem. Pola wygaszające i atestacyjne wykluczają się nawzajem: nieuzbrojony poziom nie ma czego atestować, uzbrojony nie ma czego wygaszać.",
+            "if": {
+              "properties": {
+                "armed": {
+                  "const": false
+                }
+              },
+              "required": [
+                "armed"
+              ]
+            },
+            "then": {
+              "required": [
+                "unarmed_reason"
+              ],
+              "allOf": [
+                {
+                  "not": {
+                    "required": [
+                      "source_of_truth"
+                    ]
+                  }
+                },
+                {
+                  "not": {
+                    "required": [
+                      "reviewed"
+                    ]
+                  }
+                }
+              ]
+            },
+            "else": {
+              "allOf": [
+                {
+                  "not": {
+                    "required": [
+                      "unarmed_reason"
+                    ]
+                  }
+                },
+                {
+                  "not": {
+                    "required": [
+                      "unarmed_accepted_until"
+                    ]
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "$comment": "Poziom uzbrojony oparty na zakresach IP musi powiedzieć, SKĄD wartość i KIEDY potwierdzona. Bez tego „zakres jest aktualny\" jest zdaniem bez autora i bez daty — a to jest dokładnie ta informacja, której brak sprawia, że zakres zmieniony wygląda identycznie jak zakres działający.",
+            "if": {
+              "allOf": [
+                {
+                  "required": [
+                    "ip_subnetworks"
+                  ]
+                },
+                {
+                  "not": {
+                    "properties": {
+                      "armed": {
+                        "const": false
+                      }
+                    },
+                    "required": [
+                      "armed"
+                    ]
+                  }
+                }
+              ]
+            },
+            "then": {
+              "required": [
+                "source_of_truth",
+                "reviewed"
+              ]
+            }
           }
         ],
         "properties": {
@@ -72,6 +154,36 @@
             "type": "string",
             "minLength": 20,
             "description": "Dlaczego alternatywa jest tu zamierzona. Wymagane przy `combining_function: OR` i zabronione bez niego — inaczej uzasadnienie przeżywa powrót do AND i przestaje cokolwiek znaczyć."
+          },
+          "armed": {
+            "type": "boolean",
+            "description": "Czy ktokolwiek może dziś spełnić ten poziom. `false` = poziom nie autoryzuje nikogo (placeholder, niegotowa procedura, nieosiągalny składnik kompozycji). Domyślnie `true`."
+          },
+          "unarmed_reason": {
+            "type": "string",
+            "minLength": 30,
+            "description": "Dlaczego poziom jest nieuzbrojony. Wymagane przy `armed: false`, zabronione bez niego."
+          },
+          "unarmed_accepted_until": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "description": "Data, do której wolno referować ten nieuzbrojony poziom z konfiguracji EGZEKWOWANEJ. Reguła oparta na nim nie wpuszcza nikogo — zapis jest świadomy i WYGASA, żeby nie został na zawsze."
+          },
+          "source_of_truth": {
+            "type": "string",
+            "minLength": 10,
+            "description": "Skąd pochodzą zakresy: obiekt na firewallu, pula NAT, koncentrator VPN, wpis CMDB. Wymagane dla uzbrojonego poziomu z `ip_subnetworks`."
+          },
+          "reviewed": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "description": "Kiedy zespół sieciowy ostatni raz potwierdził, że zakresy nadal są ich. Wymagane dla uzbrojonego poziomu z `ip_subnetworks`."
+          },
+          "review_interval_days": {
+            "type": "integer",
+            "minimum": 30,
+            "maximum": 730,
+            "description": "Po ilu dniach potwierdzenie z `reviewed` się przeterminowuje (domyślnie 180). Przeterminowane na poziomie referowanym przez konfigurację EGZEKWOWANĄ = czerwony plan."
           },
           "ip_subnetworks": {
             "type": "array",

@@ -66,6 +66,37 @@ locals {
     }
   ]...)
 
+  # --- UZBROJENIE POZIOMÓW: zakresy, których nikt nie ma, wyglądają jak zakresy, które ktoś ma ------
+  #
+  # Zakresy DOKUMENTACYJNE nie należą do żadnego hosta na świecie, więc poziom oparty wyłącznie na nich
+  # nie autoryzuje NIKOGO — a w `describe`, w konsoli i w planie wygląda dokładnie jak poziom gotowy.
+  # To jest ta sama klasa defektu co reguła baseline bez `sources`: kontrola obecna i bezczynna. Różnica
+  # jest taka, że tamtą dało się złapać KSZTAŁTEM reguły, a tę widać wyłącznie w TREŚCI danych.
+  #
+  # DOPASOWANIE PO PREFIKSIE, nie po zawieraniu się w CIDR — świadomie. HCL nie ma funkcji „czy adres
+  # leży w sieci", a każdy podzakres bloku /24 z RFC 5737 zaczyna się od tych samych trzech oktetów
+  # (`192.0.2.10/32` -> `192.0.2.`), więc prefiks łapie dokładnie to, co ma złapać, i da się go
+  # przeczytać bez uruchamiania Terraforma. Krótszy prefiks (`192.0.0.0/16`) nie jest zakresem
+  # dokumentacyjnym i celowo tu nie pasuje.
+  #
+  # CZEGO TU NIE MA: RFC 1918 (10/8, 172.16/12, 192.168/16). Dla ruchu z sieci korporacyjnej przez
+  # interconnect adres prywatny bywa POPRAWNĄ wartością — wrzucenie go do tego samego worka zamieniłoby
+  # bramkę wykrywającą placeholder w bramkę zakazującą realnego wzorca.
+  documentation_prefixes = ["192.0.2.", "198.51.100.", "203.0.113.", "2001:db8:"]
+
+  # Poziomy, które REALNIE stoją w konfiguracji EGZEKWOWANEJ — czyli tam, gdzie „nie wpuszcza nikogo"
+  # przestaje być notatką w pliku i zaczyna być polityką. `*` (baseline: autoryzacja samą tożsamością)
+  # nie jest nazwą poziomu i wypada z tej listy.
+  access_levels_referenced_by_enforced = distinct([
+    for a in flatten([for k, r in local.ingress_rules_enforced : lookup(r, "access_levels", [])]) : a
+    if a != "*"
+  ])
+
+  # Domyślny okres ważności atestacji zakresu (`reviewed`). 180 dni to kompromis: krócej = zegar dzwoni
+  # częściej, niż zmienia się topologia sieci, i zostaje wyciszony; dłużej = zakres zdąży się zmienić
+  # dwa razy między potwierdzeniami. Poziom może nadpisać to `review_interval_days`.
+  access_level_review_default_days = 180
+
   restricted_services = local.policy.restricted_services
   accessible_services = local.policy.vpc_accessible_services.same_as_restricted ? local.policy.restricted_services : []
 
