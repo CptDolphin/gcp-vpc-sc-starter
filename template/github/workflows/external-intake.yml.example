@@ -206,11 +206,27 @@ jobs:
       - name: schema
         run: check-jsonschema --schemafile schemas/projects.schema.json perimeter/projects.yaml
 
+      # STAN ZASTOSOWANY — ten sam powód i ta sama degradacja co na torze pull requesta: reguły promocji
+      # pytają o PRZEJŚCIE do `enforced`, a bez kontraktu członek już egzekwowany wygląda jak promocja
+      # trwająca teraz, więc zgłoszenie CUDZEGO projektu (zawsze w dry-run) padało na jego dowodzie.
+      # Brak assetu nie jest błędem: `collect_declarations.py` zostawia wtedy `applied_stages_known: false`,
+      # a reguła traktuje „nie wiem" jak przejście — surowiej, nie luźniej.
+      - name: stan zastosowany (kontrakt z ostatniego apply, jeśli jest)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download contract --pattern contract.json --dir stan \
+            || echo "::notice::brak release'u contract — stan zastosowany nieznany (bramka promocji zostaje uzbrojona)"
+
       # This is where contributors.yaml does its work: is this repository allowed to ask for THIS project,
       # and does its division match the entry?
       - name: ownership and onboarding rules
         run: |
-          python3 tools/collect_declarations.py > declarations.json
+          if [ -f stan/contract.json ]; then
+            python3 tools/collect_declarations.py --contract stan/contract.json > declarations.json
+          else
+            python3 tools/collect_declarations.py > declarations.json
+          fi
           conftest test --policy policy --namespace vpcsc.onboarding declarations.json
 
       # KTORY TOKEN OTWIERA PR DECYDUJE, CZY PR JEST W OGOLE SPRAWDZANY — zmierzone 2026-08-11 (#1947) na

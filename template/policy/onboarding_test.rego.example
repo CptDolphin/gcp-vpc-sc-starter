@@ -197,6 +197,115 @@ test_promotion_with_violations_denied if {
 	count(deny) > 0 with input as bad
 }
 
+# --- PRZEJŚCIE kontra STAN (kontrakt = etapy zastosowane) -------------------------------------------
+#
+# Bramki wyżej mają sens WYŁĄCZNIE dla członka, dla którego egzekwowanie dopiero ma zostać włączone.
+# Zadane po samym `stage: enforced` obowiązują też po zastosowaniu promocji — a wtedy naruszenia w oknie
+# są ODMOWAMI (granica działa), a liczba dni w dry-run jest historią. Skutek: członek działający zgodnie
+# z przeznaczeniem odrzuca każdy niezwiązany pull request.
+#
+# CZTERY OSIE, KTÓRE MUSZĄ BYĆ TESTOWANE RAZEM, bo każda z osobna daje się „zdać" złą regułą:
+#   * przejście z dowodem przechodzi, przejście bez dowodu PADA (inaczej to jest wyłącznik bramki);
+#   * członek JUŻ egzekwowany przechodzi mimo odmów (inaczej naprawa nie naprawia niczego);
+#   * brak wiedzy o stanie zastosowanym zachowuje się jak przejście (inaczej wyłącznikiem bramki jest
+#     usunięcie artefaktu);
+#   * członka NIEOBECNEGO w kontrakcie też traktujemy jak przejście (pierwszy apply).
+
+# `applied_stages_known` osobno od mapy — pusta mapa przy `known: true` znaczy „kontrakt jest i tego
+# członka w nim nie ma", co jest czymś innym niż „nie wiemy nic".
+ze_stanem(etapy, znany) := {"applied_stages": etapy, "applied_stages_known": znany}
+
+# Członek promowany „na świeżo", z brudnym oknem: 30 wpisów w raporcie i 2 dni w dry-run zamiast 14.
+# Ten sam wpis obsługuje oba reżimy — różni je WYŁĄCZNIE zawartość kontraktu.
+swiezo_promowany := object.union(healthy_member, {"stage": "enforced", "dry_run_since": "2026-07-18"})
+
+wejscie_z_kontraktem(etapy, znany) := object.union(
+	object.union(healthy_input, {
+		"members": {"example-prj-example-vertex-dev": swiezo_promowany},
+		"violations_last_window": {"example-prj-example-vertex-dev": 30},
+	}),
+	ze_stanem(etapy, znany),
+)
+
+# 1. PRZEJŚCIE BEZ DOWODU DALEJ PADA. To jest cała treść bramki: kontrakt mówi `dry-run`, repo prosi
+#    o `enforced`, w oknie 30 naruszeń i 2 dni obserwacji — decyzja jest przed nami i stoi.
+test_przejscie_bez_dowodu_dalej_odrzucone if {
+	count(deny) > 0 with input as wejscie_z_kontraktem({"example-prj-example-vertex-dev": "dry-run"}, true)
+}
+
+# 2. TEN SAM WPIS, GDY GRANICA JUŻ DZIAŁA, PRZECHODZI. 30 wpisów to teraz odmowy, a nie prognoza — i nie
+#    mają prawa czerwienić pull requesta o czymkolwiek innym. Bez tego testu „naprawa" mogłaby polegać na
+#    poluzowaniu progu i nikt by nie zauważył, że pyta nadal o stan.
+test_juz_egzekwowany_z_odmowami_przechodzi if {
+	count(deny) == 0 with input as wejscie_z_kontraktem({"example-prj-example-vertex-dev": "enforced"}, true)
+}
+
+# 3. FAIL-CLOSED: bez wiedzy o stanie zastosowanym zachowujemy się jak przy przejściu. Gdyby było
+#    odwrotnie, wyłącznikiem tej bramki byłoby NIEPODANIE `--contract` — czyli brak pliku.
+test_brak_wiedzy_o_stanie_zachowuje_sie_jak_przejscie if {
+	count(deny) > 0 with input as wejscie_z_kontraktem({}, false)
+}
+
+# 3b. Ta sama domyślność, gdy pól nie ma w wejściu W OGÓLE (stare narzędzie, ręcznie sklecony JSON).
+#     Odwołanie do brakującego klucza jest w rego NIEZDEFINIOWANE, a niezdefiniowany warunek unieważnia
+#     całą regułę — czyli bez `default` brak pola PRZEPUSZCZAŁBY promocję. Ten test tego pilnuje.
+test_brak_pol_stanu_zachowuje_sie_jak_przejscie if {
+	bad := object.union(healthy_input, {
+		"members": {"example-prj-example-vertex-dev": swiezo_promowany},
+		"violations_last_window": {"example-prj-example-vertex-dev": 30},
+	})
+	count(deny) > 0 with input as bad
+}
+
+# 4. Kontrakt czytelny i kompletny, ale członka w nim nie ma — to pierwszy apply tego wpisu, czyli
+#    przejście z niczego do `enforced`. Najostrzejszy z możliwych stanów, a wygląda jak „brak danych".
+test_czlonek_nieobecny_w_kontrakcie_to_przejscie if {
+	count(deny) > 0 with input as wejscie_z_kontraktem({"example-inny-projekt": "enforced"}, true)
+}
+
+# 5. ANTY-TAUTOLOGIA DLA `granica_juz_wlaczona`: wpis `enforced` w kontrakcie pod INNYM etapem nie może
+#    zwalniać. Bez tego testu reguła „kontrakt zna tego członka" przechodziłaby jako „kontrakt mówi
+#    enforced", a wtedy sama obecność w perimetrze (w dry-run!) zdejmowałaby bramkę promocji.
+test_kontrakt_z_dry_run_nie_zwalnia if {
+	count(deny) > 0 with input as wejscie_z_kontraktem({"example-prj-example-vertex-dev": "dry-run"}, true)
+	count(deny) == 0 with input as wejscie_z_kontraktem({"example-prj-example-vertex-dev": "enforced"}, true)
+}
+
+# 6. Okno obserwacji to też warunek PRZEJŚCIA, nie własność członka. Bez tego pierwsza promocja przed
+#    upływem okna (za zgodą, przez waiver) blokowałaby repo jeszcze przez resztę tego okna — po decyzji,
+#    na którą nikt już nie ma wpływu. Wejście ma CZYSTE okno (0 naruszeń), żeby mierzyć samą regułę dni.
+test_okno_dry_run_nie_obowiazuje_po_wlaczeniu if {
+	czyste := object.union(
+		object.union(healthy_input, {
+			"members": {"example-prj-example-vertex-dev": swiezo_promowany},
+			"violations_last_window": {"example-prj-example-vertex-dev": 0},
+		}),
+		ze_stanem({"example-prj-example-vertex-dev": "enforced"}, true),
+	)
+	count(deny) == 0 with input as czyste
+
+	# Para anty-tautologiczna: ten sam wpis przy kontrakcie `dry-run` MUSI paść na oknie.
+	przejscie := object.union(czyste, ze_stanem({"example-prj-example-vertex-dev": "dry-run"}, true))
+	count(deny) > 0 with input as przejscie
+}
+
+# 7. Brak raportu naruszeń po włączeniu granicy nie może wywracać repozytorium. Raport bywa nieosiągalny
+#    (artefakt wygasł, przebieg padł), a kanały wejścia nie pobierają go nigdy — więc reguła pytająca
+#    o stan zamieniała ich zgłoszenia w czerwone przez CUDZY wpis.
+test_brak_raportu_nie_blokuje_juz_wlaczonego if {
+	bez_raportu := object.union(
+		json.patch(healthy_input, [
+			{"op": "replace", "path": "/members/example-prj-example-vertex-dev/stage", "value": "enforced"},
+			{"op": "remove", "path": "/violations_last_window/example-prj-example-vertex-dev"},
+		]),
+		ze_stanem({"example-prj-example-vertex-dev": "enforced"}, true),
+	)
+	count(deny) == 0 with input as bez_raportu
+
+	# Para anty-tautologiczna: przy kontrakcie `dry-run` brak raportu nadal zatrzymuje promocję.
+	count(deny) > 0 with input as object.union(bez_raportu, ze_stanem({"example-prj-example-vertex-dev": "dry-run"}, true))
+}
+
 # --- wyjątek od bramki promocji (onboarding.promotion_waivers) --------------------------------------
 #
 # Wyjątek jest bramką samą w sobie — więc każdy test pozytywny ma tu parę negatywną. Wyjątek, który

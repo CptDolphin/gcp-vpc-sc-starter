@@ -192,9 +192,27 @@ jobs:
       - name: schema
         run: check-jsonschema --schemafile schemas/projects.schema.json perimeter/projects.yaml
 
+      # `--contract` PODAJEMY TU Z TEGO SAMEGO POWODU, CO NA TORZE PULL REQUESTA — i pominięcie go było
+      # drugą, cichszą twarzą tego samego defektu. Reguły promocji pytają o PRZEJŚCIE do `enforced`, a bez
+      # stanu zastosowanego każdy członek `enforced` wygląda jak promocja trwająca w tej chwili. Kanał
+      # ticketowy nie pobiera artefaktu naruszeń (i nie musi — nie promuje nikogo), więc dla takiego
+      # członka odpalała tu reguła „brak raportu naruszeń": ZMIERZONE — po pierwszej promocji w organizacji
+      # ten krok padał na KAŻDYM zgłoszeniu nowego projektu, mimo że zgłoszenie wchodzi zawsze w dry-run.
+      # Kontrakt kosztuje jedno pobranie assetu i zamyka to bez rozluźniania czegokolwiek.
+      - name: stan zastosowany (kontrakt z ostatniego apply, jeśli jest)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download contract --pattern contract.json --dir stan \
+            || echo "::notice::brak release'u contract — stan zastosowany nieznany (bramka promocji zostaje uzbrojona)"
+
       - name: ownership and onboarding rules
         run: |
-          python3 tools/collect_declarations.py > declarations.json
+          if [ -f stan/contract.json ]; then
+            python3 tools/collect_declarations.py --contract stan/contract.json > declarations.json
+          else
+            python3 tools/collect_declarations.py > declarations.json
+          fi
           conftest test --policy policy --namespace vpcsc.onboarding declarations.json
 
       # CO NAPRAWDE POWSTALO, w przebiegu, a nie tylko w pull requescie. Normalnie zmiane widac w diffie

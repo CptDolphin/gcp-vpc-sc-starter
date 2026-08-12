@@ -1,6 +1,6 @@
-# Decyzje, na których stoi ten starter (DEC-1…DEC-15)
+# Decyzje, na których stoi ten starter (DEC-1…DEC-18)
 
-Piętnaście rozstrzygnięć, które określają kształt repozytorium. Kod odsyła tutaj skrótem `DEC-1`…`DEC-15` — jeśli komentarz
+Osiemnaście rozstrzygnięć, które określają kształt repozytorium. Kod odsyła tutaj skrótem `DEC-1`…`DEC-18` — jeśli komentarz
 w pliku mówi „(DEC-4)", to znaczy: „powód tej linijki jest opisany w DEC-4, nie zmieniaj jej bez przeczytania".
 
 Każda pozycja ma tę samą strukturę: **decyzja** · **dlaczego** · **co odrzucono i dlaczego**. Odrzucone warianty są
@@ -928,6 +928,8 @@ API). Płacony raz na apply, nie raz na pull request.
   zmienia granicę, więc jej zielony wynik nie byłby zdaniem o mutatorze. Testowalność kupujemy inaczej —
   bramki treści (w tym ta, która motywowała całą zmianę) stoją w jobie bez poświadczeń i bez environment.
 
+---
+
 ## DEC-17 — Promocja do `enforced` zatrzymuje apply; zgodą jest ręczne uruchomienie z listą promowanych
 
 **Decyzja.** `apply.yml` porównuje na ścieżce mutatora dwie rzeczy: kto jest **zadeklarowany** jako
@@ -1022,3 +1024,97 @@ niczyjego apply i nie zostawia po sobie zablokowanego stanu.
   required reviewers wstrzymują deploy do environment niezależnie od tego, czy zmiana jest promocją, czy
   literówką w komentarzu. Bramka, która pyta o zgodę przy każdym apply, jest bramką, która przestaje być
   czytana.
+
+---
+
+## DEC-18 — Bramka promocji pyta o PRZEJŚCIE do `enforced`, a stanem odniesienia jest opublikowany kontrakt
+
+**Decyzja.** Trzy warunki promocji w `policy/onboarding.rego` (minimalne okno dry-run, istnienie raportu
+naruszeń, zero naruszeń w oknie) obowiązują **wyłącznie wtedy, gdy egzekwowanie dla tego członka dopiero
+ma zostać włączone**. „Dopiero ma zostać" rozstrzyga porównanie deklaracji z **kontraktem** — artefaktem
+publikowanym przez każdy apply (`terraform/contract.tf`: bucket + asset release'u `contract`), niosącym
+`stage` per członek. Repo mówi `enforced`, kontrakt mówi cokolwiek innego (albo nie zna tego członka) =
+przejście, bramka uzbrojona. Kontrakt mówi `enforced` = granica już działa, bramka milczy.
+`collect_declarations.py --contract` wstawia do dokumentu dwa pola: `applied_stages` i `applied_stages_known`.
+
+**Problem, który to zamyka.** Warunki promocji odpowiadają na pytanie **„co się zepsuje, jeśli TERAZ
+włączymy egzekwowanie"**. Zadane po samym `stage: enforced` obowiązują jednak dopóki członek jest
+`enforced` — czyli także długo po tym, jak decyzja zapadła i została zastosowana. A wtedy te same liczby
+znaczą coś odwrotnego: liczba naruszeń przestaje być prognozą ryzyka i staje się **liczbą odmów**, czyli
+miarą tego, że granica robi swoje (odmowa egzekwowana zapisuje wpis `VpcServiceControlAuditMetadata` tak
+samo jak naruszenie dry-run — pole `dryRun` istnieje WYŁĄCZNIE przy dry-run, więc raport liczy oba
+świadomie). Liczba dni w dry-run przestaje być oknem obserwacji, a staje się historią. Bramka mająca
+chronić przed promocją bez dowodu zamieniała się w **blokadę repozytorium wyzwalaną przez poprawne
+działanie granicy**.
+
+**Zmierzone (pierwsza promocja w organizacji labu).** Po zdjęciu wyjątku `promotion_waivers` bramki dawały
+**dwa odrzucenia** na wniosku, który o promocji nie mówił nic: „18 naruszeń w oknie obserwacji" oraz
+„promocja do enforced po 2 dniach dry-run, wymagane minimum 14". Osiemnaście — to były odmowy, po które
+promocję robiono. Druga, cichsza twarz tego samego defektu: **kanały wejścia** (`intake.yml`,
+`external-intake.yml`) uruchamiają te same reguły, ale artefaktu naruszeń nie pobierają w ogóle, więc
+padały na regule „brak raportu naruszeń" — każde zgłoszenie NOWEGO projektu (zawsze w dry-run) było
+odrzucane przez cudzy wpis. Repozytorium stało przez pierwszą dobę wyłącznie na wyjątku założonym po to,
+żeby dało się cokolwiek zmergować; wyjątek zdjęto razem z tą zmianą.
+
+**Dlaczego stan ZASTOSOWANY, a nie diff wobec gałęzi domyślnej.** Diff jest najdosłowniejszym odczytaniem
+słowa „przejście" i nie działa z dwóch niezależnych powodów. Po pierwsze te same bramki wykonują się na
+dwóch torach (DEC-16), a na torze mutatora **nie ma czego z czym porównać** — apply chodzi już na gałęzi
+domyślnej, po merge'u. Bramka diffowa dawałaby inny werdykt przed merge'em niż po nim, czyli dokładnie tę
+asymetrię, dla której DEC-16 powstał. Po drugie diff mówi o GICIE, a nie o GRANICY: zmergowana promocja,
+której apply nie zastosował (padł, czeka w kolejce single-flight), znika z diffu i przestaje być
+pilnowana, choć w rzeczywistości nic jeszcze nie zostało włączone. Kontrakt opisuje to, co realnie
+wyszło z ostatniego apply — więc bramka pilnuje granicy, a nie historii pliku.
+
+**Stosunek do DEC-17 — dwa źródła „stanu zastosowanego" i to jest celowe.** DEC-17 zatrzymuje apply,
+porównując deklarację z **żywym API** (`status.resources`); ta decyzja pyta o to samo, ale **kontraktem**.
+Różnica bierze się z miejsca, w którym każda z bramek stoi. Bramka apply chodzi w jobie z tożsamością
+i ma prawo pytać API — a musi, bo jest ostatnią kontrolą przed mutacją i nie może opierać się na
+artefakcie z poprzedniego przebiegu. Bramka treści chodzi także na torze pull requesta, który świadomie
+**nie ma żadnego poświadczenia w chmurze** (DEC-16); pytanie API stamtąd oznaczałoby dołożenie tożsamości
+GCP do każdego PR-a — czyli oddanie autorowi dowolnej zmiany prawa odczytu granicy. Obie warstwy się
+składają: kontrakt bywa o jeden apply starszy niż świat, ale **starzeje się wyłącznie w stronę
+surowszą** (mówi `dry-run`, gdy granica już działa → bramka pyta dalej), a rozjazd w drugą stronę
+wymagałby apply, który zmienił perimetr i nie opublikował kontraktu — ten sam krok robi jedno i drugie,
+a przebieg pada, gdy suma kontrolna po obu stronach się nie zgadza.
+
+**Fail-closed, i to nie jest szczegół.** „Nie wiem, co jest zastosowane" znaczy „to jest przejście, żądaj
+dowodu". Odwrotna domyślność zamieniłaby tę bramkę w wyłącznik uruchamiany **usunięciem pliku**:
+wystarczyłoby nie opublikować kontraktu (albo `publish_members: false`), żeby promować bez ani jednego
+dowodu. Stąd `applied_stages_known` jest osobnym polem, a nie „pusta mapa = nie wiemy": pusta mapa jest
+dwuznaczna (kontraktu nie ma / kontrakt jest i nie publikuje członków), a `default … := false` w rego
+czyni brak pola równoważnym z „nie wiemy". `collect_declarations.py` ustawia tę flagę wyłącznie, gdy
+kontrakt daje się przeczytać, ma znaną wersję schematu i jawnie publikuje listę członków; **każdy** inny
+przypadek (uszkodzony JSON, wpis bez `stage`, nieznana wersja) daje `False` i komunikat na stderr —
+ale kodem wyjścia 0, bo wywrócenie narzędzia zamieniłoby uszkodzone pobranie w czerwone dla WSZYSTKICH
+pull requestów, zamiast zaostrzyć jedną bramkę.
+
+**Czego to NIE rozluźnia.** Promocja bez dowodu stoi tak samo jak wcześniej — zmienia się wyłącznie to,
+jak długo pytanie jest zadawane. Testy trzymają obie strony naraz: usunięcie warunku o przejściu wywraca
+cztery testy („już egzekwowany przechodzi"), a uczynienie go zawsze prawdziwym — szesnaście, w tym
+wszystkie o wyjątkach. Selftest dokłada guard enumerujący **z plików** każdą ścieżkę, która uruchamia
+reguły `vpcsc.onboarding` na pełnym zbiorze członków, i wymaga od niej `--contract`; guard czyta ciała
+`run:`, nie tekst pliku, żeby nie dało się go zdać komentarzem.
+
+**Co odrzucono.**
+- *Rozdzielenie liczników w raporcie na „naruszenia dry-run" i „odmowy enforced".* Kusi, bo brzmi jak
+  poprawka u źródła danych. Odrzucone: nadal odpowiada na pytanie o STAN, tylko innym licznikiem —
+  a członek `enforced` obecny również w konfiguracji dry-run dalej produkowałby wpisy, które bramka
+  czytałaby jako ryzyko. Do tego rozróżnienie stoi na **nieobecności** pola `dryRun` (przy odmowie
+  egzekwowanej pola nie ma w ogóle, `dryRun="false"` nie łapie nigdy niczego — zmierzone), czyli na
+  własności niepublikowanej w schemacie logu; bramka bezpieczeństwa oparta na takim szczególe zamienia
+  zmianę po stronie Google'a w cichy fail-open. Rozdzielenie liczników ma sens jako **obserwacja**
+  (alerty w `terraform/alerts.tf` już to robią), nie jako wejście bramki.
+- *Nowe pole w deklaracji z datą promocji, a reguła liczy naruszenia sprzed tej daty.* Najprostsze —
+  i jedyne, które ktoś kiedyś ustawi ręcznie na wczoraj. Pole opisujące fakt z przeszłości, edytowalne
+  przez wnioskodawcę w tym samym PR-ze, w którym prosi o promocję, nie jest dowodem, tylko oświadczeniem.
+  Ta sama zasada co „payload webhooka to dane, nigdy autoryzacja" (DEC-2).
+- *Zawieszenie reguły na czas przez `promotion_waivers`.* To jest zatyczka, którą ta decyzja zdejmuje:
+  wyjątek ma pokrywać ZMIERZONE naruszenia przy świadomej decyzji, a nie maskować bramkę zadającą złe
+  pytanie. Wyjątek jako lekarstwo na własną konstrukcję reguły uczy wyłączania bramek.
+- *Kontrakt pobierany z bucketa (a nie z release'u).* Wymagałby tożsamości w GCP na torze pull requesta,
+  a ten zestaw bramek jest świadomie wykonywalny **bez ani jednego poświadczenia w chmurze**; asset
+  release'u pobiera się tokenem, który workflow i tak ma (ta sama droga co paczka bramek, DEC-8).
+- *Kontrakt niosący `project_number` członka, żeby wykluczyć podszycie się pod skasowany projekt.*
+  Rozważone przy #1979 (martwy członek produkuje fałszywy dowód czystego okna). Odrzucone: identyfikatora
+  projektu w GCP **nie da się użyć ponownie** po skasowaniu, więc scenariusz „ten sam `project_id`, inny
+  projekt" jest niewyrażalny, a kontrakt zyskałby pole, którego nikt nie czyta.
