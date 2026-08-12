@@ -29,10 +29,17 @@
 #      `tools/check_supported_services.py` świadomie pomija operacje z `permissions`, a wartości pilnuje
 #      reguła OPA zbudowana z POMIARU (`dozwolone_uprawnienia_zewnetrzne`).
 #
-# DLACZEGO to jest w katalogu profili, a nie w wyjątkach: wzorzec „dywizja ma hurtownię w S3 i pyta o nią
-# z BigQuery" powtarza się na tyle często, że trzeci wyjątek byłby marnotrawstwem (DEC-3). Ryzyko jest
-# jednak realne — to jedyna reguła w katalogu, która pozwala danym opuścić Google Cloud — dlatego `risk: high`
-# i CODEOWNERS Security na każdą zmianę tego pliku.
+# DLACZEGO to jest w katalogu profili, a nie w „wyjątkach": katalog jest JEDYNĄ drogą dołożenia reguły —
+# pole `exceptions:` w pliku członka zostało usunięte, bo przez cały czas swojego istnienia nie renderowało
+# ani jednej reguły, a schemat i CODEOWNERS opisywały je jako działającą furtkę (DEC-3, DEC-23). Wzorzec
+# „dywizja ma hurtownię w S3 i pyta o nią z BigQuery" i tak powtarza się na tyle często, że zasługuje na profil.
+#
+# CO NAPRAWDĘ PILNUJE TEGO PROFILU. Nie CODEOWNERS — bez ochrony gałęzi (funkcja płatna) GitHub nie
+# egzekwuje go w ogóle, a i tak dotyczyłby tylko zmian TEGO pliku, podczas gdy dane wypływają dopiero
+# wtedy, gdy wpis członka poda cel. Pilnuje tego reguła OPA: każdy członek z profilem `risk: high`
+# i niepustym celem wymaga zgody Security w `perimeter/policy.yaml` §egress_approvals, wymieniającej
+# DOKŁADNE cele i mającej datę wygaśnięcia. Bramka biegnie na obu torach — pull request i apply — więc
+# nie da się jej ominąć commitem prosto na gałąź domyślną (DEC-16, DEC-23).
 #
 # CZEGO TU NIE MA (świadomie): egressu do projektów GCP. Jeśli potrzebujesz obu kierunków, weź także
 # `vertex-batch-training` — mieszanie celów wewnętrznych i zewnętrznych w jednej regule utrudnia późniejszą

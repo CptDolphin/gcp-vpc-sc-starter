@@ -123,6 +123,8 @@ def bootstrap() -> None:
         "tools/bootstrap_github.sh", "docs/access-request.md",
         "tools/check_supported_services.py",
         "tools/control_plane_check.py",
+        # Rozdzielenie wlasnosci, na ktorym stoi zgoda Security na egress poza GCP (DEC-23).
+        "tools/codeowners_check.py",
         # Kompletnosc rejestru decyzji — druga bramka rozjazdu ze starterem, obok wskaznika (DEC-20).
         "tools/decisions_check.py",
         "tools/perimeter_to_policy.py", "tools/brownfield_import.sh",
@@ -1486,8 +1488,11 @@ def test_kanal_ticketowy() -> None:
     plik_czlonkow.write_text(przed_renderem)
     check("render_member.py sklada wpis z listy dozwolonych pol (stage zawsze dry-run)",
           p.returncode == 0 and "stage: dry-run" in wynik, p.stdout + p.stderr)
-    check("render_member.py NIE przepuszcza control_plane_exception ani niepustych exceptions",
-          "control_plane_exception" not in wynik and "exceptions: []" in wynik, wynik[:300])
+    # `exceptions` NIE MA JUZ W WYNIKU — pole zniknelo ze schematu (DEC-23), wiec renderer, ktory nadal
+    # by je wypisywal, produkowalby wpis odrzucany przez `additionalProperties: false`. Asercja pilnuje
+    # OBU kierunkow naraz: pola wnioskodawcy nie przechodza, a renderer nie dokleja pola, ktorego nie ma.
+    check("render_member.py NIE przepuszcza control_plane_exception ani nie dokleja `exceptions`",
+          "control_plane_exception" not in wynik and "exceptions" not in wynik, wynik[:300])
 
     # TRYB TESTOWY. Bramka na nazwe fixture'a decyduje o tym, CO zostanie uznane za odpowiedz systemu
     # rekordu — wiec musi byc kotwiczonym dopasowaniem, a nie wzorcem powloki (`snow-[a-z0-9-]*`
@@ -2718,6 +2723,87 @@ def test_rego() -> None:
     check("policy.yaml deklaruje sekcje control_plane_projects (nie da sie jej po cichu usunac)",
           isinstance(polityka.get("control_plane_projects"), list), str(sorted(polityka.keys())))
 
+    # --- zgoda Security na profil wypuszczajacy dane poza Google Cloud (DEC-23) ----------------------
+    #
+    # PARA ANTY-TAUTOLOGICZNA NA REALNYCH DEKLARACJACH SZABLONU, a nie na fixture'ach reguł: `conftest
+    # verify` sprawdza, czy reguła robi to, co napisano w jej testach, a te trzy przebiegi sprawdzają,
+    # czy KATALOG PROFILI I PLIK CZŁONKÓW, które starter realnie wypuszcza, tę bramkę przechodzą i czy
+    # przestają przechodzić po zdjęciu zgody. Bez tego dałoby się wypuścić szablon, w którym reguła jest
+    # poprawna, a materiał jej nie spełnia — czyli wdrożenie zaczyna od czerwonego CI.
+    zgody = polityka.get("egress_approvals")
+    check("policy.yaml niesie sekcje egress_approvals (zgody Security na profile high-risk)",
+          isinstance(zgody, list) and len(zgody) > 0, str(type(zgody)))
+
+    # NEGATYW: zdejmujemy zgodę i zostawiamy WSZYSTKO inne. To jest dokładnie stan repozytorium sprzed
+    # tej zmiany — profil wypuszczający dane poza Google Cloud, cel podany, zero śladu Security.
+    doc = json.loads(decl.stdout)
+    doc["policy"]["egress_approvals"] = []
+    p = onboarding_na(doc, "bad-egress-bez-zgody.json")
+    check("czlonek z profilem risk:high BEZ zgody Security jest ODRZUCANY", p.returncode != 0, p.stdout[-900:])
+    check("komunikat wskazuje plik i sekcje, w ktorej zgoda ma stanac",
+          "egress_approvals" in p.stdout and "policy.yaml" in p.stdout, p.stdout[-600:])
+
+    # ANTY-TAUTOLOGIA #1 — ten sam wpis ze zgodą przechodzi. Bez tego negatyw wyżej byłby spełniony przez
+    # regułę „odrzuć każdy wniosek z tym profilem", czyli przez zakaz profilu udający bramkę.
+    p = onboarding_na(json.loads(decl.stdout), "ok-egress-ze-zgoda.json")
+    check("ten sam wpis ZE zgoda Security PRZECHODZI (test anty-tautologiczny)",
+          p.returncode == 0, p.stdout[-900:])
+
+    # ANTY-TAUTOLOGIA #2 — RUTYNA NIE PŁACI ZA TĘ BRAMKĘ. Wniosek bez egressu przechodzi przy PUSTEJ
+    # liście zgód. To jest asercja o WĄSKOŚCI klasy: bramka wymagająca człowieka przy każdym z ~50
+    # wniosków miesięcznie zostanie wyłączona przy pierwszym pośpiechu, więc „nie łapie za szeroko"
+    # jest tu wymaganiem, a nie komfortem.
+    doc = json.loads(decl.stdout)
+    doc["policy"]["egress_approvals"] = []
+    doc["members"][name]["profiles"] = [p_ for p_ in doc["members"][name]["profiles"]
+                                        if p_["name"] != "bq-omni-external-read"]
+    doc["members_list"] = [doc["members"][name]]
+    p = onboarding_na(doc, "ok-egress-rutyna.json")
+    check("wniosek BEZ egressu przechodzi przy pustej liscie zgod (bramka nie lapie rutyny)",
+          p.returncode == 0, p.stdout[-900:])
+
+    # NEGATYW: zgoda wydana na inny cel. Podmiana bucketa jest rutynowym diffem w pliku członka i bez tej
+    # reguły przechodziłaby pod zgodą wydaną na coś zupełnie innego — zgoda opisywałaby wtedy zdolność
+    # wysyłania, a nie kierunek wypływu, który jest całym przedmiotem decyzji.
+    doc = json.loads(decl.stdout)
+    for prof_ in doc["members"][name]["profiles"]:
+        if prof_["name"] == "bq-omni-external-read":
+            prof_["params"]["external_resources"] = ["s3://podmieniony-po-zatwierdzeniu"]
+    doc["members_list"] = [doc["members"][name]]
+    p = onboarding_na(doc, "bad-egress-inny-cel.json")
+    check("podmiana celu po zatwierdzeniu jest ODRZUCANA (zgoda pokrywa CELE, nie zdolnosc)",
+          p.returncode != 0, p.stdout[-900:])
+
+    # NEGATYW: zgoda wygasła. `expires` jest obowiązkowe właśnie po to, żeby ten przypadek istniał —
+    # bezterminowa zgoda na wyprowadzanie danych poza Google Cloud to obniżenie baseline pod inną nazwą.
+    doc = json.loads(decl.stdout)
+    for w in doc["policy"]["egress_approvals"]:
+        w["expires"] = "2000-01-01"
+    p = onboarding_na(doc, "bad-egress-wygasla.json")
+    check("wygasla zgoda Security jest ODRZUCANA", p.returncode != 0, p.stdout[-900:])
+
+    # NEGATYW NA KATALOGU, NIE NA WPISIE: najtańsze obejście tej bramki to jedna linia w profilu.
+    # `risk` jest teraz wejściem kontroli, więc musi być KONSEKWENCJĄ kształtu, a nie deklaracją o nim.
+    doc = json.loads(decl.stdout)
+    doc["profiles"]["bq-omni-external-read"]["risk"] = "low"
+    p = onboarding_na(doc, "bad-egress-risk-zanizony.json")
+    check("zanizenie `risk` profilu wypuszczajacego dane poza GCP jest ODRZUCANE",
+          p.returncode != 0, p.stdout[-900:])
+
+    # NEGATYW: PROFIL DOSTAJE EGRESS PÓŹNIEJ, bez ani jednego pull requesta u członka. To jest powód, dla
+    # którego reguła siedzi na DEKLARACJACH, a nie odpala się raz przy onboardingu — członkowie profilu
+    # stają się wnioskami wysokiego ryzyka w sekundzie, w której zmienia się katalog.
+    doc = json.loads(decl.stdout)
+    doc["policy"]["egress_approvals"] = []
+    doc["profiles"]["vertex-online-serving"]["risk"] = "high"
+    doc["profiles"]["vertex-online-serving"]["egress"] = [{
+        "title": "swiezy-egress", "identities_from": "caller_identities",
+        "to_external_from": "caller_identities",
+        "operations": [{"service": "bigquery.googleapis.com", "permissions": ["externalResource.read"]}]}]
+    p = onboarding_na(doc, "bad-egress-profil-zmieniony.json")
+    check("egress dolozony do profilu PO onboardingu tez jest ODRZUCANY",
+          p.returncode != 0, p.stdout[-900:])
+
     # --- bramka promocji pyta o PRZEJŚCIE, nie o stan (kontrakt = etapy zastosowane) -----------------
     #
     # Reguła związana wyłącznie z `stage: enforced` obowiązuje DOPÓKI członek jest enforced — także długo
@@ -2908,6 +2994,78 @@ def test_control_plane_lista() -> None:
     wyzwalacz = plan.split("jobs:", 1)[0]
     check("plan.yml ma `tools/**` w sciezkach wyzwalacza (guard widzi zmiane samego siebie)",
           '"tools/**"' in wyzwalacz, wyzwalacz)
+
+
+# --------------------------------------------------------------------- rozdzielenie wlasnosci
+def test_codeowners_rozdzielenie() -> None:
+    """DEC-23: CODEOWNERS musi opisywac rozdzielenie zgody od wniosku — sprawdzane jako RELACJA zbiorow.
+
+    Bramka `egress_approvals` ma wartosc dokladnie dopoty, dopoki plik ze zgodami (`perimeter/policy.yaml`)
+    ma innych wlascicieli niz plik z wnioskami (`perimeter/projects.yaml`). Zrownanie tych dwoch linii nie
+    wyglada w diffie na oslabienie kontroli — wyglada na uporzadkowanie listy, i wlasnie dlatego pyta o to
+    maszyna, a nie recenzent.
+
+    Kazdy przypadek negatywny jest MUTACJA rozpakowanego szablonu, nie recznie napisanym plikiem: guard,
+    ktory testujemy na wlasnym fixture, moze rozjechac sie z materialem, ktory starter naprawde wypuszcza.
+    """
+    print("\n== rozdzielenie wlasnosci w CODEOWNERS (DEC-23) ==")
+    plik = ROOT / ".github/CODEOWNERS"
+    oryginal = plik.read_text()
+
+    def uruchom():
+        return sh([sys.executable, "tools/codeowners_check.py"], cwd=ROOT)
+
+    try:
+        # --- 1. POZYTYW: szablon, ktory starter wypuszcza, przechodzi -----------------------------
+        p = uruchom()
+        check("codeowners_check przechodzi na rozpakowanym starterze", p.returncode == 0,
+              p.stdout + p.stderr)
+
+        # Placeholdery zespolow NIE sa bledem (na koncie prywatnym zespolow nie da sie utworzyc), ale
+        # MUSZA byc nazwane przy kazdym przebiegu. Cicha zgoda na niedokonczona konfiguracje jest tym,
+        # z czego bierze sie „kontrola opisana i nieistniejaca".
+        check("codeowners_check nazywa placeholdery zespolow jako niedokonczona konfiguracje",
+              "NIEDOKONCZONE" in p.stdout and "placeholder" in p.stdout, p.stdout)
+
+        # --- 2. NEGATYW: zrownanie wlascicieli -----------------------------------------------------
+        # Plik ze zgodami dostaje DOKLADNIE tych samych wlascicieli co plik z wnioskami. Diff wyglada
+        # na porzadki, a znosi cala wlasnosc bezpieczenstwa: zgode wystawia ten, kogo ona dotyczy.
+        wlasciciele_wnioskow = next(l.split(None, 1)[1].strip() for l in oryginal.splitlines()
+                                    if l.startswith("/perimeter/projects.yaml"))
+        zrownany = "\n".join(
+            f"/perimeter/policy.yaml      {wlasciciele_wnioskow}" if l.startswith("/perimeter/policy.yaml") else l
+            for l in oryginal.splitlines())
+        plik.write_text(zrownany)
+        p = uruchom()
+        check("zrownanie wlascicieli policy.yaml i projects.yaml jest ODRZUCANE", p.returncode != 0,
+              p.stdout + p.stderr)
+        check("komunikat tlumaczy KONSEKWENCJE (zgoda wystawiana samemu sobie)",
+              "samemu sobie" in p.stdout, p.stdout[-800:])
+
+        # --- 3. NEGATYW: plik niosacy decyzje traci wlasna regule ----------------------------------
+        # Usuniecie linii nie zostawia pliku bez wlasciciela (jest domyslna `*`), wiec bez tego guardu
+        # zmiana przechodzi w ciszy — a razem z nia znika rozdzielenie.
+        bez_reguly = "\n".join(l for l in oryginal.splitlines() if not l.startswith("/perimeter/policy.yaml"))
+        plik.write_text(bez_reguly)
+        p = uruchom()
+        check("usuniecie wlasnej reguly dla policy.yaml jest ODRZUCANE (spadek na domyslna `*`)",
+              p.returncode != 0, p.stdout + p.stderr)
+
+        # --- 4. NEGATYW: brak pliku ----------------------------------------------------------------
+        # Na wdrozeniu z ochrona galezi brak CODEOWNERS znaczy „kazdy moze zatwierdzic wszystko".
+        plik.unlink()
+        p = uruchom()
+        check("brak pliku CODEOWNERS jest ODRZUCANY (fail-closed)", p.returncode != 0,
+              p.stdout + p.stderr)
+    finally:
+        plik.write_text(oryginal)
+
+    # Bramka uruchamiana recznie nie jest bramka. Guard jedzie w akcji zlozonej `bramki-tresci`, czyli
+    # na OBU torach — pull request i apply — bo bez ochrony galezi tor apply jest jedynym, ktorego nie
+    # da sie ominac pushem na galaz domyslna (DEC-16).
+    akcja = (ROOT / ".github/actions/bramki-tresci/action.yml").read_text()
+    check("codeowners_check jest wpiety w bramki tresci (oba tory)",
+          "tools/codeowners_check.py" in akcja, akcja[-400:])
 
 
 # --------------------------------------------------------------------- kompletnosc rejestru decyzji
@@ -4386,6 +4544,30 @@ def test_schemas() -> None:
     p = sh(["check-jsonschema", "--schemafile", "schemas/member.schema.json", "czlonek-wyjatek-krotki.yaml"], cwd=ROOT)
     check("schema czlonka ODRZUCA wyjatek bez uzasadnienia (min. 20 znakow)", p.returncode != 0, p.stdout[-400:])
 
+    # POLE `exceptions:` MA BYC ODRZUCANE, A NIE IGNOROWANE (DEC-23).
+    #
+    # Do 2026-08-12 pole istnialo w schemacie, mialo regule OPA na dlugosc uzasadnienia i wpis w CODEOWNERS
+    # obiecujacy udzial Security — a `grep -rn "exceptions" terraform/` dawal ZERO: renderer nie tworzyl
+    # z niego ani jednej reguly. Dywizja deklarowala wyjatek, dostawala zielony pull request, merge, apply
+    # — i nie powstawalo nic. Usuniecie pola zamienia cicha atrape w TWARDA ODMOWE przez
+    # `additionalProperties: false`, i to jest wlasnie ta zmiana, ktorej ten przypadek pilnuje.
+    czlonek.pop("control_plane_exception", None)
+    czlonek["exceptions"] = [{
+        "title": "surowa regula spoza katalogu", "justification": "uzasadnienie dostatecznie dlugie",
+        "kind": "egress", "identities": ["serviceAccount:a@b.iam.gserviceaccount.com"],
+        "operations": [{"service": "storage.googleapis.com", "methods": ["google.storage.objects.get"]}]}]
+    (ROOT / "czlonek-exceptions.yaml").write_text(yaml.safe_dump(czlonek, sort_keys=False, allow_unicode=True))
+    p = sh(["check-jsonschema", "--schemafile", "schemas/member.schema.json", "czlonek-exceptions.yaml"], cwd=ROOT)
+    check("schema czlonka ODRZUCA pole `exceptions` (nie renderowalo niczego, DEC-23)",
+          p.returncode != 0, p.stdout[-400:])
+    # Nawet PUSTA lista musi odpasc: `exceptions: []` bylo wypisywane przez renderer w kazdym wpisie, wiec
+    # przepuszczenie jej zostawiloby pole w materiale i w glowach — jako format, ktory „chyba dziala".
+    czlonek["exceptions"] = []
+    (ROOT / "czlonek-exceptions-pusty.yaml").write_text(yaml.safe_dump(czlonek, sort_keys=False, allow_unicode=True))
+    p = sh(["check-jsonschema", "--schemafile", "schemas/member.schema.json", "czlonek-exceptions-pusty.yaml"], cwd=ROOT)
+    check("schema czlonka ODRZUCA takze puste `exceptions: []`", p.returncode != 0, p.stdout[-400:])
+    czlonek.pop("exceptions", None)
+
     # KSZTALTY REGUL SA ROZDZIELONE PER KIERUNEK — i to jest bramka, nie porzadek w pliku.
     #
     # Do 2026-08 `ingress` i `egress` dzielily jedna definicje (`ruleList`), wiec `access_levels_from`
@@ -4942,6 +5124,7 @@ def main() -> int:
     test_lint_and_pinning()
     test_rego()
     test_control_plane_lista()
+    test_codeowners_rozdzielenie()
     test_kompletnosc_decyzji()
     test_tools()
     test_preflight()

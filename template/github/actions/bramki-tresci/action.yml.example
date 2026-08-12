@@ -163,6 +163,20 @@ runs:
       shell: bash
       run: python3 tools/control_plane_check.py
 
+    # ROZDZIELENIE WŁASNOŚCI, NA KTÓRYM STOI ZGODA SECURITY — sprawdzane jako RELACJA, nie jako nazwy.
+    #
+    # Bramka `egress_approvals` (DEC-23) ma wartość dokładnie dopóty, dopóki plik ze zgodami
+    # (`perimeter/policy.yaml`) ma innych właścicieli niż plik z wnioskami (`perimeter/projects.yaml`).
+    # Zrównanie tych dwóch linii nie wygląda w diffie na osłabienie kontroli — wygląda na uporządkowanie
+    # listy, i przechodzi review tym łatwiej, im więcej osób w zespole nie wie, po co ta asymetria jest.
+    #
+    # DLACZEGO TU, A NIE W `bramki-zywe`: to pytanie o wewnętrzną spójność repozytorium, bez ani jednego
+    # wywołania API — więc może biec na KAŻDYM wniosku i, co ważniejsze, na ścieżce apply, czyli tam,
+    # gdzie treść realnie wchodzi do repo przy braku ochrony gałęzi (DEC-16).
+    - name: guard - CODEOWNERS opisuje rozdzielenie zgody od wniosku
+      shell: bash
+      run: python3 tools/codeowners_check.py
+
     # DECYZJA, NA KTÓRĄ POWOŁUJE SIĘ KOD, MUSI BYĆ W REPO — inaczej odsyłacz prowadzi w pustkę.
     #
     # To NIE jest dublet `starter-drift`. Tamta bramka porównuje świadomie sam WSKAŹNIK (commit startera
