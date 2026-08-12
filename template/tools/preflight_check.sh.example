@@ -3,7 +3,8 @@
 # niczego nie naprawia (granica własności, DEC-5: naprawia właściciel projektu, nie repo perimetru).
 #
 # Każdy check zamyka konkretny tryb awarii:
-#   1. projekt istnieje i numer zgadza się z ID   → literówka w numerze dodałaby do perimetru CUDZY projekt
+#   1. projekt istnieje, jest ACTIVE i numer zgadza się z ID → literówka w numerze dodałaby do perimetru
+#      CUDZY projekt, a projekt w trakcie kasowania (soft-delete, 30 dni) wnosi do niego MARTWY NUMER
 #   2. projekt nie jest w innej konfiguracji EGZEKWOWANEJ → twarde ograniczenie ACM; apply padłby po review
 #   3. podsieci mają Private Google Access        → bez tego ruch do API nie pójdzie przez restricted VIP
 #   4. strefa DNS kieruje googleapis.com na restricted VIP → jw., najczęstsza cicha awaria onboardingu
@@ -111,14 +112,51 @@ api_wylaczone() {
 
 echo "pre-flight: $PROJECT_ID ($PROJECT_NUMBER)"
 
-# 1. projekt istnieje i numer się zgadza
-g projects describe "$PROJECT_ID" --format='value(projectNumber)'
+# 1. projekt ISTNIEJE, JEST ŻYWY i numer się zgadza — trzy pytania, JEDEN odczyt.
+#
+# `lifecycleState` NIE JEST OZDOBĄ, tylko jedynym sygnałem odróżniającym projekt żywy od skasowanego.
+# ZMIERZONE: `gcloud projects delete` to soft-delete z oknem 30 dni, a przez te 30 dni `projects describe`
+# odpowiada NORMALNIE i zwraca numer — tyle że z `lifecycleState: DELETE_REQUESTED`. Check pytający o sam
+# `projectNumber` mówił więc „projekt istnieje, numer zgodny" o projekcie, który jest w drodze do kasowania.
+# To jest najgorszy możliwy werdykt pre-flightu: cicho POZYTYWNY. Wpis wchodzi do perimetru, projekt znika,
+# a numer zostaje jako martwy — i nie da się go potem dopasować do niczego w diffie.
+#
+# ZMIERZONE PO DRUGIEJ STRONIE (co robi API, gdy numer już nie wskazuje na projekt tej organizacji):
+# ACM odrzuca taką zmianę dopiero przy `apply` na gałęzi domyślnej — czyli PO review, na obiekcie
+# org-level — i robi to DWOMA różnymi komunikatami z jednego wywołania:
+#     Error 400: Invalid resources for Service Perimeter '<perimetr>': Project(s), folder(s), or
+#     parent(s) of 'projects/<numer>', are not members of the parent of the Service Perimeter.
+#     Error 400: com.google.apps.framework.request.NotFoundException: Project, projects/<numer>,
+#     does not exist.
+# Pierwszy pochodzi z zapisu CZŁONKOSTWA i brzmi jak problem z przynależnością organizacyjną; drugi
+# z zapisu REGUŁY i mówi wprost „nie istnieje". Oba to `Error 400`. Kod błędu nie rozstrzyga niczego —
+# i dokładnie ten koszt ten check ma zdjąć z recenzenta.
+#
+# CZWARTY STAN RAPORTUJEMY DOSŁOWNIE, ZAMIAST ZGADYWAĆ. `projects describe` na projekcie, którego nie ma,
+# i na projekcie, do którego wołający nie ma dostępu, odpowiada TAK SAMO — Resource Manager sam tych dwóch
+# przypadków nie rozróżnia. Nie udajemy więc, że rozróżniamy: wypisujemy treść odpowiedzi (tak jak checki
+# 2–4) i mówimy wprost, kto to rozstrzygnie. Pre-flight, który wybiera jedną z dwóch możliwości i podaje ją
+# jako fakt, wysyła recenzenta w złą stronę — a „brak uprawnień" i „projektu nie ma" naprawia kto inny.
+g projects describe "$PROJECT_ID" --format='value(projectNumber,lifecycleState)'
 if [ "$GRC" -ne 0 ] || [ -z "$GOUT" ]; then
-  problem "projekt $PROJECT_ID nie istnieje albo brak dostępu odczytu"
-elif [ "$GOUT" != "$PROJECT_NUMBER" ]; then
-  problem "numer projektu nie zgadza się: deklarowany $PROJECT_NUMBER, realny $GOUT"
+  problem "projekt $PROJECT_ID: odczyt nie powiódł się — projekt NIE ISTNIEJE albo brak dostępu odczytu (Resource Manager nie rozróżnia tych dwóch; rozstrzygnie ktoś z dostępem do organizacji): $GERR"
 else
-  ok "projekt istnieje, numer zgodny"
+  # awk, nie `cut`: `cut -f2` na linii bez tabulatora zwraca CAŁĄ linię, więc brakujące pole udawałoby
+  # odczytany stan. awk daje pusty łańcuch i pusty łańcuch jest tu osobnym, jawnie obsłużonym werdyktem.
+  numer_realny="$(printf '%s' "$GOUT" | awk -F'\t' '{print $1}')"
+  stan_projektu="$(printf '%s' "$GOUT" | awk -F'\t' '{print $2}')"
+  if [ "$numer_realny" != "$PROJECT_NUMBER" ]; then
+    problem "numer projektu nie zgadza się: deklarowany $PROJECT_NUMBER, realny $numer_realny"
+  elif [ -z "$stan_projektu" ]; then
+    # Nieodczytany stan NIE JEST stanem ACTIVE. Ta gałąź istnieje, bo `--format` bez pola albo zmiana
+    # w API dałaby puste pole, a wtedy „nie wiem" wpadłoby cicho do gałęzi pozytywnej — czyli dokładnie
+    # ten defekt, który ten check naprawia, wróciłby inną drogą.
+    problem "projekt $PROJECT_ID: nie odczytałem lifecycleState — nie wiem, czy projekt jest żywy, a nieodczytanego stanu nie zamiatam pod OK"
+  elif [ "$stan_projektu" != "ACTIVE" ]; then
+    problem "projekt $PROJECT_ID jest w stanie $stan_projektu, nie ACTIVE — to projekt SKASOWANY (soft-delete, okno 30 dni). Numer zostanie w perimetrze jako martwy; powrót wyłącznie przez gcloud projects undelete, który NIE przywraca konta rozliczeniowego"
+  else
+    ok "projekt istnieje, jest ACTIVE, numer zgodny"
+  fi
 fi
 
 # 2. kolizja perimetrów — projekt może należeć tylko do JEDNEJ konfiguracji EGZEKWOWANEJ.
@@ -128,8 +166,17 @@ fi
 # WŁASNYM `spec` jest normalnym, zamierzonym etapem dwustopniowego wejścia. Poprzednia wersja szukała
 # numeru `grep`em w surowym JSON-ie całej listy, więc nie odróżniała ani jednego od drugiego, ani nawet
 # tego, w KTÓRYM perimetrze projekt siedzi — i mówiła „sprawdź, czy to NASZ perimetr", nie podając nazwy.
+# SEPARATOR JEST WYPISANY JAWNIE I TO NIE JEST KOSMETYKA — ZMIERZONE NA ŻYWEJ ORGANIZACJI.
+# `list()` bez argumentu skleja elementy PRZECINKIEM, a awk niżej rozcinał pole po ŚREDNIKU. Skutek:
+# porównanie trafiało wyłącznie wtedy, gdy konfiguracja miała DOKŁADNIE JEDEN zasób — przy dwóch i więcej
+# `zawiera()` porównywało cały sklejony łańcuch z pojedynczym `projects/<numer>` i nie trafiało NIGDY.
+# Zmierzone na perimetrze z trzema członkami: projekt BĘDĄCY w konfiguracji dry-run dostawał werdykt
+# „brak kolizji — projektu nie ma w żadnej konfiguracji". Groźniejsza połowa tego samego defektu dotyczy
+# konfiguracji EGZEKWOWANEJ: check istnieje po to, żeby złapać projekt siedzący w cudzym `status`
+# (twarde ograniczenie ACM, apply pada po review) — i przy każdym realnym rozmiarze perimetru milczał.
+# Test w selfteście używał JEDNEGO zasobu w atrapie, więc zieleniał na jedynym przypadku, który działał.
 g access-context-manager perimeters list \
-  --format='value(name,status.resources.list(),spec.resources.list())'
+  --format='value(name,status.resources.list(separator=";"),spec.resources.list(separator=";"))'
 if [ "$GRC" -ne 0 ]; then
   problem "nie zweryfikowano kolizji perimetrów (odczyt listy nie powiódł się): $GERR"
 else
