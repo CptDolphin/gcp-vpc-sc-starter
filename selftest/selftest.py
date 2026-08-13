@@ -3590,6 +3590,18 @@ def test_codeowners_rozdzielenie() -> None:
     check("codeowners_check jest wpiety w bramki tresci (oba tory)",
           "tools/codeowners_check.py" in akcja, akcja[-400:])
 
+    # Guard artefaktow przebiegu — z tego samego powodu, co wiersz wyzej, plus jeden wlasny. Ten guard
+    # jest JEDYNA warstwa dzialajaca na pliku JUZ SLEDZONYM: `.gitignore` nie dotyczy zawartosci indeksu,
+    # a `add-paths` w kanale wejsciowym przepuszcza to, co i tak jest w drzewie. Przeniesienie go do
+    # `validate.yml` zostawiloby tor apply bez zadnej z trzech warstw.
+    check("guard artefaktow przebiegu jedzie w bramkach tresci (oba tory)",
+          "guard - repozytorium bez artefaktow przebiegu" in akcja, akcja[-400:])
+    # I nie wolno mu przepuszczac przy nieodczytanym indeksie: pusty wynik `git ls-files` znaczy
+    # „czysto" ALBO „nie ma indeksu", a bramka, ktora sklei te dwa przypadki w zielony, jest dokladnie
+    # tym defektem, ktory sama tropi. Sprawdzamy obecnosc jawnej sciezki bledu, nie tresci komunikatu.
+    check("guard artefaktow odrzuca nieodczytany indeks (fail-closed)",
+          "nie odczytal indeksu gita" in akcja, akcja[-400:])
+
 
 # --------------------------------------------------------------------- kompletnosc rejestru decyzji
 def test_kompletnosc_decyzji() -> None:

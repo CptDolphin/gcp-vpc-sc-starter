@@ -8,3 +8,28 @@ violations.json
 violations.md
 .terraform/
 .terraform.lock.hcl.bak
+# Stan lokalny — backend jest zdalny (GCS), więc plik stanu na dysku znaczy, że ktoś uruchomił apply
+# bez backendu. Wtedy tym bardziej nie może trafić do repo: to pełna mapa granicy razem z metadanymi
+# backendu. Wdrożenie dopisało te dwie linie u siebie; szablon ich nie miał, więc każde następne
+# rozpakowanie startowało bez nich.
+*.tfstate
+*.tfstate.*
+
+# ARTEFAKTY PRZEBIEGU, KTÓRE POTRAFI ZACOMMITOWAĆ AUTOMAT. Ta sekcja nie jest higieną — jest bramką.
+#
+# `create-pull-request` (kanał wejściowy) stage'uje CAŁE drzewo robocze, a nie plik, który sam zmienił.
+# Respektuje przy tym `.gitignore`, więc ten plik jest jedyną rzeczą stojącą między artefaktem
+# przebiegu a pull requestem z deklaracją członka. Zmierzone na wdrożeniu (#2037): PR onboardujący
+# `rwlab-vpcsc-t-div` niósł obok 17 linii deklaracji także `stan/contract.json` i skompilowany
+# `.pyc`, a wszystkie pięć checków było zielonych — bo żaden z nich nie patrzy na to, JAKIE pliki
+# wchodzą. Ten sam mechanizm wcześniej wprowadził `.pyc` na `main`.
+#
+# `__pycache__/` był w `.gitignore` SAMEGO startera i nie było go w materiale, który starter wysyła.
+# Repozytorium chroniło siebie, a nie wdrożenie — czyli dokładnie odwrotnie, niż wynika z jego roli.
+__pycache__/
+*.pyc
+# `stan/` — katalog, do którego bramki treści pobierają kontrakt z ostatniego apply i raport naruszeń
+# z ostatniego przebiegu `violations-report`. To dowody ŚCIĄGANE do oceny pull requesta, nie treść
+# repozytorium: zacommitowane zamarzają w wersji z dnia commita i od tej chwili bramka porównuje się
+# z nieruchomą kopią zamiast ze stanem faktycznym.
+stan/
