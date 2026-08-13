@@ -4,6 +4,31 @@
 # WHY this exists at all: it is the property that a ticket-driven API integration would have taken away.
 # Because the perimeter is declared, a change made by hand in the console is detectable — it shows up here
 # as a non-empty plan on an untouched repository.
+#
+# ==========================================================================================
+# DWA PYTANIA, NIE JEDNO — bo `terraform plan` odpowiada tylko na pierwsze
+# ==========================================================================================
+#   1. Czy obiekt, ktory Terraform ZNA, zmienil sie poza pipeline'em?   -> `plan -detailed-exitcode`
+#   2. Czy na granicy stoi obiekt, ktorego Terraform NIE ZNA?           -> `tools/dryf_nieobjete.py`
+#                                                                          (DEC-48)
+#
+# Drugie pytanie ma wlasny krok, bo plan na nie NIE ODPOWIADA i nie moze: szkielet perimetru niesie
+# `ignore_changes` na szesciu listach (czlonkowie i reguly w obu konfiguracjach), a zasoby granularne
+# powstaja z `for_each` po deklaracji. Obiekt spoza deklaracji nie ma instancji w stanie, wiec nie ma
+# czego odswiezyc — i plan melduje `No changes`.
+#
+# ZMIERZONE NA ZYWEJ GRANICY (2026-08-13, #1950): access level utworzony `gcloud`-iem obok pipeline'u
+# stal w polityce, a ten workflow zameldowal `No changes` i POMINAL krok zgloszenia. Ta sama komenda
+# w tym samym przebiegu wykryla natomiast ZMIANE access levelu, ktory byl zadeklarowany. Roznica nie
+# lezy w wadze zmiany, tylko w tym, czy obiekt jest w stanie Terraforma.
+#
+# DLACZEGO TO WAZNE WLASNIE TUTAJ: zmiana wprowadzona recznie prawie nigdy nie jest modyfikacja — jest
+# DOPISANIEM (regula ingress „na chwile", projekt dolozony do granicy, access level pod incydent).
+# Wykrywacz slepy na dopisanie byl slepy na najczestszy ksztalt obejscia procesu.
+#
+# KOLOR PRZEBIEGU NIE NIESIE WERDYKTU — W OBIE STRONY. Zielony job znaczy „sprawdzilem", a nie „nie ma
+# dryfu": wykryty dryf to kod 2, ktory CELOWO nie wywraca joba (zgloszenie jest w Issue, nie w kolorze).
+# Werdykt czyta sie z `code` obu krokow i z tego, czy krok zgloszenia sie WYKONAL, czy zostal pominiety.
 
 name: drift
 
@@ -47,12 +72,20 @@ jobs:
           # (sprawdzone grepem w obu repozytoriach).
           terraform_wrapper: false
 
+      # `setup-gcloud` jest tu dla KROKU INWENTARZA nizej, nie dla planu. Odczyt zywej polityki i zywego
+      # perimetru idzie ta sama tozsamoscia `plan` (read-only), ktora liczy plan — zaden nowy grant.
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+
       - name: plan with detailed exit code
         id: plan
         run: |
           terraform -chdir=terraform init -input=false
           set +e
-          terraform -chdir=terraform plan -input=false -detailed-exitcode -no-color > drift.txt
+          # `-out` JEST WARUNKIEM DRUGIEGO PYTANIA, nie optymalizacja: `show -json` na tym samym planie
+          # daje inwentarz zasobow, ktore Terraform planuje utrzymywac. Bez niego krok nizej musialby
+          # odtwarzac deklaracje z YAML-i, czyli byc DRUGA implementacja renderera.
+          terraform -chdir=terraform plan -input=false -detailed-exitcode -no-color \
+            -out=tfplan.binary > drift.txt
           code=$?
           set -e
           echo "code=$code" >> "$GITHUB_OUTPUT"
@@ -62,25 +95,65 @@ jobs:
           if [ "$code" = "1" ]; then
             exit 1
           fi
+          terraform -chdir=terraform show -json tfplan.binary > plan.json
 
+      # DRUGIE PYTANIE: czy na granicy stoi obiekt, ktorego konfiguracja nie zna. Powod, dla ktorego to
+      # nie miesci sie w planie, stoi w naglowku pliku i w docstringu narzedzia.
+      #
+      # FAIL-CLOSED: nieudany odczyt API to kod 1 i CZERWONY job. Zero roznic wolno zameldowac wylacznie
+      # po porownaniu kompletu wsadow — inaczej slepota przebralaby sie za spokoj.
+      - name: inwentarz granicy kontra konfiguracja
+        id: nieobjete
+        run: |
+          POLITYKA=$(python3 -c 'import yaml;print(yaml.safe_load(open("perimeter/policy.yaml"))["organization"]["access_policy_name"])')
+          NAZWA=$(python3 -c 'import yaml;print(yaml.safe_load(open("perimeter/policy.yaml"))["perimeter"]["name"])')
+          gcloud access-context-manager levels list --policy="$POLITYKA" --format=json > poziomy.json
+          gcloud access-context-manager perimeters describe "$NAZWA" --policy="$POLITYKA" \
+            --format=json > perimetr.json
+          set +e
+          python3 tools/dryf_nieobjete.py --plan-json plan.json \
+            --poziomy-json poziomy.json --perimetr-json perimetr.json > nieobjete.txt 2>&1
+          code=$?
+          set -e
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          cat nieobjete.txt >> "$GITHUB_STEP_SUMMARY"
+          if [ "$code" = "1" ]; then
+            echo "::error::nie dalo sie orzec o obiektach spoza pipeline'u — patrz podsumowanie"
+            exit 1
+          fi
+
+      # JEDNO ZGLOSZENIE NA OBA PYTANIA. Dwa osobne Issues na jeden incydent (ktos dopisal regule i przy
+      # okazji zmienil poziom) rozdzielaja objawy tej samej przyczyny miedzy dwa watki.
       - name: open an issue on drift
-        if: steps.plan.outputs.code == '2'
+        if: steps.plan.outputs.code == '2' || steps.nieobjete.outputs.code == '2'
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         with:
           script: |
             const fs = require('fs');
-            const body = fs.readFileSync('drift.txt', 'utf8').slice(0, 60000);
+            const czytaj = (p) => { try { return fs.readFileSync(p, 'utf8'); } catch (e) { return ''; } };
+            const plan = '${{ steps.plan.outputs.code }}' === '2';
+            const nieobjete = '${{ steps.nieobjete.outputs.code }}' === '2';
+            const body = ['The nightly check is not clean on an unchanged repository. Someone changed the',
+              'perimeter outside this pipeline, or an apply did not complete.',
+              '',
+              'Do not "fix" this by applying blindly: first find out WHO changed WHAT (audit logs),',
+              'then decide whether git or the live state is right.', ''];
+            if (plan) {
+              // Obiekty, ktore Terraform ZNA: plan pokazuje, czym roznia sie od deklaracji.
+              body.push('## zmieniono obiekt objety konfiguracja (`terraform plan`)', '',
+                '```', czytaj('drift.txt').slice(0, 30000), '```', '');
+            }
+            if (nieobjete) {
+              // Obiekty, ktorych Terraform NIE ZNA: `apply` ich NIE USUNIE, bo nie ma ich w stanie.
+              // Sprzatanie jest tu decyzja czlowieka, nie skutkiem ubocznym kolejnego przebiegu.
+              body.push('## obiekt spoza pipeline\'u (inwentarz granicy)', '',
+                'Tych obiektow `terraform plan` NIE WIDZI i `apply` ich NIE USUNIE — nie ma ich w stanie.',
+                '', '```', czytaj('nieobjete.txt').slice(0, 30000), '```', '');
+            }
             await github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
               title: `drift: the live perimeter differs from git (${new Date().toISOString().slice(0,10)})`,
               labels: ['drift', 'security'],
-              body: [
-                'The nightly plan is not empty on an unchanged repository. Someone changed the perimeter',
-                'outside this pipeline, or an apply did not complete.',
-                '',
-                'Do not "fix" this by applying blindly: first find out WHO changed WHAT (audit logs),',
-                'then decide whether git or the live state is right.',
-                '', '```', body, '```',
-              ].join('\n'),
+              body: body.join('\n'),
             });

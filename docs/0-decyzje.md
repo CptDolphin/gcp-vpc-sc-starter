@@ -3230,3 +3230,96 @@ odczyt z instancji docelowej (§8.4). Symulator skraca do niego drogę, nie zast
 | słabsze oznaczenie PR-a dla trybu symulatora („jest wierniejszy niż fixture") | to jest dokładnie defekt, który DEC-43 zamykał: przebieg testowy nieodróżnialny od wniosku. „Wierniejszy" po miesiącu czyta się jako „prawdziwy", a różnicy nie widać w opisie pull requesta |
 | dopisać `sysapproval_approver` (druga kontrola po stronie approvalu), skoro mamy już symulator | symulator potwierdzi wyłącznie to, co sami w nim napiszemy — a kontrakt tej tabeli jest równie niezmierzony jak poprzedni. Bramka zbudowana na drugim niepotwierdzonym kontrakcie produkowałaby **zielony** werdykt o nieznanej wartości; kontrole dokładane bez pomiaru muszą produkować CZERWONY (uzasadnienie z DEC-43) |
 | oddzielny mechanizm oznaczania dla trybu symulatora | dwa warianty oznaczenia = dwa miejsca do zapomnienia. Wszystkie wartości powstają w JEDNYM kroku rozstrzygającym tryb, a warunek kroku werdyktu brzmi `!= 'normalny'`, więc trzeci tryb testowy jest objęty domyślnie |
+
+---
+
+## DEC-48 — Dryf to DWA pytania: obiekt zmieniony i obiekt DOPISANY; `terraform plan` odpowiada tylko na pierwsze
+
+**Decyzja.** `drift.yml` zadaje dwa pytania i składa oba werdykty w jedno zgłoszenie:
+
+1. **czy obiekt, który Terraform ZNA, zmienił się poza pipeline'em** — `terraform plan -detailed-exitcode`,
+   jak dotąd;
+2. **czy na granicy stoi obiekt, którego Terraform NIE ZNA** — `tools/dryf_nieobjete.py`, porównanie
+   INWENTARZA: żywa polityka i żywy perimetr kontra `planned_values` z `terraform show -json`.
+
+Kierunek porównania jest **jeden**: raportujemy wyłącznie nadmiar po stronie chmury (`żywe − planowane`).
+Brak po stronie chmury melduje plan jako `to add` i to jego robota — dublowanie dałoby dwa zgłoszenia na
+jeden objaw. Access levele i członkowie porównują się **po nazwach/zasobach**, reguły **po liczbie**.
+Nieczytelny wsad to **kod 1 i czerwony przebieg**, nigdy „zero różnic".
+
+**Dlaczego.** Wykrywacz oparty wyłącznie na planie jest ślepy na **dopisanie**, i nie jest to jego usterka,
+tylko konsekwencja dwóch świadomych decyzji z `terraform/`: szkielet perimetru musi nieść `ignore_changes`
+na sześciu listach (inaczej szkielet i zasoby granularne kasują sobie nawzajem zawartość przy każdym
+apply), a zasoby granularne powstają z `for_each` po deklaracji. Obiekt spoza deklaracji **nie ma
+instancji w stanie**, więc nie ma czego odświeżyć — i plan melduje `No changes`.
+
+Zmierzone na żywej granicy, jedna sesja, trzy przebiegi tego samego workflowa:
+
+- access level **zmieniony** poza pipeline'em (dopisany zakres do poziomu zadeklarowanego) → `plan` = kod 2,
+  krok zgłoszenia **wykonany**, Issue z dokładnym diffem. Detektor działa;
+- access level **utworzony** obok pipeline'u (nazwa nieznana konfiguracji) → `plan` = kod 0, `No changes`,
+  krok zgłoszenia **pominięty**. Przebieg zielony, obiekt stoi w polityce;
+- ten sam wsad co w punkcie pierwszym przy **rozbrojonym** warunku zgłoszenia → cisza. Detektor umie
+  zamilknąć, więc jego zapalenie coś znaczy.
+
+Trzecia obserwacja jest tu argumentem rozstrzygającym o WADZE: zmiana wprowadzona ręcznie prawie nigdy nie
+jest modyfikacją — jest dopisaniem. Reguła ingress „na chwilę", projekt dołożony do granicy, access level
+pod incydent. Wykrywacz ślepy na dopisanie był ślepy na **najczęstszy kształt obejścia procesu**, a przez
+osiem kolejnych nocy raportował to jako spokój.
+
+Pierwszy przebieg narzędzia na żywej polityce znalazł **cztery** access levele, których konfiguracja nie
+zna — artefakty równoległej pracy, nie hipotezę. Żaden z nich nie pojawił się nigdy w żadnym planie.
+
+**Reguły po liczbie, nie po treści** — to jest ograniczenie API, nie skrót. Reguła ingress/egress nie ma
+w ACM żadnego identyfikatora; porównanie po treści wymagałoby uruchomienia renderera profili i odtworzenia
+kształtu, jaki wysyła provider, czyli **drugiej implementacji tego samego**, rozjeżdżającej się po cichu
+przy każdej zmianie renderera. Licznik nie powie KTÓRA reguła doszła, ale odpowiada na pytanie mające
+znaczenie operacyjne — „czy ktoś dołożył regułę" — i nie kłamie w żadną stronę.
+
+**Co odrzucono i dlaczego.**
+
+| wariant | dlaczego nie |
+| --- | --- |
+| zdjąć `ignore_changes` ze szkieletu, żeby plan widział wszystko | szkielet i zasoby granularne biją się wtedy o te same listy: każdy apply usuwa to, co dodał poprzedni. Flapping granicy bezpieczeństwa jest gorszy od ślepoty na dopisek — i tak samo cichy |
+| odtworzyć deklarację z YAML-i zamiast czytać `planned_values` | drugi renderer obok tego w `terraform/`. Rozjazd między nimi dałby bramkę, która opisuje własny błąd, a nie granicę — dokładnie ten wariant odrzucono już przy weryfikacji po apply (DEC-45) |
+| oprzeć detektor na `resource_changes` z planu JSON | na czystym planie ta lista jest PUSTA (są tam wyłącznie różnice), więc każdy żywy obiekt wyszedłby na nadmiar. Bramka krzycząca zawsze zostanie wyciszona w tydzień. Asercja na tym kształcie wsadu stoi w selfteście |
+| zostawić to metryce `config_changed_outside_pipeline` z obserwatora | ta metryka odpowiada na INNE pytanie: liczy zapisy ACM tożsamością inną niż konto apply — **w całej organizacji**, bez wskazania obiektu. Zmierzone w oknie 35 minut: **93 zapisy, wszystkie tożsamością człowieka**, z czego cztery były przedmiotem pomiaru; metryka nie miała jak ich rozdzielić. Odpowiada „ktoś pisał ręcznie", nie „co stoi na granicy, czego nie ma w gicie". Dwa sygnały są komplementarne i oba zostają |
+| osobne Issue na każde z dwóch pytań | jeden incydent (ktoś dopisał regułę i przy okazji zmienił poziom) rozdzielony na dwa wątki. Zgłoszenie jest jedno, z sekcją na każdy detektor, który zapalił |
+| sprawdzać też TREŚĆ reguł i inne perimetry w polityce | pierwsze wymaga renderera (wyżej), drugie jest osobną dziurą z własnym właścicielem. Świadome pominięcia, wypisane w docstringu narzędzia, żeby zielony wynik nie znaczył więcej, niż znaczy |
+
+---
+
+## DEC-49 — Każdy kanał otwierający pull requesta mintuje token Appa — również ten, który ZDEJMUJE ochronę
+
+**Decyzja.** `expiry-sweep.yml` mintuje token instalacji GitHub Appa tak samo, jak kanał wejściowy (DEC-22),
+i przekazuje go do `create-pull-request` z tym samym fallbackiem na `github.token`. Krok dostaje też
+`add-paths: perimeter/projects.yaml`. Zbiór workflowów objętych bramką poświadczenia w selfteście jest
+**wyprowadzany z treści** — każdy plik wołający `peter-evans/create-pull-request` albo `gh pr create` —
+zamiast być wypisaną listą nazw.
+
+**Dlaczego.** Wyliczanka trzech nazw chroniła dokładnie tyle, ile ktoś pamiętał w dniu jej pisania, i przez
+to pomijała jedyny kanał, który otwiera pull requesta **zdejmujący ochronę z projektu**. Skutek zmierzony
+na pierwszym w historii przebiegu z realnie wygasłym członkiem: krok wyszukania zadziałał (wpis znaleziony,
+usunięty z pliku, commit powstał), gałąź `offboard/expired-<run_id>` została **wypchnięta** — i dopiero
+wtedy tworzenie pull requesta padło komunikatem `GitHub Actions is not permitted to create or approve pull
+requests`. Mechanizm wygasania kończył się **stanem połowicznym**: gałąź w repozytorium, żadnego pull
+requesta, żadnego zgłoszenia do właściciela.
+
+Nie wyszło to nigdy na jaw, bo do tego dnia żaden członek nie przekroczył `review_by`, więc krok był zawsze
+`skipped`, a przebieg zielony. To jest ta sama klasa defektu, co detektor dryfu ślepy na dopisek (DEC-48):
+**mechanizm, który nigdy nie zadziałał, jest nieodróżnialny od wyłączonego** — dopóki ktoś nie zbuduje mu
+wsadu.
+
+Ten sam przebieg pokazał drugi brak: commit offboardingowy niósł `expired.txt`, artefakt własnego kroku
+wyszukania, obok jedynej zmiany, którą miał nieść. `add-paths` zamknął to w kanale wejściowym po tym, jak
+wniosek onboardingowy przyjechał ze `stan/contract.json` i skompilowanym `.pyc` — i tego workflowa wtedy
+nie objął.
+
+**Co odrzucono i dlaczego.**
+
+| wariant | dlaczego nie |
+| --- | --- |
+| włączyć „Allow GitHub Actions to create and approve pull requests" | daje Actions również prawo ZATWIERDZANIA pull requestów, a PR otwarty `GITHUB_TOKEN`-em nie zbiera ŻADNEGO checka: przebiegi `pull_request` powstają, ale stoją `action_required` z `jobs: []`, a PR jest `MERGEABLE`. Pull request zdejmujący ochronę poszedłby do scalenia bez ani jednej bramki. Przełącznik zamienia kanał niedziałający na omijający bramki |
+| dopisać `expiry-sweep.yml` do listy trzech nazw w selfteście | zamyka ten przypadek i nie zamyka klasy. Następny kanał otwierający pull requesta znów zależałby od czyjejś pamięci — a to jest dokładnie ten tryb awarii, który tu naprawiamy |
+| trzymać gotowy token instalacji w sekrecie | token instalacji wygasa po GODZINIE: sekret działałby do końca dnia i milkł nazajutrz, bez zmiany w kodzie, która by to tłumaczyła. Sekret trzyma klucz prywatny, token powstaje na przebieg (DEC-22) |
+| zamiast pull requesta usuwać członka od razu | usunięcie projektu z konfiguracji egzekwowanej **zdejmuje z niego ochronę**. To jest zmiana granicy i idzie przez te same bramki, co dodanie — pull request jest PROPOZYCJĄ, a okno przeglądu należy do właściciela |
