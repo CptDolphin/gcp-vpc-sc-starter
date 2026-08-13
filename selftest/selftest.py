@@ -3647,6 +3647,17 @@ def test_codeowners_rozdzielenie() -> None:
     check("guard artefaktow odrzuca nieodczytany indeks (fail-closed)",
           "nie odczytal indeksu gita" in akcja, akcja[-400:])
 
+    # Guard kotwic runbooka — z tego samego powodu, co dwa wyzej, plus jeden wlasny. Selftest sprawdza
+    # kotwice po stronie STARTERA; polityki alertow i `docs/7-alerty.md` zyja takze we wdrozeniu i mozna
+    # je tam zmienic BEZPOSREDNIO. Guard w `bramki-tresci` jest jedyna asercja, ktora to widzi — a jedzie
+    # na obu torach, wiec takze przy pushu na galaz domyslna.
+    check("guard kotwic runbooka jedzie w bramkach tresci (oba tory)",
+          "guard - kotwice runbooka alertow istnieja" in akcja, akcja[-400:])
+    # Zerowe pokrycie MUSI byc czerwone: brak uzytych kotwic znaczy albo utrate `runbook_url` w alertach,
+    # albo zmiane wzorca ich sklejania — czyli guard, ktory przestal cokolwiek widziec i o tym milczy.
+    check("guard kotwic odrzuca ZEROWE pokrycie (nie myli pustki z czystoscia)",
+          "zaden alert nie wskazuje kotwicy runbooka" in akcja, akcja[-400:])
+
 
 # --------------------------------------------------------------------- kompletnosc rejestru decyzji
 def test_kompletnosc_decyzji() -> None:

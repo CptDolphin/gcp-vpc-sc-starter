@@ -40,6 +40,19 @@ on:
       # wyłącznie definicję bramki nie uruchamiałby jej ani razu, czyli jedyny plik, którego regresja
       # rozbraja cały tor, byłby jedynym bez checku. Ta sama pomyłka co przy `iam-bootstrap/**` wyżej.
       - ".github/actions/**"
+      # `docs/**` i `.starter-sync` — ta sama pomylka co przy `iam-bootstrap/**` wyzej, popelniona po raz
+      # PIATY, i wykryta tym samym komunikatem: „no checks reported on the branch" (pull request #103,
+      # synchronizacja procedury offboardingu). Sciezki dopisywano dotad pojedynczo, po jednej na incydent.
+      #
+      # DLACZEGO AKURAT TE DWIE NIE SA KOSMETYKA:
+      #   * `.starter-sync` jest JEDYNYM wejsciem bramki `starter-drift`. Bez tej sciezki wskaznik da sie
+      #     podniesc BEZ ANI JEDNEGO zielonego checku, a bramka odczyta to jako „zsynchronizowane" — czyli
+      #     dokladnie sytuacja, przed ktora ostrzega `vpc-sc-starter-sync.md` §5;
+      #   * `docs/` trzyma rejestr decyzji (`0-decyzje.md`, bramka `decisions_check.py` w obu trybach)
+      #     ORAZ kotwice `<a id=…>`, na ktore celuja `runbook_url` polityk alertow. Martwa kotwica znaczy,
+      #     ze alert CRITICAL o 3:00 daje spis tresci zamiast procedury.
+      - "docs/**"
+      - ".starter-sync"
   workflow_dispatch:
 
 permissions:
