@@ -9,7 +9,7 @@
 #   2. custom rola na organizacji — WĄSKA: update perimetru, BEZ create/delete
 #   3. przypisania ról (member, nie binding — patrz komentarz niżej)
 #   4. pula WIF + provider z attribute_condition (keyless z GitHub Actions)
-#   5. IAM Deny na operacjach kasujących — twardy zakaz ponad rolami
+#   5. IAM Deny na operacjach zmieniających BYT granicy (kasowanie + tworzenie) — zakaz ponad rolami
 
 # --- 1. konta serwisowe ---------------------------------------------------------------------------
 
@@ -74,12 +74,41 @@ resource "google_organization_iam_custom_role" "perimeter_writer" {
     "accesscontextmanager.accessLevels.list",
     "accesscontextmanager.accessLevels.create",
     "accesscontextmanager.accessLevels.update",
+    # `delete` NA POZIOMACH JEST TU OD 2026-08-13 (DEC-37) — i to jest ODWRÓCENIE wcześniejszej decyzji,
+    # więc należy mu się powód, a nie sam wpis.
+    #
+    # Poprzedni komentarz brzmiał „usunięcie poziomu odcina wszystkich, którzy go używają". To zdanie jest
+    # prawdziwe i JEDNOCZEŚNIE nie opisuje niczego, czego brak `delete` broni — bo tę własność wymuszają
+    # dziś dwie inne warstwy, obie węższe: bramka OPA (DEC-33) odrzuca plan kasujący poziom, który PO
+    # ZMIANIE nadal jest referowany, a samo API odmawia takiego kasowania komunikatem `you must first
+    # remove the reference`. Rola nie musi więc powtarzać zakazu, który stoi piętro niżej.
+    #
+    # ROZSTRZYGAJĄCA ASYMETRIA: ta sama rola ma `accessLevels.update`. Przejęta tożsamość, która przepisze
+    # `corp_network` na `0.0.0.0/0`, POSZERZA granicę dla KAŻDEJ reguły referującej ten poziom — cicho,
+    # bez zmiany kształtu perimetru i bez zniknięcia obiektu. `delete` jest od tego SŁABSZE: API nie pozwoli
+    # skasować poziomu używanego, a poziom nieużywany nie autoryzuje nikogo. Odmawianie `delete` przy
+    # nadanym `update` nie kupuje bezpieczeństwa, kupuje wyłącznie stan CZĘŚCIOWO ZASTOSOWANY na końcu
+    # każdego offboardingu dywizji, która przyszła z własnym poziomem (zmierzone: apply padał na OSTATNIM
+    # kroku, po tym jak członek i reguła już zniknęły z granicy).
+    #
+    # KOSZT BRAKU: limit access leveli jest na ORGANIZACJĘ (500), nie na politykę. Katalog, który może tylko
+    # rosnąć, jest wyciekiem pojemności org-plane, a nie bałaganem w nazewnictwie.
+    #
+    # RESIDUAL, ŚWIADOMY: zakres ACM jest org-level (wymuszony przez Google), więc to uprawnienie sięga
+    # każdego NIEREFEROWANEGO poziomu w polityce organizacji — także cudzego. Warstwa IAM Deny go NIE
+    # obejmuje (zmierzone Policy Troubleshooter v3: `accessLevels.delete` → allow NOT_GRANTED,
+    # deny NOT_DENIED — jedna warstwa, nie dwie). Poziomy tego repozytorium są odtwarzalne z `perimeter/
+    # access-levels/` jednym apply, bo `create` rola ma; cudze — nie są.
+    "accesscontextmanager.accessLevels.delete",
   ]
 
   # ŚWIADOMIE POMINIĘTE (nie dopisuj bez osobnej decyzji):
-  #   accesscontextmanager.servicePerimeters.create   — perimetr już istnieje
+  #   accesscontextmanager.servicePerimeters.create   — patrz DEC-37: to NIE jest „perimetr już istnieje",
+  #                                                     tylko „granicy nie tworzy tożsamość automatyczna".
+  #                                                     Odtworzenie perimetru po utracie ma UDOKUMENTOWANY
+  #                                                     krok człowieka (docs/3-runbook-…, część D) i jest
+  #                                                     dodatkowo zabronione w warstwie Deny niżej.
   #   accesscontextmanager.servicePerimeters.delete   — kasowanie to ścieżka break-glass człowieka
-  #   accesscontextmanager.accessLevels.delete        — usunięcie poziomu odcina wszystkich, którzy go używają
   #   accesscontextmanager.policies.*                 — polityka org-level nie jest naszym obiektem
 }
 
@@ -538,6 +567,13 @@ resource "google_service_account_iam_member" "watch_wif" {
 # DLACZEGO mimo wąskiej custom roli: role bywają podmieniane w pośpiechu („dajmy na chwilę policyEditor,
 # żeby odblokować release"). Deny jest oceniane PRZED rolami i takiej podmiany nie da się nim obejść.
 #
+# CO TA WARSTWA POWTARZA ZA ROLĄ, A CO NIE — i dlaczego to nie jest redundancja (DEC-37). Zakazy tutaj mają
+# pokrywać zdania o BYCIE granicy, których pominięcie w roli nie utrzyma po pierwszej eskalacji uprawnień:
+# „CI nie kasuje perimetru" i „CI nie tworzy perimetru". Świadomie NIE MA tu `accessLevels.delete` ani
+# `servicePerimeters.update` — te są rutyną pipeline'u i wpisanie ich zablokowałoby jedyną drogę wdrożenia.
+# Warstwa Deny jest więc CIENKA celowo: im więcej w niej pozycji, tym częściej trzeba nadać
+# `roles/iam.denyAdmin`, żeby cokolwiek zmienić — a każde takie nadanie jest samo w sobie ryzykiem.
+#
 # TA WARSTWA MA WŁASNY TRYB AWARII, KTÓRY NIE RZUCA BŁĘDU: jest niewidoczna dla właściciela tego stacku.
 # `iam.denypolicies.*` nie należy do żadnej z ról org-admina, a API odpowiada na brak uprawnienia tym
 # samym, czym na brak zasobu — `403 denypolicies.get denied` pada zarówno wtedy, gdy polityki nie ma, jak
@@ -608,9 +644,13 @@ resource "google_iam_deny_policy" "vpcsc_guardrail" {
 
   provider = google-beta
 
-  parent       = urlencode("cloudresourcemanager.googleapis.com/organizations/${var.org_id}")
+  parent = urlencode("cloudresourcemanager.googleapis.com/organizations/${var.org_id}")
+  # IDENTYFIKATOR ZOSTAJE `vpcsc-ci-no-destroy`, mimo że od DEC-37 polityka zabrania także TWORZENIA.
+  # `name` jest w tym API niezmienne — zmiana nazwy to destroy+create, czyli okno bez guardrailu, i to
+  # wykonane rolą `roles/iam.denyAdmin`, którą świadomie nadaje się na chwilę. Nazwa, która lekko kłamie,
+  # jest tańsza niż okno bez ochrony; rozjazd nazwy z treścią nadrabia `display_name` i ten komentarz.
   name         = local.deny_policy_name
-  display_name = "VPC-SC CI — zakaz kasowania perimetru i polityki"
+  display_name = "VPC-SC CI — zakaz kasowania i TWORZENIA perimetru oraz kasowania polityki"
 
   rules {
     deny_rule {
@@ -623,6 +663,18 @@ resource "google_iam_deny_policy" "vpcsc_guardrail" {
       denied_permissions = [
         "accesscontextmanager.googleapis.com/servicePerimeters.delete",
         "accesscontextmanager.googleapis.com/policies.delete",
+        # `servicePerimeters.create` DOŁOŻONE 2026-08-13 (DEC-37) — nie dlatego, że coś zaczęło je nadawać,
+        # tylko dlatego, że NIC go nie zabraniało poza pominięciem w roli. Zmierzone Policy Troubleshooter v3
+        # przed tą zmianą: allow ALLOW_ACCESS_STATE_NOT_GRANTED + deny DENY_ACCESS_STATE_NOT_DENIED — czyli
+        # JEDNA warstwa. Cała racja bytu Deny to przeżycie podmiany roli w pośpiechu („dajmy na chwilę
+        # policyEditor, żeby odblokować release"); zdanie „granicy nie tworzy tożsamość automatyczna" musi
+        # więc stać w warstwie, która taką podmianę przeżywa, a nie wyłącznie w liście uprawnień roli.
+        #
+        # CO TO ŁAMIE, GDYBY KIEDYŚ MIAŁO ŁAMAĆ: odtworzenie perimetru pipeline'em. To jest ŚWIADOMY skutek,
+        # nie efekt uboczny — odzysk ma krok człowieka opisany w docs/3-runbook-…, część D (komenda, czas,
+        # tożsamość). Deny obejmuje WYŁĄCZNIE dwa konta CI, więc człowiek z org-adminem nie jest tym objęty
+        # i droga odtworzeniowa stoi otworem.
+        "accesscontextmanager.googleapis.com/servicePerimeters.create",
       ]
     }
   }

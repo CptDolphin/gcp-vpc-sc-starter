@@ -699,10 +699,23 @@ def test_iam_bootstrap() -> None:
     declared_bindings = re.findall(r'^resource\s+"(google_\w*_iam_binding)"', body, re.M)
     check("iam-bootstrap: zero zasobow *_iam_binding (tylko _member)",
           not declared_bindings, str(declared_bindings))
-    # Custom rola nie może nieść operacji, których świadomie nie prosimy.
-    for forbidden in ("servicePerimeters.create", "servicePerimeters.delete", "accessLevels.delete"):
+    # Custom rola nie może nieść operacji, których świadomie nie prosimy — czyli tych, które zmieniają BYT
+    # granicy. `accessLevels.delete` WYPADŁO z tej listy 2026-08-13 (DEC-37) i ma teraz asercję odwrotną
+    # niżej: bramka pilnuje DECYZJI, a nie ogólnikowego „żadnych delete".
+    for forbidden in ("servicePerimeters.create", "servicePerimeters.delete"):
         in_perms = f'"accesscontextmanager.{forbidden}",' in body
         check(f"iam-bootstrap: custom rola BEZ {forbidden}", not in_perms)
+    # KIERUNEK ODWROTNY, i to jest cała wartość tej asercji: brak `accessLevels.delete` NIE objawia się
+    # czerwonym planem ani czerwonym apply na PR-ze — objawia się `403` w POŁOWIE apply offboardingu, czyli
+    # stanem częściowo zastosowanym na żywej granicy (zmierzone #2031: członek i reguła już usunięte,
+    # poziom nie). Bramka „nie dopuść delete" złapałaby przypadkowe poszerzenie; ta łapie przypadkowe
+    # ZAWĘŻENIE — sprzątanie listy uprawnień „bo delete brzmi groźnie" cofnęłoby DEC-37 bez śladu.
+    check("iam-bootstrap: custom rola MA accessLevels.delete (DEC-37 — offboarding kończy jednym apply)",
+          '"accesscontextmanager.accessLevels.delete",' in body)
+    # Warstwa Deny ma nieść zakaz TWORZENIA perimetru. Przed DEC-37 blokowało go wyłącznie pominięcie
+    # w roli — jedna warstwa, znikająca przy pierwszym „dajmy na chwilę policyEditor".
+    check("iam-bootstrap: deny obejmuje servicePerimeters.create (DEC-37)",
+          '"accesscontextmanager.googleapis.com/servicePerimeters.create",' in body)
     # Guardrail WIF: warunek musi pinować repozytorium, nigdy `true`.
     check("iam-bootstrap: attribute_condition pinuje repozytorium",
           "assertion.repository ==" in body and 'attribute_condition = "true"' not in body)
