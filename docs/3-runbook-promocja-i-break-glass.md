@@ -170,11 +170,31 @@ gh workflow run apply.yml -f promocje="<dywizja>-<project_id>" && gh run watch
 gh workflow run boundary-probe.yml -f project=<PROJEKT_CZLONKA> -f expect=blocked && gh run watch
 ```
 
-   Zielony przelot znaczy komplet czterech rzeczy naraz: chronione wywołanie bez reguły zostało odmówione
-   **z powodem VPC-SC** (nie z braku roli, nie z wyłączonego API), ruch dozwolony regułą ingress NADAL
-   przechodzi, usługa spoza `restricted_services` NADAL działa (czyli projekt nie jest po prostu zepsuty),
-   a odmowa ma niezależny drugi dowód we wpisie audytowym. Czerwony przelot mówi, KTÓRA z tych czterech
-   nie zaszła.
+   Zielony przelot znaczy komplet **sześciu** rzeczy naraz: granica ISTNIEJE (odczytana z API, nie z gita),
+   sondowany projekt jest w **konfiguracji egzekwowanej** (asercja po numerze, nie wypis do przeczytania
+   okiem), chronione wywołanie bez reguły zostało odmówione **z powodem VPC-SC** (nie z braku roli, nie
+   z wyłączonego API), ruch dozwolony regułą ingress NADAL przechodzi, usługa spoza `restricted_services`
+   NADAL działa (czyli projekt nie jest po prostu zepsuty), a odmowa ma niezależny drugi dowód we wpisie
+   audytowym. Czerwony przelot mówi, KTÓRA z tych sześciu nie zaszła.
+
+   **Trzy werdykty, nie dwa** (DEC-37). Tytuł adnotacji rozstrzyga, co się stało, bez otwierania logu:
+
+   | tytuł adnotacji | co znaczy | kod wyjścia |
+   |---|---|---|
+   | *(brak adnotacji)* | granica istnieje i zachowuje się zgodnie z oczekiwaniem | 0 |
+   | `GRANICY NIE MA` | perimetr o tej nazwie nie istnieje — **nie ma czego przypisać** żadnej odmowie | 1 |
+   | `PROJEKT NIE JEST W KONFIGURACJI EGZEKWOWANEJ` | granica istnieje, ale ten projekt jest poza `status` | 1 |
+   | `GRANICA ZACHOWUJE SIE INACZEJ NIZ OCZEKIWANO` | sondy nie zgadzają się z modelem `expect` | 1 |
+   | `WERDYKT NIEROZSTRZYGNIETY (nie zmierzono stanu granicy)` | `403`/błąd odczytu — **nie wiadomo**, nigdy „nie ma" | 2 |
+
+   Sonda ma własną kontrolę anty-tautologiczną i wolno ją uruchomić kiedykolwiek — nic nie mutuje:
+
+```bash
+# „granicy nie ma" — nazwa perimetru, którego nie ma; ma dać GRANICY NIE MA, a nie krok, który padł
+gh workflow run boundary-probe.yml -f project=<PROJEKT_CZLONKA> -f expect=blocked -f perimetr=nie-ma-takiego
+# „nie wiadomo" — numer polityki bez dostępu; ma dać WERDYKT NIEROZSTRZYGNIETY, a nie „granicy nie ma"
+gh workflow run boundary-probe.yml -f project=<PROJEKT_CZLONKA> -f expect=blocked -f polityka=999999999999
+```
 
    Reszta pomiaru:
 
@@ -196,6 +216,99 @@ zablokowana. Ten sam filtr siedział wcześniej w metryce alertu, w sondzie i w 
 
 Puste drugie zapytanie przez pierwszą godzinę = ruch dywizji działa. Niepuste = masz incydent, przejdź do
 sekcji B, zanim ktoś zadzwoni.
+
+### Pomiar EGRESSU — osobny tor, i jedyny, który wymaga maszyny
+
+`boundary-probe.yml` woła z runnera CI, który jest spoza granicy **z definicji**, więc mierzy wyłącznie
+INGRESS. Reguła egress ocenia wywołanie, którego ŹRÓDŁO jest wewnątrz, a **„wewnątrz" jest własnością
+SIECI, nie tożsamości**: konto serwisowe utworzone w projekcie członkowskim i impersonowane z zewnątrz
+dostaje `ingressViolations` / `NO_MATCHING_ACCESS_LEVEL` z `callerIp: "private"` — jest liczone jako obce.
+Wariant „pomiar egressu bez maszyny" nie istnieje i nie należy go szukać.
+
+**Drugi wynik, ważny przy czytaniu `describe`:** pusta lista reguł egress (`status.egressPolicies: []`)
+znaczy **„odmawiaj każdego wyjścia"**, a nie „egress nieegzekwowany". Reguła egress jest WYJĄTKIEM od
+domyślnej odmowy. Dokument, który z `egress: 0` wnioskuje „nic nie chroni", mówi nieprawdę o własnym
+systemie.
+
+**Zanim postawisz maszynę — poczekaj na sieć.** Świeża sieć VPC w projekcie będącym członkiem konfiguracji
+egzekwowanej jest przez **kilka minut poza granicą**; jednostką propagacji jest SIEĆ, nie maszyna i nie
+podsieć. W tym oknie sonda zobaczy stan `OKNO-SWIEZEJ-SIECI` (własny projekt ODMAWIA, wyjścia
+PRZECHODZĄ) — stan **gorszy** niż „poza granicą", bo cała ścieżka eksfiltracji jest przejezdna. Odczekaj
+**≥ 10 min** od utworzenia sieci i POTWIERDŹ przynależność przelotem `sonda-oczekiwanie=obserwacja`, zanim
+uznasz pomiar za ważny.
+
+```bash
+# 1. sieć + podsieć w projekcie CZŁONKOWSKIM (PGA włączone; adresu zewnętrznego NIE ma)
+gcloud compute networks create sonda-egress --project=<CZLONEK> --subnet-mode=custom
+gcloud compute networks subnets create sonda-egress-ew1 --project=<CZLONEK> \
+  --network=sonda-egress --region=europe-west1 --range=10.10.0.0/24 --enable-private-ip-google-access
+
+# 2. maszyna z sondą w metadanych; wynik idzie na PORT SZEREGOWY (`compute` nie jest w restricted_services,
+#    więc serial czyta się z zewnątrz nawet przy w pełni egzekwowanej granicy — pomiar nie zmienia tego,
+#    co mierzy: bez reguły firewalla, bez klucza SSH, bez wyjątku ingress dla operatora)
+gcloud compute instances create sonda-egress --project=<CZLONEK> --zone=europe-west1-b \
+  --machine-type=e2-micro --subnet=sonda-egress-ew1 --no-address \
+  --image-family=debian-12 --image-project=debian-cloud \
+  --boot-disk-size=10GB --boot-disk-type=pd-standard \
+  --service-account=<SONDA_SA> --scopes=https://www.googleapis.com/auth/cloud-platform \
+  --metadata-from-file=startup-script=tools/sonda_egress_startup.sh,sonda-py=tools/sonda_egress_wewnetrzna.py \
+  --metadata=sonda-projekt-wewnatrz=<CZLONEK>,sonda-projekt-cel=<PROJEKT_SPOZA_GRANICY>,\
+sonda-kubelek-cel=<BUCKET_W_CELU>,sonda-kubelek-obcy=<BUCKET_SPOZA_REGULY>,\
+sonda-oczekiwanie=wewnatrz-zamkniete,sonda-rundy=6,sonda-odstep=10,\
+sonda-perimetr=accessPolicies/<ID_POLITYKI>/servicePerimeters/<NAZWA>
+
+# 3. dowód
+gcloud compute instances get-serial-port-output sonda-egress --project=<CZLONEK> \
+  --zone=europe-west1-b | grep '@@SONDA'
+```
+
+**Trzy werdykty, tak samo jak w sondzie ingressu** — ostatnia linia `@@SONDA-WERDYKT` niesie `exit=`:
+
+| `exit` | werdykt | co znaczy |
+|---|---|---|
+| 0 | `ZGODNE Z OCZEKIWANIEM` | ruch zachował się dokładnie tak, jak mówi model `sonda-oczekiwanie` |
+| 1 | `NIEZGODNE Z OCZEKIWANIEM` | granica zachowuje się inaczej — w tym stan `GRANICA-NIE-DZIALA`, czyli **wszystko przeszło** |
+| 2 | `NIE-ZMIERZONO` | brak roli, wyłączone API, błąd sieci lub brak tokenu — **nie wiadomo**, czy granica działa |
+
+**Macierz — po uzbrojeniu reguły ma się przełączyć DOKŁADNIE JEDNA komórka.** Każda inna zmiana znaczy,
+że zmierzyliśmy co innego niż regułę. Trzy dolne wiersze są kontrolą anty-tautologiczną; kolumna
+`poza-granica` jest kontrolą dla samej sondy — uruchom ją na maszynie w projekcie **spoza** perimetru
+i sprawdź, że sonda mówi „granica nie działa", zamiast wypisywać serię `PRZESZŁO`.
+
+| sonda | co izoluje | `wewnatrz-zamkniete` | `wewnatrz-otwarte` | `poza-granica` |
+|---|---|---|---|---|
+| `wewnatrz` | przynależność: wnętrze → wnętrze | PRZESZŁO | PRZESZŁO | PRZESZŁO |
+| `poza-uslugami` | przynależność: usługa spoza `vpcAccessibleServices` | ODMOWA | ODMOWA | PRZESZŁO |
+| `egress-cel-metoda` | metoda **w** regule, cel **w** regule | ODMOWA | **PRZESZŁO** | PRZESZŁO |
+| `egress-cel-inna` | metoda **spoza** reguły, ten sam cel | ODMOWA | ODMOWA | PRZESZŁO |
+| `izolacja-cel` | metoda w regule, **cel spoza** reguły | ODMOWA | ODMOWA | PRZESZŁO |
+
+`poza-uslugami` celuje we **własny** projekt i nie zależy od żadnej reguły — mierzy wyłącznie to, czy
+wołający jest przypisany do sieci wewnątrz granicy. Odmowa `SERVICE_NOT_ALLOWED_FROM_VPC` jest tu
+**oczekiwana**: przy `vpcAccessibleServices.enableRestriction: true` z wnętrza nie działa żadna usługa
+spoza `allowedServices`. Kontrola negatywna ingressu („usługa spoza `restricted_services` ma nadal
+działać") przeniesiona na egress świeciłaby na czerwono przy poprawnie działającej granicy.
+
+**Odczyt ACM z wnętrza się nie uda — i to też jest pomiar.** `sonda-perimetr` każe sondzie zapytać ACM
+o stan granicy; z wnętrza dostanie `SERVICE_NOT_ALLOWED_FROM_VPC` (`stan=NIEODCZYTYWALNY-Z-WNETRZA`),
+bo ACM nie należy do `allowedServices` — i **ta odmowa jest dowodem przynależności**. Z maszyny poza
+granicą ten sam odczyt zwraca `stan=ISTNIEJE` albo `stan=BRAK` (`404`, czyli **granicy nie ma**), a `403`
+to zawsze `stan=NIE-WIADOMO`, nigdy „nie ma".
+
+**Sprzątanie — natychmiast po pomiarze, nie „przy okazji".** Koszt przelotu to rząd eurocentów, ale
+zostawiona maszyna i włączone `compute.googleapis.com` poszerzają powierzchnię projektu, który ma być pusty:
+
+```bash
+gcloud compute instances delete sonda-egress --project=<CZLONEK> --zone=europe-west1-b --quiet
+gcloud compute networks subnets delete sonda-egress-ew1 --project=<CZLONEK> --region=europe-west1 --quiet
+gcloud compute networks delete sonda-egress --project=<CZLONEK> --quiet
+gcloud services disable compute.googleapis.com --project=<CZLONEK> --force --quiet
+```
+
+**Przy powtarzaniu przelotu:** `gcloud compute instances reset` uruchamia startup-script od nowa, ale DYSK
+ZOSTAJE — wszystko, co skrypt dopisał w poprzednim rozruchu, nadal tam jest. Metadane zmieniaj przez
+`gcloud compute instances add-metadata`, a stan ustawiany przez skrypt kasuj bezwarunkowo i dokładaj
+warunkowo, nigdy odwrotnie.
 
 ### Czego NIE robić: `perimeters dry-run enforce`
 
