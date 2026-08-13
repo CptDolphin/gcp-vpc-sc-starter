@@ -16,8 +16,11 @@ CO MIERZY (kazda liczba = jeden objaw z `docs/7-alerty.md`):
   violations_enforced     ile odmow EGZEKWOWANYCH w oknie — jedyna liczba mowiaca „ktos jest blokowany TERAZ”.
   violations_dry_run      ile naruszen dry-run w oknie (zapowiedz problemu po promocji, nie problem).
   config_changed_outside_pipeline  ile zmian ACM tozsamoscia INNA niz konto apply.
+  network_inserts_enforced  ile sieci VPC powstalo w czlonkach EGZEKWOWANYCH — kontekst, BEZ alertu.
+  network_window_workload   do ilu z nich wstawiono maszyne, ZANIM siec zdazyla dojrzec (DEC-32).
 
-TRZY OSTATNIE DOLOZONO W #2000 I NIE JEST TO ROZSZERZENIE ZAKRESU, TYLKO NAPRAWA. Stały wczesniej na
+LICZBY OPISUJACE GRANICE (naruszenia, zmiany ACM, okno swiezej sieci) JADA WIDOKIEM SINKA, NIE METRYKA
+LOG-BASED, I NIE JEST TO ROZSZERZENIE ZAKRESU, TYLKO NAPRAWA (#2000). Stały wczesniej na
 metrykach log-based, ktore mialy ZERO serii przy realnych zdarzeniach: metryka log-based liczy wylacznie
 wpisy PRZYJETE przez Log Router swojego projektu, a te wpisy powstaja w projekcie czlonka albo w logu
 organizacji i docieraja do nas SINKIEM, czyli do magazynu — nie na wejscie. Uzasadnienie z para kontrolna
@@ -56,7 +59,25 @@ METRYKI = {
     "naruszenia_enforced": "custom.googleapis.com/vpcsc/violations_enforced",
     "naruszenia_dry_run": "custom.googleapis.com/vpcsc/violations_dry_run",
     "zmiany_poza_pipelinem": "custom.googleapis.com/vpcsc/config_changed_outside_pipeline",
+    # DWIE PONIZSZE OPISUJA OKNO, W KTORYM GRANICA NIE CHRONI I NIE ZOSTAWIA SLADU (DEC-32).
+    # `sieci_egzekwowane` jest KONTEKSTEM i NIE MA polityki alertu — utworzenie sieci w projekcie
+    # czlonkowskim jest czynnoscia legalna i czesta, wiec alert na nia sam jest szumem, a szum sie wycisza.
+    # Alert stoi na `sieci_z_obciazeniem`: sieci, do ktorej wstawiono maszyne, ZANIM zdazyla dojrzec.
+    "sieci_egzekwowane": "custom.googleapis.com/vpcsc/network_inserts_enforced",
+    "sieci_z_obciazeniem": "custom.googleapis.com/vpcsc/network_window_workload",
 }
+
+# Zdarzenia sterujace Compute, z ktorych sklada sie okno. Oba sa Admin Activity — zawsze wlaczone
+# i niekonfigurowalne, wiec nie da sie ich wylaczyc po stronie projektu czlonkowskiego.
+COMPUTE_SIEC = "v1.compute.networks.insert"
+COMPUTE_MASZYNA = "v1.compute.instances.insert"
+
+# Domyslne okno dojrzewania sieci. Gorna OBSERWACJA z pomiaru to 5 m 18 s (3 przeloty: 5 m 18 s / 3 m 53 s
+# / 4 m 41 s, rozrzut 85 s), a propagacja jest NIEDETERMINISTYCZNA i migocze — DEC-32 bierze wiec zapas
+# do 10 minut i tego samego progu uzywa procedura („twórz siec przed obciazeniem, zostaw na >= 10 min").
+# Detektor MUSI uzywac tej samej liczby co procedura: mniejsza oskarzalaby o zlamanie zasady kogos, kto ja
+# stosowal, a wieksza zglaszalaby jako incydent zachowanie zgodne z runbookiem.
+OKNO_DOJRZEWANIA_S = 600
 
 # Metody ACM, ktore ZMIENIAJA granice. Odczyty (`Get*`, `List*`) sa szumem: konto planu czyta granice przy
 # kazdym pull requescie, wiec bez tego wykluczenia metryka „ktos zmienil granice” rosla by przy kazdym PR-ze.
@@ -329,6 +350,167 @@ def policz_zmiany_konfiguracji(wpisy: list[dict], konto_apply: str) -> int:
     return ile
 
 
+def _epoch(znacznik: str | None) -> float | None:
+    """`2026-08-12T18:38:16.5Z` -> epoch. None, gdy pola nie ma albo ma nieznany ksztalt."""
+    if not znacznik:
+        return None
+    try:
+        return datetime.datetime.fromisoformat(str(znacznik).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def projekt_wpisu(wpis: dict) -> str:
+    """ID projektu, w ktorym powstalo zdarzenie. Dwa zrodla, bo zadne nie jest gwarantowane osobno.
+
+    `resource.labels.project_id` jest normalna droga. `logName` (`projects/<ID>/logs/...`) jest zapasem —
+    kazdy wpis go ma, bo to on decyduje, gdzie wpis lezy. Zwracamy ID, nie numer: wpis audytowy Compute
+    numeru projektu nie niesie, a `status.resources` perimetru operuje numerami — przeklada je
+    `projekty_egzekwowane`, korzystajac z deklaracji jako SLOWNIKA numer->ID.
+    """
+    pid = ((wpis.get("resource") or {}).get("labels") or {}).get("project_id")
+    if pid:
+        return str(pid)
+    nazwa = str(wpis.get("logName") or "")
+    if nazwa.startswith("projects/"):
+        return nazwa.split("/")[1]
+    return ""
+
+
+def projekty_egzekwowane(perimetr: dict, projects_doc: dict) -> tuple[set[str], list[str]]:
+    """({ID projektow w konfiguracji EGZEKWOWANEJ}, [numery, ktorych nie da sie przelozyc]).
+
+    ZRODLEM PRAWDY JEST ZYWA GRANICA (`status.resources`), a nie `stage` w deklaracji — z tego samego
+    powodu, dla ktorego budzet liczy sie z API: deklaracja opisuje INTENCJE, a okno bez ochrony otwiera
+    sie w tym, co jest w granicy NAPRAWDE. Czlonek, ktorego apply jeszcze nie wniosl do `status`, nie ma
+    okna; czlonek dopisany do granicy z reki — ma, i wlasnie jego alert musi zobaczyc.
+
+    Deklaracja wystepuje tu WYLACZNIE jako slownik numer->ID. Numer bez wpisu w deklaracji jest sam
+    w sobie objawem (ktos jest w granicy, a nie ma go w Gicie) — ma juz swoj alert (dryf, rozjazd budzetu),
+    wiec tutaj tylko go RAPORTUJEMY, zamiast po cichu pomijac albo udawac, ze go rozpoznajemy.
+    """
+    numery = set()
+    for zasob in ((perimetr.get("status") or {}).get("resources") or []):
+        numer = str(zasob).split("/")[-1]
+        if numer:
+            numery.add(numer)
+    slownik = {str(m.get("project_number")): str(m.get("project_id"))
+               for m in (projects_doc.get("members") or []) if m.get("project_number")}
+    identyfikatory = {slownik[n] for n in numery if n in slownik}
+    return identyfikatory, sorted(n for n in numery if n not in slownik)
+
+
+def _siec_z_referencji(ref: str) -> str:
+    """`.../projects/p/global/networks/w22a` -> `w22a`. Puste, gdy referencja nie ma tego ksztaltu."""
+    tekst = str(ref or "")
+    znacznik = "/networks/"
+    return tekst.rsplit(znacznik, 1)[-1] if znacznik in tekst else ""
+
+
+def scal_operacje(wpisy: list[dict], metoda: str) -> list[dict]:
+    """Jedno ZDARZENIE = jeden wynik, z NAJWCZESNIEJSZYM znacznikiem czasu.
+
+    PULAPKA, KTORA PODWAJA KAZDY LICZNIK ZBUDOWANY NA AUDIT-LOGU COMPUTE: operacja dlugotrwala zostawia
+    DWA wpisy o tej samej `resourceName` — jeden przy przyjeciu zadania (`operation.first`) i jeden przy
+    zakonczeniu (`operation.last`). Licznik bez scalania meldowalby dwie sieci tam, gdzie powstala jedna,
+    a przy alercie z progiem „> 0" bylby to blad niewidoczny (i tak strzela), az do chwili, gdy ktos
+    zacznie czytac liczby.
+
+    Bierzemy NAJWCZESNIEJSZY znacznik, bo zero czasu okna to moment utworzenia sieci — od niego liczy sie
+    dojrzewanie. Wpis z niezerowym `status.code` (operacja odrzucona) WYRZUCA cale zdarzenie: sieci, ktora
+    nie powstala, nie ma jak byc poza granica.
+    """
+    zebrane: dict[str, dict] = {}
+    odrzucone: set[str] = set()
+    for w in wpisy:
+        pp = w.get("protoPayload") or {}
+        if (pp.get("methodName") or "") != metoda:
+            continue
+        klucz = str(pp.get("resourceName") or "")
+        if not klucz:
+            continue
+        if int(((pp.get("status") or {}).get("code")) or 0) != 0:
+            odrzucone.add(klucz)
+            continue
+        czas = _epoch(w.get("timestamp"))
+        if czas is None:
+            continue
+        biezacy = zebrane.get(klucz)
+        if biezacy is None or czas < biezacy["czas"]:
+            zebrane[klucz] = {"czas": czas, "wpis": w, "zasob": klucz}
+    return sorted((z for k, z in zebrane.items() if k not in odrzucone), key=lambda z: z["czas"])
+
+
+def sieci_maszyny(wpis: dict) -> list[str]:
+    """Nazwy sieci, do ktorych podpieta jest tworzona maszyna. PUSTA LISTA = nie dalo sie odczytac.
+
+    Rozroznienie „brak interfejsow" od „nie umiem odczytac" jest tu rozstrzygajace dla kierunku bledu:
+    pusta lista oznacza NIEWIEDZE, a konsument traktuje niewiedze jako dopasowanie (fail-closed). Ksztalt
+    `request` w Admin Activity bywa przyciety, a alert, ktory milczy przy przycietym polu, milczy dokladnie
+    wtedy, gdy zdarzenie jest nietypowe.
+    """
+    zadanie = (wpis.get("protoPayload") or {}).get("request") or {}
+    nazwy = []
+    for nic in (zadanie.get("networkInterfaces") or []):
+        nazwa = _siec_z_referencji(nic.get("network"))
+        if nazwa:
+            nazwy.append(nazwa)
+    return nazwy
+
+
+def policz_okna_sieci(wpisy: list[dict], egzekwowane: set[str], okno_s: int) -> dict:
+    """Ile sieci powstalo w czlonkach EGZEKWOWANYCH i do ilu z nich wstawiono maszyne PRZED dojrzeniem.
+
+    DLACZEGO DWIE LICZBY, A ALERT TYLKO NA DRUGIEJ. Pierwsza (`sieci`) jest kontekstem i mianownikiem:
+    utworzenie sieci VPC w projekcie czlonkowskim jest czynnoscia legalna, czesta i wykonywana przez
+    ludzi, ktorzy o VPC-SC nie musza wiedziec nic. Alert na nia znaczylby „obudz dyzurnego, bo dywizja
+    pracuje" — i zostalby wyciszony w tydzien, zabierajac ze soba jedyny sygnal o oknie. Druga liczba
+    (`z_obciazeniem`) opisuje ZLAMANIE kolejnosci z DEC-32: obciazenie znalazlo sie w sieci, ktora przez
+    pierwsze minuty nie jest dla granicy „wewnatrz". Dopiero to jest objaw — i dopiero to jest rzadkie.
+
+    DLACZEGO CZLONKOWIE DRY-RUN SIE NIE LICZA. Siec w czlonku dry-run tez dojrzewa i tez jest przez chwile
+    niewidoczna dla obu plaszczyzn konfiguracji (zmierzone), ale w konfiguracji dry-run NIC nie jest
+    egzekwowane, wiec zadna dziura sie przez nia nie otwiera — nie ma czego alertowac.
+
+    DOPASOWANIE MASZYNY DO SIECI JEST FAIL-CLOSED. Maszyna liczy sie do okna, gdy powstala w TYM SAMYM
+    projekcie, w oknie `[t_sieci, t_sieci + okno_s]`, ORAZ (a) jawnie wskazuje te siec, albo (b) nie da sie
+    odczytac zadnej jej sieci. Wariant (b) przeszacowuje: maszyna w sieci dojrzalej moze zostac policzona.
+    To jest swiadomy kierunek bledu — falszywy alarm kosztuje jedno sprawdzenie w widoku sinka, a przeoczone
+    okno jest nieodwracalne, bo ruch, ktory przez nie przeszedl, NIE ZOSTAWIA SLADU (41 przekroczen granicy,
+    0 wpisow audytowych).
+    """
+    sieci = [z for z in scal_operacje(wpisy, COMPUTE_SIEC) if projekt_wpisu(z["wpis"]) in egzekwowane]
+    maszyny = [z for z in scal_operacje(wpisy, COMPUTE_MASZYNA) if projekt_wpisu(z["wpis"]) in egzekwowane]
+
+    szczegoly = []
+    for s in sieci:
+        projekt = projekt_wpisu(s["wpis"])
+        nazwa = _siec_z_referencji(s["zasob"])
+        trafione = []
+        for m in maszyny:
+            if projekt_wpisu(m["wpis"]) != projekt:
+                continue
+            if not (s["czas"] <= m["czas"] <= s["czas"] + okno_s):
+                continue
+            podpiete = sieci_maszyny(m["wpis"])
+            if podpiete and nazwa and nazwa not in podpiete:
+                continue
+            trafione.append({
+                "maszyna": m["zasob"].rsplit("/", 1)[-1],
+                "po_sekundach": round(m["czas"] - s["czas"]),
+                "siec_odczytana": bool(podpiete),
+            })
+        szczegoly.append({"projekt": projekt, "siec": nazwa,
+                          "utworzona": datetime.datetime.fromtimestamp(
+                              s["czas"], datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                          "obciazenie": trafione})
+    return {
+        "sieci": len(sieci),
+        "z_obciazeniem": sum(1 for s in szczegoly if s["obciazenie"]),
+        "szczegoly": szczegoly,
+    }
+
+
 # --- wejscie/wyjscie ---------------------------------------------------------------------------------
 
 def _git(*args: str) -> str:
@@ -542,6 +724,8 @@ def zmierz(args) -> int:
     # zamienialoby slepote w cisze, a cisze w spokoj — dokladnie ten tryb awarii, ktory ten plik tropi.
     # Brak punktu zapala `condition_absent` obu polityk, czyli awarie obserwatora widac JAKO awarie.
     punkty_granicy = []
+    projects_doc = yaml.safe_load(open(args.projects))
+    okna_sieci = None
     zrodlo = (yaml.safe_load(open(args.alerting)) or {}).get("violations_source") if \
         os.path.exists(args.alerting) else None
     if not zrodlo:
@@ -576,6 +760,47 @@ def zmierz(args) -> int:
             print(f"::warning::nie udalo sie odczytac widoku zmian konfiguracji ({e}) — metryka zmian "
                   f"poza pipeline'em NIE zostanie opublikowana", file=sys.stderr)
 
+        # OKNO SWIEZEJ SIECI (DEC-32) — trzeci strumien, WLASNY kubelek i wlasny widok.
+        #
+        # DWA WARUNKI, OBA FAIL-CLOSED. Bez wspolrzednych widoku nie ma czego czytac. Bez ZYWEJ granicy nie
+        # wiadomo, kto jest egzekwowany — a policzenie tego z deklaracji dawaloby liczbe, ktora wyglada
+        # poprawnie i opisuje co innego (ten sam powod, dla ktorego budzet nie podstawia deklaracji).
+        # W obu przypadkach NIE publikujemy zera: zero znaczyloby „nikt nie zlamal kolejnosci", czyli
+        # zamienialoby slepote w spokoj. Brak punktu zapala `condition_absent` polityki.
+        widok_sieci = zrodlo.get("network_view")
+        if not widok_sieci:
+            print("::warning::brak `violations_source.network_view` — detektor okna swiezej sieci NIE "
+                  "liczy (metryki network_inserts_enforced / network_window_workload nie powstana)",
+                  file=sys.stderr)
+        elif blad_odczytu:
+            print("::warning::bez odczytu zywej granicy nie wiadomo, ktore projekty sa EGZEKWOWANE — "
+                  "detektor okna swiezej sieci NIE liczy w tym przebiegu", file=sys.stderr)
+        else:
+            egzekwowane, nieznane = projekty_egzekwowane(perimetr, projects_doc)
+            if nieznane:
+                # Numer w `status` bez wpisu w deklaracji: ktos jest w granicy, a nie ma go w Gicie. Ma to
+                # wlasne alerty (dryf, rozjazd budzetu); tutaj liczy sie to, ze detektor NIE UDAJE, ze
+                # przeszukal cala konfiguracje egzekwowana, skoro czesci jej nie umie nazwac.
+                print(f"::warning::numery w `status` bez wpisu w projects.yaml: {', '.join(nieznane)} — "
+                      f"okno swiezej sieci NIE jest dla nich liczone", file=sys.stderr)
+            okno_dojrzewania = int(zrodlo.get("network_maturation_seconds", OKNO_DOJRZEWANIA_S))
+            baza_sieci = (f"projects/{zrodlo['project_id']}/locations/{zrodlo['location']}"
+                          f"/buckets/{zrodlo.get('network_bucket', widok_sieci)}/views")
+            try:
+                # Okno ODCZYTU jest dluzsze od okna liczenia o okno DOJRZEWANIA: para (siec, maszyna) ma
+                # sie zmiescic w calosci w jednym przebiegu. Bez tego zapasu siec utworzona tuz przed
+                # granica okna zostalaby przeczytana bez swojej maszyny, a w nastepnym przebiegu — maszyna
+                # bez swojej sieci, i para nie zostalaby zlozona przez ZADEN przebieg.
+                wpisy_compute = czytaj_widok(
+                    f"{baza_sieci}/{widok_sieci}",
+                    f'protoPayload.methodName="{COMPUTE_SIEC}" OR '
+                    f'protoPayload.methodName="{COMPUTE_MASZYNA}"',
+                    teraz - okno - okno_dojrzewania, g_token)
+                okna_sieci = policz_okna_sieci(wpisy_compute, egzekwowane, okno_dojrzewania)
+            except (urllib.error.HTTPError, urllib.error.URLError, KeyError) as e:
+                print(f"::warning::nie udalo sie odczytac widoku zdarzen Compute ({e}) — metryki okna "
+                      f"swiezej sieci NIE zostana opublikowane", file=sys.stderr)
+
         if naruszenia is not None:
             punkty_granicy += [
                 punkt(METRYKI["naruszenia_enforced"], naruszenia["enforced"], None, args.project, teraz, True),
@@ -584,8 +809,21 @@ def zmierz(args) -> int:
         if zmiany_acm is not None:
             punkty_granicy.append(
                 punkt(METRYKI["zmiany_poza_pipelinem"], zmiany_acm, None, args.project, teraz, True))
-
-    projects_doc = yaml.safe_load(open(args.projects))
+        if okna_sieci is not None:
+            punkty_granicy += [
+                punkt(METRYKI["sieci_egzekwowane"], okna_sieci["sieci"], None, args.project, teraz, True),
+                punkt(METRYKI["sieci_z_obciazeniem"], okna_sieci["z_obciazeniem"], None, args.project,
+                      teraz, True),
+            ]
+            # KTORA siec i KTORA maszyna — do adnotacji przebiegu, nie do etykiety metryki. Etykieta
+            # sprawilaby, ze seria powstaje i znika razem ze zdarzeniem, czyli zdrowa cisza bylaby
+            # nieodrozninalna od awarii obserwatora (lekcja z metryki odmow).
+            for s in okna_sieci["szczegoly"]:
+                if not s["obciazenie"]:
+                    continue
+                opis = ", ".join(f"{o['maszyna']} po {o['po_sekundach']} s" for o in s["obciazenie"])
+                print(f"::warning::OKNO BEZ OCHRONY: siec `{s['siec']}` w `{s['projekt']}` (utworzona "
+                      f"{s['utworzona']}) dostala obciazenie przed dojrzeniem: {opis}", file=sys.stderr)
     # Data w UTC, nie lokalna: `review_by` jest datą kalendarzową bez strefy, a runner i laptop operatora
     # bywają w różnych strefach — wtedy ta sama konfiguracja daje dwa różne wyniki w oknie kilku godzin.
     wygasli = wygasli_czlonkowie(projects_doc, datetime.datetime.fromtimestamp(teraz, datetime.UTC).date())
@@ -622,7 +860,14 @@ def zmierz(args) -> int:
             "violations_enforced": (naruszenia or {}).get("enforced") if naruszenia else None,
             "violations_dry_run": (naruszenia or {}).get("dry_run") if naruszenia else None,
             "config_changed_outside_pipeline": zmiany_acm,
+            # To samo rozroznienie `null` vs `0` co wyzej: `null` = detektor nie liczyl (brak widoku,
+            # brak zywej granicy, blad odczytu), `0` = policzyl i nie bylo czego zglosic.
+            "network_inserts_enforced": (okna_sieci or {}).get("sieci") if okna_sieci else None,
+            "network_window_workload": (okna_sieci or {}).get("z_obciazeniem") if okna_sieci else None,
         },
+        # Szczegoly okna zostaja w artefakcie przebiegu — alert niesie LICZBE, a „ktora siec" odzyskuje
+        # sie stad albo odczytem z widoku (komenda w docs/7-alerty.md).
+        "okna_sieci": (okna_sieci or {}).get("szczegoly") if okna_sieci else None,
     }
     json.dump(wynik, sys.stdout, indent=2, sort_keys=True, ensure_ascii=False)
     print()

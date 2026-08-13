@@ -15,13 +15,14 @@ DZIŚ i czy widziano go, jak strzela.
 |---|---|---|
 | [odmowa w trybie egzekwowanym](#odmowa-w-trybie-egzekwowanym) | `watch.yml` ← **widok sinka** | tak — na realnej odmowie |
 | [zmiana poza pipeline'em](#dryf-granicy) | `watch.yml` ← **widok sinka** (ACM) | tak — na realnej zmianie ACM |
+| [okno świeżej sieci](#okno-swiezej-sieci) | `watch.yml` ← **widok sinka** (Compute, osobny kubełek) | funkcje liczące — tak; przelot dowodowy na żywej granicy — patrz sekcja |
 | [apply nie doszedł](#apply-nie-doszedl) | `watch.yml` ← API GitHuba | tak |
 | [budżet atrybutów](#budzet-atrybutow) | `watch.yml` ← żywa granica (ACM) | tak |
 | [dryf granicy](#dryf-granicy) | `watch.yml` ← `terraform plan` | tak |
 | [członek po terminie](#czlonek-po-terminie) | `watch.yml` ← `projects.yaml` | tak |
 | [heartbeat poza GCP](#dms-zewnetrzny) | `watch.yml` → dostawca spoza GCP | tak |
 
-**Wszystkie siedem jedzie jednym producentem — i to jest świadome, nie przypadkowe.** Poprzedni układ
+**Wszystkie jadą jednym producentem — i to jest świadome, nie przypadkowe.** Poprzedni układ
 miał dwa tory i to on był defektem: tor „audit-log → metryka log-based" **nie może działać z zasady**.
 Metryka log-based liczy wyłącznie wpisy PRZYJĘTE przez Log Router swojego projektu, a naruszenia VPC-SC
 powstają w logu projektu-CZŁONKA, zmiany ACM zaś w logu ORGANIZACJI; do projektu administracyjnego oba
@@ -33,7 +34,7 @@ Cena jednego producenta jest realna i nazywamy ją wprost: **wykrycie odmowy trw
 `watch.yml`** (godzina) zamiast ~minuty. Alternatywą nie był szybszy alert, tylko brak alertu.
 
 Konsekwencja dla ciszy: skoro producent jest jeden, jego awaria gasi wszystko naraz. Dlatego
-**każdy z dwóch alertów granicy ma WŁASNY `condition_absent`** (nie polega na watchdogu `apply`), a nad
+**każdy alert granicy ma WŁASNY `condition_absent`** (nie polega na watchdogu `apply`), a nad
 całością stoi heartbeat poza GCP. Warunek „brak danych" też potrzebuje żywego silnika Monitoringu, więc
 ostatnia warstwa nie jest w GCP w ogóle.
 
@@ -379,6 +380,92 @@ się powyższym odczytem; wiarygodności ciszy nie odzyskuje się niczym.
 tylko UTRATA WZROKU: producent nie zdołał odczytać widoku (najczęściej odebrany `logging.viewAccessor`
 konta planu albo skasowany widok). Dopóki ten warunek jest otwarty, „brak odmów" nie jest zdaniem
 o świecie. Sprawdź ostatni przebieg `watch.yml` i grant na widoku.
+
+---
+
+<a id="okno-swiezej-sieci"></a>
+
+## okno świeżej sieci — obciążenie trafiło do sieci, która nie była jeszcze za granicą
+
+**Alert:** `VPC-SC: obciążenie w sieci młodszej niż okno dojrzewania` (CRITICAL, kanał **bezpieczeństwa**).
+
+**Kto to odczuwa:** właściciel danych w projekcie członkowskim — przez kilka minut jego dane mogły opuścić
+granicę, a granica tego **nie zarejestrowała**. Nikt nie odczuwa tego jako awarii i to jest tu najgorsze:
+bez tego alertu po zdarzeniu nie zostaje **żaden** ślad.
+
+**Co się stało.** W projekcie będącym członkiem konfiguracji **egzekwowanej** powstała sieć VPC, a maszynę
+uruchomiono w niej **przed** upływem okna dojrzewania. Świeża sieć nie jest dla perimetru „wewnątrz" przez
+**3 m 53 s – 5 m 18 s** (3/3 przeloty, DEC-32): ruch z maszyny w niej **wychodzi poza granicę bez odmowy
+i bez wpisu audytowego**, a w stanie pośrednim maszyna potrafi **jednocześnie** czytać z wnętrza perimetru
+i wysyłać na zewnątrz — czyli cała ścieżka eksfiltracji jest przejezdna od końca do końca.
+
+**Ten alert NIE zapobiega i nie wolno go za taki brać.** Okno zamyka się w minutach, a producent chodzi
+z kadencją `watch.yml` (godzina) — alert przychodzi po wszystkim. Jego wartość jest **forensyczna**: daje
+znacznik czasu i pozwala **ograniczyć**, co mogło wyjść. Prewencją jest kolejność (procedura poniżej),
+a nie ten alert.
+
+**Dlaczego alert nie strzela na każdej nowej sieci.** Bo utworzenie sieci VPC w projekcie członkowskim
+jest czynnością legalną, częstą i wykonywaną przez ludzi, którzy o VPC-SC nie muszą wiedzieć nic. Alert na
+nią mówiłby „obudź dyżurnego, bo dywizja pracuje" — a wyciszona kategoria zabiera ze sobą ten jedyny
+sygnał. Metryka `network_inserts_enforced` liczy **wszystkie** takie sieci i jest publikowana jako
+kontekst, **bez polityki alertu**; alert stoi wyłącznie na parze (sieć + obciążenie w oknie).
+
+### Triage
+
+**1. Która sieć i która maszyna.** Adnotacje przebiegu `watch.yml` niosą nazwy i liczbę sekund od
+utworzenia sieci (`OKNO BEZ OCHRONY: siec … dostala obciazenie przed dojrzeniem`). Niezależnie odczytasz to
+z widoku sinka — z **kubełka zdarzeń Compute**, nie z kubełka naruszeń:
+
+```
+gcloud logging read 'protoPayload.methodName="v1.compute.networks.insert" OR protoPayload.methodName="v1.compute.instances.insert"' \
+  --project=<PROJEKT_ADM> --bucket=<KUBELEK_SIECI> --location=<LOKALIZACJA> --view=<KUBELEK_SIECI> \
+  --freshness=2h \
+  --format='table(timestamp, resource.labels.project_id, protoPayload.methodName, protoPayload.resourceName)'
+```
+
+Pułapka: jedna operacja Compute zostawia **dwa** wpisy o tej samej `resourceName` (`operation.first`
+i `operation.last`). Zero czasu okna to wpis **wcześniejszy** — licznik scala je sam, ale czytając ręcznie
+łatwo policzyć dwie sieci tam, gdzie powstała jedna.
+
+**2. Ogranicz, co mogło wyjść.** Okno trwa od utworzenia sieci do ~5 minut później; propagacja **migocze
+i jest niedeterministyczna**, więc bierz **górną** obserwację, nie średnią. Pytanie brzmi: czy ta maszyna
+miała w tym czasie dostęp do czegokolwiek wrażliwego i czy cokolwiek wysyłała. **Nie szukaj tego
+w audit-logu VPC-SC — tam tego nie ma i nie będzie** (41 udanych przekroczeń granicy → 0 wpisów; nic nie
+jest odrzucane, więc nie ma czego logować). Szukaj po stronie workloadu: logi aplikacji, ruch wychodzący,
+uprawnienia konta maszyny.
+
+**3. Rozstrzygnij: brak procedury czy jej obejście.** DEC-32 wymaga, żeby sieć w członku egzekwowanym
+powstawała **przed** obciążeniem, dojrzewała **≥ 10 minut** i żeby przed dopuszczeniem ruchu potwierdzić
+sondą **dwie kolejne** rundy z odmową wyjścia (jedna nie wystarcza — w paśmie przejścia werdykt migocze).
+Dywizja, która tej procedury nie zna, jest luką w onboardingu, a nie incydentem tożsamościowym.
+
+**4. Nie „naprawiaj" tego org policy blokującą tworzenie sieci.** Rozważone i odrzucone (DEC-32): custom
+constraint na `compute.googleapis.com/Network` + `CREATE` jest wykonalny, ale zamienia okno czterominutowe
+na **trwałą** blokadę czynności legalnej, a wyjątek od niej jest dokładnie tą samą dziurą, tylko z podpisem.
+
+### Drugi warunek tej samej polityki — „obserwator przestał publikować liczbę okien bez ochrony"
+
+To nie jest zdarzenie, tylko **utrata wzroku**, i ma **własne** źródło awarii: ta liczba jedzie z osobnego
+kubełka, osobnego sinka i osobnego grantu `logging.viewAccessor`. Odebranie tego jednego grantu zatrzymuje
+wyłącznie ją — alerty odmów i zmian ACM milczą dalej, bo ich źródła żyją. Dopóki ten warunek jest otwarty,
+„nikt nie łamie kolejności" nie jest zdaniem o świecie. Sprawdź ostatni przebieg `watch.yml`, istnienie
+widoku zdarzeń Compute i grant konta planu na nim.
+
+### Dlaczego to jedzie OSOBNYM kubełkiem, a nie trzecim widokiem kubełka naruszeń
+
+Filtr widoku logów wolno oprzeć **wyłącznie** na źródle logu, typie zasobu, polach apphub, etykietach
+użytkownika i identyfikatorze logu — zmierzone na tym API:
+
+```
+Error 400: Invalid view filter. View filters may only contain restrictions on log source, valid
+resource types, apphub fields, user-defined labels, or log ID
+```
+
+`protoPayload.methodName` do żadnej z tych kategorii nie należy, a wpisy ACM i wpisy Compute mają **ten sam**
+identyfikator logu (`cloudaudit.googleapis.com/activity`). Widok rozłączny w jednym kubełku musiałby więc
+stanąć na `resource.type`, czyli wymagałby **zawężenia działającego** widoku `-config` — a to jest jedyna
+detekcja edycji granicy w konsoli i jej regresja byłaby ciszą braną za spokój. Drugi kubełek nie dotyka jej
+ani jednym bajtem.
 
 ---
 

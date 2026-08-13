@@ -78,6 +78,23 @@ variable "watch_reader_service_account" {
   }
 }
 
+variable "network_bucket_suffix" {
+  description = "Sufiks kubełka na zdarzenia sterujące Compute (utworzenie sieci VPC i maszyny). OSOBNY kubełek, nie osobny widok w kubełku naruszeń — filtr widoku wolno oprzeć WYŁĄCZNIE na źródle logu, typie zasobu, polach apphub, etykietach użytkownika i identyfikatorze logu (zmierzone: `Error 400: Invalid view filter`), a wpisy ACM i wpisy Compute mają TEN SAM identyfikator logu (`activity`). Rozłączności nie da się więc uzyskać w jednym kubełku bez zawężenia działającego widoku `-config`, czyli bez ryzyka dla licznika `config_changed_outside_pipeline`."
+  type        = string
+  default     = "-networks"
+
+  validation {
+    condition     = can(regex("^[a-z0-9._-]{1,40}$", var.network_bucket_suffix))
+    error_message = "network_bucket_suffix: małe litery/cyfry/._- , 1-40 znaków (dokleja się do bucket_id)."
+  }
+}
+
+variable "network_window_detector" {
+  description = "Czy zbierać zdarzenia sterujące Compute do wykrywania okna „świeża sieć w członku egzekwowanym” (DEC-32). `false` = drugi sink, kubełek i widok NIE powstają, a obserwator nie ma czego liczyć — metryka `network_window_workload` znika, a jej martwy-człowiek NIE strzela, bo polityka alertu też się wtedy nie tworzy. Wyłączaj świadomie: okno trwa minuty i nie zostawia ŻADNEGO śladu ruchu, więc bez tego strumienia nie ma po czym poznać, że ktoś wstawił obciążenie do sieci sprzed chwili."
+  type        = bool
+  default     = true
+}
+
 variable "violations_reader_principals" {
   description = "Kto POZA pipeline'em raportu może czytać surowy strumień odmów (`user:`/`group:`). Świadomie WĘŻSZE niż krąg czytelników raportu: raport mówi „ten członek ma N naruszeń”, a kubełek pokazuje całej organizacji, kto próbuje sięgać gdzie. Pusta lista jest poprawnym ustawieniem."
   type        = list(string)

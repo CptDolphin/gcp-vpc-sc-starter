@@ -105,6 +105,14 @@ locals {
   zrodlo_naruszen  = try(local.alerting.violations_source.project_id, "")
   naruszenia_count = local.alerting_enabled && local.zrodlo_naruszen != "" ? 1 : 0
 
+  # DETEKTOR OKNA ŚWIEŻEJ SIECI (DEC-32) ma WŁASNY warunek istnienia, a nie `naruszenia_count`, i to
+  # jest ta sama zasada, co wyżej: polityka bez producenta chodzi wiecznie na martwym-człowieku. Jego
+  # producent potrzebuje TRZECIEGO widoku — z osobnego kubełka, z osobnym grantem — więc może go zabraknąć
+  # także wtedy, gdy widoki naruszeń i zmian ACM są skonfigurowane (np. wdrożenie z `network_window_detector
+  # = false` w stacku sinka). Wspólny licznik tworzyłby wtedy alert, którego nikt nie zasila.
+  zrodlo_sieci = try(local.alerting.violations_source.network_view, "")
+  sieci_count  = local.naruszenia_count > 0 && local.zrodlo_sieci != "" ? 1 : 0
+
   # Runbook jest KONFIGURACJĄ, bo docelowe repozytorium ma inny adres niż starter. Kotwice (`#…`) są stałe
   # i pilnuje ich selftest — alert wskazujący na nieistniejącą kotwicę ląduje na początku dokumentu, czyli
   # o 3:00 daje spis treści zamiast procedury.
@@ -129,6 +137,14 @@ locals {
     naruszenia_enforced   = "custom.googleapis.com/vpcsc/violations_enforced"
     naruszenia_dry_run    = "custom.googleapis.com/vpcsc/violations_dry_run"
     zmiany_poza_pipelinem = "custom.googleapis.com/vpcsc/config_changed_outside_pipeline"
+
+    # OKNO ŚWIEŻEJ SIECI (DEC-32). `sieci_egzekwowane` jest publikowana i CELOWO nie ma polityki alertu:
+    # utworzenie sieci VPC w projekcie członkowskim jest czynnością legalną i częstą, więc alert na nią
+    # byłby szumem — a wyciszony szum zabiera ze sobą sygnał, który siedzi w tej samej kategorii. Alert
+    # stoi wyłącznie na `sieci_z_obciazeniem`, czyli na złamaniu kolejności: obciążenie w sieci, która
+    # jeszcze nie jest dla granicy „wewnątrz".
+    sieci_egzekwowane   = "custom.googleapis.com/vpcsc/network_inserts_enforced"
+    sieci_z_obciazeniem = "custom.googleapis.com/vpcsc/network_window_workload"
   }
 
   # Kanały: lista z `policy.yaml` (kanały założone poza tym repo) PLUS kanał zarządzany tutaj. Konkatenacja,

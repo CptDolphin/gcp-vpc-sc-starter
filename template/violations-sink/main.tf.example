@@ -66,6 +66,45 @@ locals {
     "protoPayload.serviceName=\"accesscontextmanager.googleapis.com\"",
   ])
 
+  # ZDARZENIA STERUJĄCE COMPUTE — DRUGI SINK, DRUGI KUBEŁEK. Nie „trzeci człon w `sink_filter`" i nie
+  # „trzeci widok w kubełku naruszeń", i to jest rozstrzygnięcie zmierzone, nie preferencja stylu.
+  #
+  # CO MA WYKRYWAĆ. Świeża sieć VPC w projekcie będącym członkiem konfiguracji EGZEKWOWANEJ jest przez
+  # 3 m 53 s – 5 m 18 s (3/3 przeloty, DEC-32) traktowana jak sieć spoza granicy: maszyna w niej wychodzi
+  # na zewnątrz bez odmowy, a w stanie pośrednim czyta z wnętrza perimetru I wysyła na zewnątrz naraz.
+  # Ruch, który wtedy przechodzi, NIE ZOSTAWIA ŚLADU — zmierzone: 41 udanych przekroczeń granicy, 0 wpisów
+  # audytowych, bo nic nie jest odrzucane, więc nie ma czego logować. Jedynym pewnym sygnałem jest
+  # zdarzenie STERUJĄCE (`v1.compute.networks.insert`), a dla członka egzekwowanego log projektu sam leży
+  # za granicą (`logging` jest usługą chronioną) — więc musi go wynieść sink.
+  #
+  # DLACZEGO OSOBNY KUBEŁEK, A NIE OSOBNY WIDOK W `bucket_id`. Filtr widoku wolno oprzeć WYŁĄCZNIE na
+  # źródle logu, typie zasobu, polach apphub, etykietach użytkownika i identyfikatorze logu (zmierzone
+  # na tym API: `Error 400: Invalid view filter`, komunikat zacytowany niżej przy `google_logging_log_view`).
+  # `protoPayload.methodName` do żadnej z tych kategorii nie należy, a wpisy ACM i wpisy Compute mają TEN
+  # SAM identyfikator logu — `cloudaudit.googleapis.com/activity`. Widok rozłączny z `-config` musiałby więc
+  # stanąć na `resource.type`, czyli wymagałby ZAWĘŻENIA istniejącego, DZIAŁAJĄCEGO widoku `-config` na
+  # niesprawdzonym założeniu o typie zasobu we wpisie ACM. To jest dokładnie ta klasa zmiany, którą §9.20
+  # nakazuje odrzucić: licznik `config_changed_outside_pipeline` jest jedyną detekcją edycji granicy
+  # w konsoli, a jego regresja byłaby ciszą braną za spokój. Drugi kubełek nie dotyka go ANI JEDNYM bajtem.
+  #
+  # DLACZEGO TEŻ `instances.insert`, A NIE SAMO `networks.insert`. Utworzenie sieci w projekcie
+  # członkowskim jest czynnością LEGALNĄ i CZĘSTĄ (przy modelu +50 dywizji/mc — kilka dziennie), więc alert
+  # na nie samo jest szumem, a szum się wycisza. Objawem jest dopiero PARA: sieć młodsza niż okno
+  # dojrzewania i obciążenie wstawione do niej w tym oknie — czyli złamanie kolejności z DEC-32.
+  # Korelację robi obserwator, ale wpisy o maszynach musi mieć skąd wziąć, więc oba rodzaje jadą tym samym
+  # sinkiem. KOSZT, POLICZONY, A NIE ODHACZONY: darmowy przydział ingestu Cloud Logging to 50 GiB/projekt/mc,
+  # a wpis audytowy waży ~3,3 KB (zmierzone na tym kubełku) — czyli ~15 mln wpisów miesięcznie w cenie zero.
+  # Żadna organizacja nie tworzy 15 mln maszyn na miesiąc; retencja <= 30 dni jest darmowa niezależnie.
+  compute_sink_filter = join(" OR ", [
+    "protoPayload.methodName=\"v1.compute.networks.insert\"",
+    "protoPayload.methodName=\"v1.compute.instances.insert\"",
+  ])
+
+  network_bucket_id   = "${var.bucket_id}${var.network_bucket_suffix}"
+  network_bucket_name = "projects/${var.sink_project_id}/locations/${var.bucket_location}/buckets/${local.network_bucket_id}"
+  network_view_name   = "${local.network_bucket_name}/views/${local.network_bucket_id}"
+  network_count       = var.network_window_detector ? 1 : 0
+
   bucket_name = "projects/${var.sink_project_id}/locations/${var.bucket_location}/buckets/${var.bucket_id}"
   view_name   = "${local.bucket_name}/views/${var.bucket_id}"
 
@@ -243,6 +282,84 @@ resource "google_logging_log_view_iam_member" "watch_config_changes" {
   location = google_logging_project_bucket_config.violations.location
   bucket   = google_logging_project_bucket_config.violations.bucket_id
   name     = google_logging_log_view.config_changes.name
+
+  role   = "roles/logging.viewAccessor"
+  member = "serviceAccount:${var.watch_reader_service_account}"
+}
+
+# --- 7. OKNO ŚWIEŻEJ SIECI: drugi kubełek, drugi sink, własny widok -----------------------------------
+# Wszystko poniżej jest ROZŁĄCZNE z zasobami wyżej: inny kubełek, inny sink, inny filtr, inny widok, inny
+# grant. Zasoby 1-6 po dołożeniu tej sekcji nie zmieniają się o ani jeden atrybut — to jest kryterium
+# akceptacji, nie efekt uboczny (uzasadnienie przy `local.compute_sink_filter`).
+
+resource "google_logging_project_bucket_config" "network_inserts" {
+  count = local.network_count
+
+  project   = var.sink_project_id
+  location  = var.bucket_location
+  bucket_id = local.network_bucket_id
+
+  # Ta sama retencja co przy naruszeniach i z tego samego powodu (sufit darmowy). Dla TEGO strumienia
+  # 30 dni ma jeszcze drugie znaczenie: wartość sygnału jest FORENSYCZNA — alert nie zdąży zapobiec
+  # (okno zamyka się w minutach, obserwator chodzi co godzinę), więc liczy się to, że po tygodniu da się
+  # odtworzyć, KTÓRA sieć i KIEDY była poza granicą, i ograniczyć, co mogło wtedy wyjść.
+  retention_days = var.retention_days
+
+  description = "Zdarzenia sterujące Compute (utworzenie sieci VPC i maszyny) z całej organizacji — wejście detektora okna „świeża sieć w członku egzekwowanym” (DEC-32)."
+}
+
+resource "google_logging_organization_sink" "network_inserts" {
+  count = local.network_count
+
+  name   = local.network_bucket_id
+  org_id = var.org_id
+
+  # Tak samo krytyczne jak przy sinku naruszeń: bez `include_children` widać wyłącznie logi zapisane NA
+  # organizacji, a `v1.compute.networks.insert` powstaje w logu PROJEKTU członkowskiego.
+  include_children = true
+
+  destination = "logging.googleapis.com/${local.network_bucket_name}"
+  filter      = local.compute_sink_filter
+
+  depends_on = [google_logging_project_bucket_config.network_inserts]
+}
+
+resource "google_project_iam_member" "network_sink_writer" {
+  count = local.network_count
+
+  project = var.sink_project_id
+  role    = "roles/logging.bucketWriter"
+  member  = google_logging_organization_sink.network_inserts[0].writer_identity
+
+  # Warunek zawężony do TEGO kubełka — ta tożsamość nie ma prawa pisać do kubełka naruszeń ani do
+  # `_Default`. Rozdzielenie kubełków byłoby pozorne, gdyby oba sinki dzieliły prawo zapisu.
+  condition {
+    title      = "only-vpcsc-network-bucket"
+    expression = "resource.name.endsWith(\"locations/${var.bucket_location}/buckets/${local.network_bucket_id}\")"
+  }
+}
+
+# Widok = jednostka nadawania dostępu, tak samo jak wyżej. Filtr znowu NIE MOŻE powtórzyć filtra sinka
+# (`protoPayload.methodName` nie jest legalną restrykcją widoku — `Error 400: Invalid view filter. View
+# filters may only contain restrictions on log source, valid resource types, apphub fields, user-defined
+# labels, or log ID`), więc zawężamy identyfikatorem logu. `activity` jest tu NADZBIOREM tylko formalnie:
+# w TYM kubełku leży wyłącznie to, co wpuścił `compute_sink_filter`.
+resource "google_logging_log_view" "network_inserts" {
+  count = local.network_count
+
+  name        = local.network_bucket_id
+  bucket      = google_logging_project_bucket_config.network_inserts[0].id
+  description = "Admin Activity zdarzeń sterujących Compute — wejście alertu „obciążenie w sieci młodszej niż okno dojrzewania”."
+  filter      = "LOG_ID(\"cloudaudit.googleapis.com/activity\")"
+}
+
+resource "google_logging_log_view_iam_member" "watch_network_inserts" {
+  count = local.network_count > 0 && var.watch_reader_service_account != "" ? 1 : 0
+
+  parent   = "projects/${var.sink_project_id}"
+  location = google_logging_project_bucket_config.network_inserts[0].location
+  bucket   = google_logging_project_bucket_config.network_inserts[0].bucket_id
+  name     = google_logging_log_view.network_inserts[0].name
 
   role   = "roles/logging.viewAccessor"
   member = "serviceAccount:${var.watch_reader_service_account}"
