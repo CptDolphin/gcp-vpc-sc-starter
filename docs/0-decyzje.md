@@ -2446,3 +2446,60 @@ z konsoli, reguła innego perimetru w tej samej polityce albo polityka inline'ow
 są dla niej niewidzialne. Wyłapie je API przy apply — komunikatem `you must first remove the reference`,
 który wskazuje obiekt. Degradacja jest głośna i konkretna, więc świadomie nie budujemy tu drugiego
 źródła prawdy czytającego całą politykę.
+
+---
+
+## DEC-34 — Polityka alertu i deskryptor jej metryki należą do TEGO SAMEGO stacku
+
+**Decyzja.** Stack, który deklaruje `google_monitoring_alert_policy` na metryce własnej
+(`custom.googleapis.com/…`), deklaruje **w tym samym katalogu** `google_monitoring_metric_descriptor` tej
+metryki i wpina go w oczekiwanie na propagację. Producent punktów (obserwator, `watch.yml`) odpowiada za
+**WARTOŚCI**, nigdy za **ISTNIENIE** metryki. Niezmiennika pilnuje selftest: każda metryka wystąpiąca
+w filtrze polityki musi mieć deskryptor w tym samym pliku, a każdy deskryptor musi być w `depends_on`
+oczekiwania.
+
+**Dlaczego.** Bez deskryptora metryka własna powstaje dopiero przy **pierwszym zapisie punktu**. Dla dwóch
+metryk okna świeżej sieci (DEC-32) ten pierwszy zapis wymaga widoku z kubełka, który stawia
+**`violations-sink/`** — stack applikowany przez **człowieka** z org-level `roles/logging.configWriter`,
+bo konto CI `sa-vpcsc-apply` tego uprawnienia świadomie nie ma i mieć nie ma. Odtworzenie od zera
+w kolejności „repo perimetru najpierw" padało więc **zawsze**, a `depends_on` przez granicę dwóch stanów
+Terraforma nie istnieje.
+
+Zmierzone na żywej organizacji 2026-08-13, przebieg apply `31679291426` — `Plan: 19 to add, 0 to change,
+0 to destroy`, wszystkie reguły granicy utworzone, a na końcu:
+
+```
+Error: Error creating AlertPolicy: googleapi: Error 404: Cannot find metric(s) that match
+type = "custom.googleapis.com/vpcsc/network_window_workload". If a metric was created recently,
+it could take up to 10 minutes to become available. Please try again soon.
+```
+
+**Komunikat kieruje diagnozę w złą stronę i to jest połowa defektu** — mówi o propagacji świeżo utworzonej
+metryki, a tej metryki nie było w ogóle. Odczyt z API tuż po awarii: **osiem** deskryptorów
+`custom.googleapis.com/vpcsc/*` i **ani jednego** z pary okna świeżej sieci. Osiem z dziesięciu metryk
+tego repozytorium miało deskryptor od początku — brakująca para była wyjątkiem, nie regułą, i nic tego
+wyjątku nie pilnowało.
+
+**Drugi skutek jest groźniejszy od czerwonego apply.** Bez deskryptora **martwy-człowiek tej polityki był
+martwy sam**: metryka, do której nigdy nic nie napisano, nie jest „nieobecna" — jest **nieznana**,
+a `condition_absent` na nieznanej metryce nie odpala. Obserwator świadomie **nie publikuje zera**, gdy nie
+ma czego policzyć (fail-closed, `perimeter_watch.py`), licząc właśnie na ten warunek. Czyli dokładnie ten
+przypadek, dla którego martwy-człowiek powstał — detektor bez źródła — dawał ciszę wyglądającą na
+„nikt nie łamie kolejności". Deskryptor tworzony przy apply uzbraja go od chwili wdrożenia, a nie od
+pierwszego udanego przebiegu producenta.
+
+**Co odrzucono i dlaczego.**
+
+| wariant | dlaczego nie |
+|---|---|
+| **przenieść politykę alertu do `violations-sink/`, bliżej „źródła metryki"** | ta metryka **nie powstaje w `violations-sink/`** — stack sinka stawia kubełek, sink i widok, a punkty pisze obserwator z `watch.yml`. Polityka wylądowałaby obok złego stacku i **nadal** padała 404 na czystym stanie. Do tego kanały powiadomień (`google_monitoring_notification_channel`) są w repo perimetru, więc polityka potrzebowałaby ich identyfikatorów **przez granicę stanów** — ta sama krawędź, tylko przeniesiona i już nieusuwalna. Wreszcie stack człowieka musiałby dostać uprawnienia do polityk alertu, czyli **rozszerzyć najszerszą tożsamość w organizacji** o powierzchnię, której dziś nie ma |
+| `data` na deskryptorze / kubełku + jawny błąd | provider daje odczyt zasobów logowania dopiero za uprawnieniem `logging.views.get`, którego rola `vpcScMonitoringWriter` **celowo nie ma** (rozdział „monitoring" od „sinków i kubełków" jest właśnie tą granicą, którą ten podział chroni). Odmowa `403` byłaby przy tym **nieodróżnialna** od „stack nie zaaplikowany", więc komunikat mówiłby nieprawdę w jedynym przypadku, dla którego by powstał |
+| `check` block z ostrzeżeniem zamiast błędu | ten sam wymóg uprawnienia co wyżej. Ostrzeżenie przy **każdym** apply (bo konto nie umie przeczytać) jest szumem, a szum uczy ignorowania — kosztem byłaby wiarygodność wszystkich pozostałych ostrzeżeń planu |
+| `depends_on` między katalogami | nie istnieje. Terraform zna zależności **wewnątrz jednego stanu**; między stanami jest tylko kolejność wykonania przez człowieka albo pipeline |
+| `time_sleep` przed polityką | już jest — i dotyczy **propagacji** deskryptora utworzonego w tym samym przebiegu (zmierzone: 404 mimo `depends_on`). Opóźnienie nie tworzy metryki: przy odtworzeniu od zera przebieg padnie tak samo, tylko dwie minuty później |
+| tworzyć politykę warunkowo, „gdy metryka istnieje" | warunek wymagałby odczytu (patrz wyżej), a przy braku metryki dawałby **cichy brak alertu** — czyli zamieniałby głośną awarię apply na niewidoczną lukę w detekcji. Odwrotność kierunku, w którym ma się psuć granica |
+| zostawić jak było i opisać kolejność wyłącznie w runbooku | kolejność „`violations-sink/` przed pierwszym apply repo perimetru" **i tak** wchodzi do runbooka (§Kolejność stacków), ale sama nie wystarcza: dokument nie jest bramką, a defekt polega na tym, że repozytorium **nie umie postawić własnego alertu** bez cudzego stacku |
+
+**Co z tego wynika dla kolejnego alertu.** Nowa polityka na metryce własnej = deskryptor w tym samym pull
+requeście. Jeśli metryki nie da się zadeklarować w stacku polityki, to znaczy, że polityka jest w złym
+stacku — i to jest pytanie do rozstrzygnięcia **przed** wdrożeniem, nie po pierwszym odtworzeniu od zera.
