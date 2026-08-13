@@ -145,6 +145,11 @@ locals {
     # jeszcze nie jest dla granicy „wewnątrz".
     sieci_egzekwowane   = "custom.googleapis.com/vpcsc/network_inserts_enforced"
     sieci_z_obciazeniem = "custom.googleapis.com/vpcsc/network_window_workload"
+
+    # MARTWY CZŁONEK GRANICY (DEC-42). JEDNA metryka i DWIE serie po etykiecie `state`, bo „stanu nie
+    # odczytano" jest innym zdaniem o świecie niż „stan jest inny niż ACTIVE". Zlanie ich w jedną liczbę
+    # zamieniałoby ślepotę w rozpoznanie — a to jest dokładnie ten tryb awarii, który ta metryka tropi.
+    czlonkowie_nieaktywni = "custom.googleapis.com/vpcsc/members_not_active"
   }
 
   # Kanały: lista z `policy.yaml` (kanały założone poza tym repo) PLUS kanał zarządzany tutaj. Konkatenacja,
@@ -332,6 +337,34 @@ resource "google_monitoring_metric_descriptor" "wygasli" {
   unit         = "1"
 }
 
+# --- MARTWY CZŁONEK GRANICY (DEC-42) ---------------------------------------------------------------
+#
+# Deskryptor stoi przy `alert_count`, a nie przy `naruszenia_count`, i to jest rozstrzygnięcie o źródle:
+# producent tej liczby nie potrzebuje ŻADNEGO widoku sinka. Czyta żywą granicę (ACM) i jedno wywołanie
+# Asset Inventory na organizację — czyli dokładnie te dwa uprawnienia, które konto planu już ma. Wdrożenie
+# bez `violations_source` dostaje ten sygnał tak samo jak wdrożenie kompletne.
+#
+# ETYKIETA `state` MA ZBIÓR ZAMKNIĘTY (`not_active`, `unreadable`) i producent publikuje OBIE serie
+# w każdym przebiegu, także z zerem. To jest warunek, żeby `condition_absent` niżej cokolwiek znaczył:
+# seria, która powstaje i znika razem ze zdarzeniem, robi ze zdrowej ciszy nieodróżnialną awarię.
+resource "google_monitoring_metric_descriptor" "czlonkowie_nieaktywni" {
+  count = local.alert_count
+
+  project      = local.monitoring.project_id
+  type         = local.metryka.czlonkowie_nieaktywni
+  display_name = "VPC-SC: członkowie granicy bez potwierdzonego stanu ACTIVE"
+  description  = "Ilu członków perimetru (numery z `spec.resources` + `status.resources`) NIE MA potwierdzonego stanu ACTIVE. Etykieta `state` rozdziela werdykt od ślepoty: `not_active` = stan odczytany i inny niż ACTIVE, `unreadable` = stanu nie odczytano. BRAK punktu, a nie zero, znaczy „nie sprawdzono”."
+  metric_kind  = "GAUGE"
+  value_type   = "INT64"
+  unit         = "1"
+
+  labels {
+    key         = "state"
+    value_type  = "STRING"
+    description = "not_active (odczytany stan inny niż ACTIVE, np. DELETE_REQUESTED) albo unreadable (stanu NIE odczytano — nigdy nie znaczy OK)."
+  }
+}
+
 # --- deskryptory metryk liczonych z WIDOKÓW SINKA (#2000) -------------------------------------------
 # Powstają razem z politykami (`naruszenia_count`), a nie z całym alertingiem: bez sekcji `violations_source`
 # nie ma producenta, więc deskryptor byłby pustym obiektem sugerującym pomiar, którego nikt nie robi.
@@ -457,6 +490,7 @@ resource "time_sleep" "deskryptory_widoczne" {
     google_monitoring_metric_descriptor.budzet_dni,
     google_monitoring_metric_descriptor.dryf,
     google_monitoring_metric_descriptor.wygasli,
+    google_monitoring_metric_descriptor.czlonkowie_nieaktywni,
     # Trzy deskryptory z widoków sinka. Listy `count = 0` są tu legalne i nic nie wnoszą, więc wdrożenie
     # bez `violations_source` czeka dokładnie tyle samo — a to jest właściwe: 120 s raz, przy pierwszym
     # apply, jest tańsze niż rozgałęzianie tego bloku.
@@ -902,6 +936,142 @@ resource "google_monitoring_alert_policy" "vpcsc_members_expired" {
     links {
       display_name = "runbook"
       url          = "${local.runbook}#czlonek-po-terminie"
+    }
+  }
+}
+
+# --- ALERT 6: członek granicy, którego projekt nie jest ACTIVE (DEC-42) -------------------------------
+#
+# KTO TO ODCZUWA: security i każdy, kto podejmuje decyzję o promocji. Skasowanie projektu członka nie jest
+# u nas zdarzeniem — projekty kasuje inny zespół, bez powiadomienia. Skutek natychmiastowy jest kosmetyczny
+# (wpis wskazuje na numer, którego nie ma), skutek opóźniony jest groźny: naruszenia martwego członka
+# spadają do zera, a zero jest DOWODEM „czystego okna", którego wymaga bramka promocji. Obcy zespół
+# produkuje w ten sposób fałszywy dowód gotowości do egzekwowania.
+#
+# DLACZEGO TO NIE JEST BRAMKA NA PULL REQUEŚCIE. Rozstrzygnięte pomiarem: koszt pytania o każdego członka
+# rósłby liniowo przy KAŻDYM wniosku, a bramka blokowałaby WŁASNE LEKARSTWO — jedyne wyjście z martwego
+# wpisu prowadzi przez `plan` + `apply`, czyli przez te same przebiegi, które ta bramka by zatrzymała.
+# Onboarding pokrywa pre-flight; ten alert pokrywa dokładnie jeden pozostały przypadek: projekt skasowany
+# JUŻ PO wejściu do granicy.
+#
+# TRZY WARUNKI, BO SĄ TRZY RÓŻNE ZDANIA — i drugie z nich jest tym, przez które ten alert w ogóle powstał:
+#   (a) `not_active` > 0 — WERDYKT: stan odczytany i inny niż ACTIVE. Ktoś kasuje projekt, który jest
+#       w granicy. Wchodzimy w kroki offboardingu (`3-runbook…` §C) tego samego dnia;
+#   (b) `unreadable` > 0 — ŚLEPOTA NA CZŁONKU: stanu NIE odczytano. To NIE jest potwierdzenie, że członek
+#       żyje, więc nie wolno go zamieść pod „ACTIVE". Osobny warunek, bo osobna procedura;
+#   (c) BRAK DANYCH — ślepota na całym detektorze: producent nie zdołał odczytać granicy albo Asset
+#       Inventory i świadomie NIE opublikował zera. Bez tego warunku jego awaria wyglądałaby dokładnie
+#       tak, jak zdrowie.
+#
+# `duration = 60s`, a nie godzina jak przy `review_by` — i to jest wybór, nie kopia. Stan cyklu życia
+# projektu NIE MIGOCZE: `DELETE_REQUESTED` trwa 30 dni, więc dłuższe okno nie odfiltrowuje szumu, tylko
+# dokłada opóźnienia do sygnału, którego całe znaczenie polega na czasie reakcji. Każda godzina zwłoki to
+# godzina, w której bramka promocji może skonsumować fałszywe czyste okno. 60 s to MINIMUM API dla
+# `evaluation_missing_data` (zerowe okno = `Error 400`), a realne opóźnienie wykrycia i tak wyznacza
+# kadencja producenta (godzina), nie ten próg.
+#
+# WARNING, nie CRITICAL, i kanał BEZPIECZEŃSTWA, nie pojemnościowy. Nic nie jest w tej chwili blokowane
+# ani zepsute — granica działa dalej, a soft-delete trwa 30 dni, więc jest czas na reakcję w godzinach
+# pracy. CRITICAL wiszący tygodniami nauczyłby dyżurnego klikać „potwierdź" na kategorii, w której siedzi
+# alert o odmowie egzekwowanej. Kanał bezpieczeństwa, bo to jest fałszowanie dowodu, a nie dług porządkowy.
+resource "google_monitoring_alert_policy" "vpcsc_member_project_gone" {
+  count = local.alert_count
+
+  depends_on = [time_sleep.deskryptory_widoczne]
+
+  project      = local.monitoring.project_id
+  display_name = "VPC-SC: członek granicy bez potwierdzonego stanu ACTIVE"
+  combiner     = "OR"
+  severity     = "WARNING"
+
+  conditions {
+    display_name = "co najmniej jeden członek ma stan inny niż ACTIVE"
+
+    condition_threshold {
+      filter = join(" AND ", [
+        "metric.type=\"${local.metryka.czlonkowie_nieaktywni}\"",
+        "resource.type=\"global\"",
+        "metric.labels.state=\"not_active\"",
+      ])
+      comparison              = "COMPARISON_GT"
+      threshold_value         = 0
+      duration                = "60s"
+      evaluation_missing_data = "EVALUATION_MISSING_DATA_INACTIVE"
+
+      aggregations {
+        alignment_period   = "3600s"
+        per_series_aligner = "ALIGN_MAX"
+      }
+    }
+  }
+
+  conditions {
+    display_name = "stanu co najmniej jednego członka NIE odczytano"
+
+    condition_threshold {
+      filter = join(" AND ", [
+        "metric.type=\"${local.metryka.czlonkowie_nieaktywni}\"",
+        "resource.type=\"global\"",
+        "metric.labels.state=\"unreadable\"",
+      ])
+      comparison              = "COMPARISON_GT"
+      threshold_value         = 0
+      duration                = "60s"
+      evaluation_missing_data = "EVALUATION_MISSING_DATA_INACTIVE"
+
+      aggregations {
+        alignment_period   = "3600s"
+        per_series_aligner = "ALIGN_MAX"
+      }
+    }
+  }
+
+  conditions {
+    display_name = "detektor żywotności członków milczy"
+
+    # Martwy-człowiek TEJ metryki, a nie wspólny z `apply_pending`. Tryb awarii jest osobny: `watch.yml`
+    # może chodzić i publikować komplet pozostałych liczb, a mimo to nie mieć odczytu Asset Inventory
+    # (odebrany `cloudasset.viewer`, wyłączone `cloudasset.googleapis.com`, `403` na zakresie organizacji).
+    # Producent świadomie nie publikuje wtedy zera — więc bez tego warunku jego ślepota jest ciszą.
+    condition_absent {
+      filter = join(" AND ", [
+        "metric.type=\"${local.metryka.czlonkowie_nieaktywni}\"",
+        "resource.type=\"global\"",
+      ])
+      duration = "${local.progi.watchdog_absent_seconds}s"
+
+      aggregations {
+        alignment_period   = "3600s"
+        per_series_aligner = "ALIGN_MAX"
+      }
+    }
+  }
+
+  notification_channels = local.kanal_bezpieczenstwo
+
+  alert_strategy {
+    auto_close = "604800s"
+  }
+
+  documentation {
+    mime_type = "text/markdown"
+    subject   = "VPC-SC: w granicy stoi członek, o którym nie wiadomo, że jego projekt żyje"
+    content   = <<-DOC
+      Co najmniej jeden numer z `spec.resources` albo `status.resources` należy do projektu, który **nie
+      jest `ACTIVE`** — albo którego stanu **nie udało się odczytać**. Warunek, który się otworzył, mówi
+      który z tych dwóch przypadków zachodzi; to są różne procedury i nie wolno ich mylić.
+
+      **Kto to odczuwa:** security i decyzja o promocji. Naruszenia martwego członka spadają do zera,
+      a zero jest dowodem „czystego okna" dla bramki promocji — czyli martwy wpis robi się z czasem coraz
+      lepszym kandydatem do egzekwowania. `plan`, `apply`, dryf, `expiry-sweep` i pre-flight tego NIE widzą
+      i widzieć nie mogą: Git i granica zgadzają się co do numeru, którego nie ma.
+
+      Pełna procedura: `docs/7-alerty.md`, sekcja „martwy członek granicy".
+    DOC
+
+    links {
+      display_name = "runbook"
+      url          = "${local.runbook}#martwy-czlonek"
     }
   }
 }
