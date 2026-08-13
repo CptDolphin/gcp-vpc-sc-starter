@@ -441,6 +441,17 @@ resource "google_monitoring_alert_policy" "vpcsc_network_window_workload" {
       i odrzucona (DEC-32): zamienia okno czterominutowe na trwałą blokadę czynności legalnej, a wyjątek
       od niej jest tą samą dziurą, tylko z podpisem.
 
+      **Jeśli odpalił DRUGI warunek („obserwator przestał publikować") i stało się to po odtworzeniu
+      środowiska od zera — najpierw sprawdź, czy stack sinka w ogóle stoi.** Ta liczba ma własny kubełek,
+      własny sink i własny grant, a stawia je **`violations-sink/`** — katalog applikowany przez
+      **CZŁOWIEKA** z org-level **`roles/logging.configWriter`**, nie przez pipeline perimetru (konto
+      `apply` tego uprawnienia świadomie nie ma). Repo perimetru samo w sobie **nie odtworzy** tego
+      strumienia i nie zgłosi jego braku inaczej niż tym alertem:
+
+      ```
+      cd violations-sink && terraform init && terraform apply   # tożsamość: człowiek, org-level configWriter
+      ```
+
       Pełna procedura i pomiar: `docs/7-alerty.md#okno-swiezej-sieci`.
     DOC
 

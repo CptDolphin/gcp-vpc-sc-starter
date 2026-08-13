@@ -451,6 +451,42 @@ wyłącznie ją — alerty odmów i zmian ACM milczą dalej, bo ich źródła ż
 „nikt nie łamie kolejności" nie jest zdaniem o świecie. Sprawdź ostatni przebieg `watch.yml`, istnienie
 widoku zdarzeń Compute i grant konta planu na nim.
 
+**Jeśli ten warunek odpalił po odtworzeniu środowiska od zera, zacznij od innego pytania: czy stack sinka
+w ogóle stoi.** Repozytorium perimetru **nie umie go postawić** — kubełek, sink i widok zdarzeń Compute
+stawia katalog **`violations-sink/`**, applikowany przez **człowieka** z org-level
+`roles/logging.configWriter`. Konto `sa-vpcsc-apply` tego uprawnienia świadomie nie ma (para „sink +
+kubełek" to ścieżka wyprowadzenia logów), więc pipeline nie odtworzy tego strumienia **ani go nie zgłosi**
+inaczej niż tym alertem:
+
+```
+cd violations-sink && terraform init && terraform apply   # tożsamość: człowiek, org-level configWriter
+```
+
+Kolejność stacków przy odtworzeniu i to, co się dzieje, gdy któryś pominiesz: [`1-wdrozenie.md`
+→ Trzy stacki Terraforma](1-wdrozenie.md#trzy-stacki-terraforma--kolejnosc-i-kto-wykonuje).
+
+> **Czego ten alert NIE zgłosi, choć wygląda, jakby zgłaszał.** Do 2026-08-13 metryka okna nie miała
+> **deskryptora** w `terraform/alerts.tf`, więc powstawała dopiero przy pierwszym zapisie obserwatora.
+> Metryka, do której nigdy nic nie napisano, nie jest „nieobecna" — jest **nieznana**, a warunek na
+> nieobecność jej nie widzi. Przez ten czas martwy-człowiek nie mógł odpalić **ani razu**, a dokładnie ten
+> przypadek (detektor bez źródła) miał być jego powodem istnienia. Deskryptor jest dziś tworzony przy
+> `apply` i uzbraja go od chwili wdrożenia (DEC-35) — jeśli kiedyś zobaczysz ten warunek jako „nigdy nie
+> strzelał", sprawdź najpierw, czy deskryptor w ogóle istnieje.
+>
+> **`gcloud` nie ma na to komendy** — ani `gcloud monitoring`, ani `gcloud beta monitoring` nie zna
+> deskryptorów metryk (`Invalid choice: 'metrics-descriptors'`; jest tylko `metrics-scopes`). Jedyną drogą
+> jest API:
+>
+> ```
+> curl -s -G -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+>   --data-urlencode 'filter=metric.type=starts_with("custom.googleapis.com/vpcsc/")' \
+>   https://monitoring.googleapis.com/v3/projects/<PROJEKT>/metricDescriptors \
+>   | python3 -c 'import sys,json;[print(m["type"]) for m in json.load(sys.stdin).get("metricDescriptors",[])]'
+> ```
+>
+> Lista niepełna wobec `local.metryka` w `terraform/alerts.tf` znaczy, że któraś polityka stoi na metryce
+> bez deskryptora — czyli ten sam defekt wrócił.
+
 ### Dlaczego to jedzie OSOBNYM kubełkiem, a nie trzecim widokiem kubełka naruszeń
 
 Filtr widoku logów wolno oprzeć **wyłącznie** na źródle logu, typie zasobu, polach apphub, etykietach

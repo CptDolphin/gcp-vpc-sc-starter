@@ -2064,6 +2064,50 @@ def test_alerty() -> None:
         check("KAZDA polityka na metryce wlasnej czeka na propagacje deskryptora",
               not bez_czekania, str(bez_czekania))
 
+    # 2c. POLITYKA ALERTU I DESKRYPTOR JEJ METRYKI NALEZA DO TEGO SAMEGO STACKU (DEC-35).
+    #
+    # ASERCJA NA ZMIERZONY DEFEKT, nie na styl. Odtworzenie po awarii 2026-08-13 (apply `31679291426`)
+    # padlo na `Error 404: Cannot find metric(s) that match type = "…/network_window_workload"` przy
+    # `Plan: 19 to add`. Metryka wlasna bez zadeklarowanego deskryptora powstaje dopiero przy PIERWSZYM
+    # zapisie punktu — czyli po pierwszym przebiegu obserwatora, ktory potrzebuje widoku z kubelka
+    # stawianego przez `violations-sink/` (stack CZLOWIEKA, org-level `roles/logging.configWriter`).
+    # Odtworzenie „repo perimetru najpierw" padalo wiec ZAWSZE, a `depends_on` przez granice stanow nie
+    # istnieje. Sprawdzenie wyzej („czeka na propagacje") tego NIE lapie: czekanie na deskryptor, ktorego
+    # nikt nie tworzy, jest skladniowo poprawne.
+    #
+    # DRUGI, GROZNIEJSZY SKUTEK: martwy-czlowiek takiej polityki jest martwy sam. Metryka, do ktorej nigdy
+    # nic nie napisano, nie jest „nieobecna" — jest NIEZNANA, a `condition_absent` nie odpala. Producent
+    # swiadomie nie publikuje zera, gdy nie ma czego policzyc, wiec przypadek „detektor bez zrodla" dawal
+    # cisze braną za spokoj.
+    bloki_deskryptorow = re.findall(
+        r'resource "google_monitoring_metric_descriptor" "(\w+)"(.*?)\n}\n', alerts, re.S)
+    zadeklarowane = set()
+    for nazwa, tresc in bloki_deskryptorow:
+        klucz = re.search(r"type\s+= local\.metryka\.(\w+)", tresc)
+        if klucz:
+            zadeklarowane.add(klucz.group(1))
+    check("znaleziono deskryptory metryk wlasnych", len(zadeklarowane) >= 8, str(sorted(zadeklarowane)))
+    bez_deskryptora = sorted({
+        f"{nazwa} -> local.metryka.{klucz}"
+        for nazwa, tresc in polityki
+        for klucz in re.findall(r"local\.metryka\.(\w+)", tresc)
+        if klucz not in zadeklarowane
+    })
+    check("KAZDA metryka pod polityka alertu ma deskryptor w TYM SAMYM stacku (DEC-35)",
+          not bez_deskryptora,
+          f"{bez_deskryptora} — deskryptora brak w `terraform/alerts.tf`, wiec metryka powstanie dopiero "
+          f"przy pierwszym zapisie producenta. Apply OD ZERA padnie na tej polityce bledem 404 "
+          f"`Cannot find metric(s)`, a jej `condition_absent` nie odpali nigdy. Deskryptor dodaj W TYM "
+          f"stacku (`terraform/`, tozsamosc `sa-vpcsc-apply`) — NIE w stacku producenta")
+    if czekanie:
+        blok_czekania = re.search(
+            r'resource "time_sleep" "%s"(.*?)\n}\n' % re.escape(czekanie.group(1)), alerts, re.S)
+        poza_czekaniem = [n for n, _ in bloki_deskryptorow
+                          if blok_czekania and
+                          f"google_monitoring_metric_descriptor.{n}" not in blok_czekania.group(1)]
+        check("KAZDY deskryptor jest w depends_on oczekiwania na propagacje",
+              blok_czekania is not None and not poza_czekaniem, str(poza_czekaniem))
+
     # 3. ALERT O APPLY ŁAPIE TRZY TRYBY AWARII — warunek o WIEKU, nie nasłuch zdarzenia — plus czwarty
     # (martwy obserwator) przez BRAK danych. Bez drugiego warunku martwy `watch.yml` daje wykres zamrożony
     # na ostatniej dobrej wartości, czyli ciszę wyglądającą na zdrowie.
