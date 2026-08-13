@@ -288,6 +288,37 @@ runs:
           exit 1
         fi
 
+    # ARTEFAKT PRZEBIEGU ŚLEDZONY PRZEZ GITA — trzecia warstwa, bo dwie pierwsze mają wspólną ślepotę.
+    #
+    # `.gitignore` i `add-paths` w kanale wejściowym pilnują MOMENTU WEJŚCIA: obie działają na pliku,
+    # który dopiero ma zostać dodany. Na pliku JUŻ ŚLEDZONYM nie robią nic — `.gitignore` z definicji
+    # nie dotyczy zawartości indeksu, a `add-paths` przepuszcza to, co i tak jest w drzewie. Zmierzone
+    # (#2037): `tools/__pycache__/*.pyc` wjechał na `main` wdrożenia i został tam przez kolejne
+    # pull requesty, w tym takie, które ten sam plik modyfikowały. Dopóki ktoś go nie zdejmie ręcznie,
+    # dwie pierwsze warstwy będą go widziały jako stan normalny.
+    #
+    # Guard patrzy na INDEKS (`git ls-files`), nie na diff. Dzięki temu daje tę samą odpowiedź na pull
+    # requeście i na push do gałęzi domyślnej — a pytanie „czy repozytorium zawiera artefakt" nie zależy
+    # od tego, czy akurat ktoś go w tym commicie ruszył. Guard oparty o diff milczałby przez wszystkie
+    # przebiegi poza tym jednym, w którym plik wchodzi.
+    #
+    # Klasy są WYPISANE, a nie czytane z `.gitignore`: plik ignorowań jest listą życzeń wobec przyszłości
+    # i wolno go poluzować w jednym pull requeście razem z dodaniem pliku. Rozjazd między tą listą
+    # a `.gitignore` jest wtedy sygnałem do przeczytania, nie awarią do wyciszenia.
+    - name: guard - repozytorium bez artefaktow przebiegu
+      shell: bash
+      run: |
+        # Zakotwiczone do korzenia tam, gdzie nazwa jest pospolita: `violations.md` w `docs/` to
+        # dokumentacja, `violations.md` w korzeniu to wyjście ostatniego raportu.
+        artefakty=$(git ls-files | grep -E \
+          '(^|/)__pycache__/|\.pyc$|^stan/|(^|/)\.terraform/|\.tfstate($|\.)|\.tfplan(\.binary)?$|^(plan|declarations|violations)\.json$|^violations\.md$' \
+          || true)
+        if [ -n "$artefakty" ]; then
+          echo "$artefakty"
+          echo '::error::Artefakt przebiegu jest sledzony przez gita. Zdejmij go z indeksu (git rm --cached <plik>) i sprawdz, czy .gitignore obejmuje jego klase — plik juz sledzony nie jest przez .gitignore chroniony.'
+          exit 1
+        fi
+
     # `continue-on-error` ZAMIENIA PORAŻKĘ W „SUCCESS" W REST API — zmierzone, nie teoretyczne.
     #
     # Krok z tą flagą raportuje `steps[].conclusion: "success"` mimo `##[error]` w logu, bo per-krokowego
