@@ -426,6 +426,19 @@ resource "google_monitoring_alert_policy" "vpcsc_network_window_workload" {
       Uwaga na dwa wpisy o tej samej `resourceName` (`operation.first` i `operation.last`) — to jedna
       operacja. Zero czasu okna to wpis WCZEŚNIEJSZY.
 
+      **Jeśli w adnotacji stoi `[HIPOTEZA]`, nazwa sieci powyżej NIE jest odczytem (DEC-40).** Wpis
+      audytowy maszyny dla sieci custom-mode nie niesie pola `network` — tylko `subnetwork` — więc
+      maszyna została dopasowana fail-closed do każdej świeżej sieci w tym projekcie. Rozstrzygnij
+      podsiecią z adnotacji, ZANIM zacytujesz nazwę sieci w zgłoszeniu:
+
+      ```
+      gcloud compute networks subnets describe <PODSIEC> --project=<PROJEKT> --region=<REGION> \
+        --format='value(network)'
+      ```
+
+      Inna sieć niż w alercie = fałszywy alarm (maszyna stała w sieci dojrzałej). Odnotuj go — częstość
+      takich trafień jest wejściem do decyzji o mapie podsieć→sieć, a nie szumem do zamiecenia.
+
       **2. Ogranicz, co mogło wyjść.** Okno trwa od utworzenia sieci do ~5 minut później (górna
       obserwacja 5 m 18 s; propagacja migocze, więc bierz górną, nie średnią). Pytanie brzmi: czy ta
       maszyna miała w tym czasie dostęp do czegokolwiek wrażliwego i czy cokolwiek wysyłała. **Nie szukaj

@@ -2829,3 +2829,44 @@ a raport podaje ich liczbę wprost. Fałszywe okno powstaje **wyłącznie** w ko
 | zostawić krok i dopisać przypis „u kogoś innego robi to inny zespół" | przypis nie zmienia tego, że krok stoi w numerowanej ścieżce i wykonujący do niego dojdzie. Procedura, która w połowie oddaje sterowanie, nie nazywając przekazania, jest gorsza od procedury, która się kończy |
 | wyciąć z materiału warianty tworzące i kasujące projekty | to one dają reprodukowalność „od zera" i możliwość ćwiczenia odtworzenia. Problemem jest brak etykiety, nie obecność wariantu — koszt adnotacji bliski zeru, koszt utraty ćwiczenia wysoki |
 | czekać z przepisaniem procedury na automat wykrywający martwego członka | odwrotna kolejność. Uzgodnienie i rekoncyliacja są tańsze, działają bez kodu i dopiero one mówią automatowi, **jakiego czasu detekcji** ma pilnować |
+## DEC-40 — Nazwa sieci w alercie okna jest HIPOTEZĄ, bo wpis audytowy maszyny jej nie niesie
+
+**Decyzja.** Detektor okna świeżej sieci (DEC-32) **zostaje fail-closed**, ale przestaje przedstawiać wynik
+dopasowania jako odczyt. Szczegół trafienia niesie `siec_odczytana` **oraz `podsiec`**, adnotacja przebiegu
+i treść alertu oznaczają dopasowanie fail-closed znacznikiem **`[HIPOTEZA]`**, a dyżurny dostaje referencję
+podsieci — jedyną, którą wpis realnie zawiera. Ścisłe dopasowanie pary wymaga mapy podsieć→sieć i jest
+osobnym zgłoszeniem, bo dotyka **filtra sinka org-level** (materiał: `v1.compute.subnetworks.insert`).
+
+**Dlaczego.** Pierwotna implementacja czytała `protoPayload.request.networkInterfaces[].network` i traktowała
+pustą listę jako rzadki przypadek „przyciętego `request`". **Odczyt żywego wpisu dostarczonego przez sink
+(2026-08-13, przelot dowodowy #2028) pokazał, że dla sieci CUSTOM-MODE tego pola nie ma w ogóle** —
+wpis niesie wyłącznie `subnetwork`:
+
+```
+request.networkInterfaces[0].subnetwork = .../projects/<p>/regions/<r>/subnetworks/<s>
+request.networkInterfaces[0].network    = (pola NIE MA)
+```
+
+Przeszukanie **całego** wpisu pod kątem nazwy sieci dało zero trafień; drugie miejsce z tą informacją,
+`authorizationInfo[].resource`, wskazuje również podsieć. Wpis `operation.last` niesie `request` złożony
+wyłącznie z `@type`, więc jest pusty niezależnie od trybu sieci (scalanie i tak bierze `operation.first`).
+
+**Skutek, który trzeba nazwać, bo zmienia znaczenie metryki.** Ścieżka fail-closed nie jest wyjątkiem, tylko
+**ścieżką domyślną**: w projekcie, w którym w tym samym oknie powstała świeża sieć **i** powstała maszyna
+w sieci **dojrzałej**, alert zapali się na tej drugiej i wskaże w adnotacji nazwę tej pierwszej. Kierunek
+błędu pozostaje bezpieczny — realnego okna nie da się przeoczyć — ale precyzja pary jest **mniejsza, niż
+sugeruje nazwa metryki**. Alert, który nazywa zasób, którego nie odczytał, uczy dyżurnego, że treść alertu
+jest orientacyjna; to jest ta sama klasa szkody co szum, tylko wolniejsza.
+
+**Kontrola, która tego nie złapała, i dlaczego.** Selftest miał asercję pozytywną („maszyna wskazuje tę sieć")
+zbudowaną na **fixture z kształtu dokumentacyjnego**, nie z żywego wpisu — testowała więc wariant, którego
+produkcja nie wykonuje. Asercje `ZYWY ksztalt: …` stoją teraz na kopii wpisu zdjętego z kubełka sinka.
+
+**Co odrzucono i dlaczego.**
+
+| wariant | dlaczego nie |
+|---|---|
+| dopisać `v1.compute.subnetworks.insert` do filtra sinka i złożyć mapę podsieć→sieć **w tym samym MR** | to jest właściwe docelowe rozwiązanie, ale zmienia **sink org-level** — zasób wspólny dla całej kampanii, applikowany ręcznie przez człowieka z `logging.configWriter`, a zmiana filtra **gubi zdarzenia z okna propagacji** (§9.20 pkt 1). Zmiana semantyki pary zasługuje na własne zgłoszenie i własny pomiar, a nie na doklejenie do przelotu dowodowego |
+| zawęzić dopasowanie do maszyn, których podsieć **nazwą** przypomina sieć (`w1-ew1` → `w1`) | dopasowanie po konwencji nazewniczej, a nie po referencji. Działa dla materiału przykładowego i milczy u każdego, kto nazywa podsieci inaczej — czyli bramka mierzyłaby nasz styl nazw |
+| przestać liczyć maszyny bez czytelnej sieci (odwrócić fail-closed na fail-open) | odwraca kierunek błędu na ten jedyny nieodwracalny: ruch w oknie **nie zostawia śladu** (41 przekroczeń granicy → 0 wpisów audytowych), więc przeoczonego okna nie da się odtworzyć z niczego. Fałszywy alarm kosztuje jedno sprawdzenie w widoku |
+| zostawić kod bez zmian i opisać rozbieżność wyłącznie w runbooku | runbook czyta się **po** alercie, a mylące zdanie stoi **w** alercie. Adnotacja twierdziła „sieć X dostała obciążenie" — zdanie mocniejsze, niż pomiar uprawnia |
