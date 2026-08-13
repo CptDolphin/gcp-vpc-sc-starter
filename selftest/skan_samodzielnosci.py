@@ -159,8 +159,14 @@ def adresy_spoza_konwencji(tekst):
     Materiał szablonowy nie ma powodu nieść ani jednego prawdziwego adresu — czyjkolwiek by on nie był.
     Ta reguła domyka klasę „domena wdrożenia" kształtem: skrót w denyliście zna jedną domenę, ta zna
     każdą przyszłą. Wyjątki w `DOMENY_NIEBEDACE_WDROZENIEM` mają uzasadnienie przy stałej.
+
+    OSTATNI CZŁON MUSI BYĆ LITEROWY (`[A-Za-z]{2,}`) i to nie jest kosmetyka. Bez tego wzorzec czyta jako
+    adres każdą wersję po małpie: `cspell@10.0.1`, `dict-pl_pl@3.0.6`, `actions/checkout@v4.1.1`. Złapane
+    na cudzym repozytorium podczas kontroli, czy ta sama klasa nie wyciekła gdzie indziej — czyli dokładnie
+    tam, gdzie skan ma być uruchamiany poza starterem. Bramka fałszywie czerwona u odbiorcy zostaje
+    wyłączona równie szybko jak bramka krzycząca 529 razy u siebie.
     """
-    for m in re.finditer(r"[A-Za-z0-9][A-Za-z0-9._%+-]*@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)", tekst):
+    for m in re.finditer(r"[A-Za-z0-9][A-Za-z0-9._%+-]*@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,})", tekst):
         domena = m.group(1).lower()
         if _przykladowy(domena) or any(w in domena for w in DOMENY_NIEBEDACE_WDROZENIEM):
             continue
