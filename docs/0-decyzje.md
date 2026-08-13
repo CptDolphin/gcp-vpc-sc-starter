@@ -2914,3 +2914,56 @@ a ona pyta o **kształt** zmiany, nie o to, kto ją przeczytał.
 | uznać zielony `apply` za wystarczający dowód i opisać tylko kroki | to jest dokładnie stan sprzed tego dokumentu: cztery scenariusze **z kodem i dowodem, bez procedury**, a przy tym cztery zmierzone awarie, których zielony apply nie odróżnił od sukcesu |
 | dorobić mechanizm zatwierdzania dla profilu, access levelu i `restricted_services` na wzór `egress_approvals` | trzy nowe wpisy do utrzymania, wprowadzone razem z pierwszą procedurą, która ich dotyczy — zanim wiadomo, czy nazwany zatwierdzający w procedurze wystarcza. Ryzyko jest znane i nazwane; mechanizm powstanie, gdy okaże się, że nazwanie nie działa, a nie „na wszelki wypadek" |
 | wymagać pary kanarków przy KAŻDEJ z czterech procedur | para mierzy access level i tylko on ma tryb awarii „obiekt wygląda kompletnie i nie autoryzuje nikogo, a wpuszczenia nie widać w logu". Dla członka, profilu i listy usług tańszy odczyt (`describe`) odpowiada na to samo pytanie — wymóg pary byłby tam rytuałem, nie kontrolą |
+
+
+## DEC-42 — Maszynę do sieci dopasowuje MAPA PODSIEĆ→SIEĆ, a niewiedza nadal liczy się jak trafienie
+
+**Decyzja.** Filtr sinka zdarzeń sterujących Compute dostaje **trzeci** człon —
+`v1.compute.subnetworks.insert` — a obserwator buduje z niego mapę `projects/<p>/regions/<r>/subnetworks/<s>`
+→ **nazwa sieci** i dopasowuje nią maszynę do konkretnej świeżej sieci. Kolejność źródeł: najpierw jawna
+referencja `networkInterfaces[].network` z wpisu maszyny, a **dopiero gdy jej nie ma** — mapa. Trzy wyniki
+i ich skutki: podsieć znana i należąca do TEJ sieci = trafienie · znana i należąca do INNEJ = odrzucenie ·
+**nieznana = nadal fail-closed**, czyli liczy się jak trafienie.
+
+**Dlaczego to nie jest kosmetyka.** Wpis `v1.compute.instances.insert` dla sieci **custom-mode** nie niesie
+pola `networkInterfaces[].network` w ogóle — niesie wyłącznie `subnetwork` (zmierzone na żywym wpisie,
+#2028). Custom-mode jest trybem domyślnym dla każdej sieci tworzonej świadomie, więc ścieżka fail-closed
+była **domyślna, a nie wyjątkowa**: obserwator liczył każdą maszynę do KAŻDEJ świeżej sieci w projekcie
+i wpisywał w adnotację nazwę sieci, w której tej maszyny mogło nigdy nie być. Alert nazywał sieć, której
+nie odczytał — i robił to w treści CRITICAL, na kanale bezpieczeństwa, gdzie dyżurny nie ma jak tego
+sprawdzić inaczej niż ręcznie. Znacznik `[HIPOTEZA]` był uczciwy, ale hipoteza w alercie jest kosztem
+dyżuru, a nie informacją.
+
+**Dlaczego klucz mapy to PEŁNA ŚCIEŻKA, a nie nazwa podsieci.** Nazwa podsieci jest unikalna dopiero
+w parze (projekt, region): `web` w `europe-west1` i `web` w `us-central1` mogą należeć do dwóch różnych
+sieci. Spłaszczenie klucza do nazwy skleiłoby oba wpisy w jeden i dało dopasowanie do **złej** sieci —
+czyli dokładnie ten defekt, który ta decyzja zamyka, tylko trudniejszy do zauważenia, bo wyglądający na
+odczyt. Obie strony podają tę samą podsieć w innym kształcie (wpis maszyny — pełny URL, wpis podsieci —
+`resourceName` bez hosta), więc kotwicą normalizacji jest segment `projects/`.
+
+**Czego pomiar nie pozwolił założyć — i co z tego wynika dla testu.** `subnetworks.insert` zostawia **dwa**
+wpisy na jedną operację, a pole `network` niesie **wyłącznie** wpis otwierający (`operation.first`); wpis
+zamykający ma `request` złożony z samego `@type`. Zmierzone: **5/5** kontra **0/5** (10 wpisów, 5 operacji,
+2026-08-13). `scal_operacje` bierze wpis o najwcześniejszym znaczniku czasu, więc bierze właśnie otwierający —
+ale **jako skutek uboczny** reguły „zero czasu okna to moment utworzenia", a nie dlatego, że ktoś chciał
+`request`. Gdyby ta reguła kiedykolwiek zmieniła się na „ostatni wpis", mapa zrobiłaby się **pusta**,
+dopasowanie po cichu cofnęłoby się do fail-closed, a wszystkie testy kształtu samych funkcji nadal
+przechodziłyby. Dlatego selftest asertuje **niepustość mapy zbudowanej z pary wpisów**, a nie kształt
+funkcji: cisza po takiej regresji jest nieodróżnialna od „nikt nie tworzył podsieci".
+
+**Kierunek błędu się NIE ZMIENIA — i to jest warunek, nie efekt uboczny.** Podsieć nieznana (utworzona przed
+oknem odczytu, albo strumień nie dotarł) nadal liczy się do okna. Przeoczone okno jest **nieodwracalne**,
+bo ruch, który przez nie przeszedł, nie zostawia śladu; fałszywy alarm kosztuje jedno sprawdzenie w widoku
+sinka. Ta zmiana odbiera fałszywym alarmom **jedną konkretną przyczynę** (maszyna w sieci dojrzałej obok
+świeżej), a nie zamienia przeszacowania na ciszę.
+
+**Co odrzucono i dlaczego.**
+
+| wariant | powód odrzucenia |
+|---|---|
+| zostawić `[HIPOTEZA]` i kazać dyżurnemu rozstrzygać `subnets describe` | procedura istniała i jest poprawna, ale przenosi na dyżur pracę, którą detektor ma czym wykonać sam — a robi to w środku nocy, przy alercie CRITICAL, gdzie każdy dodatkowy krok jest kosztem czasu do decyzji |
+| dopasowywać po samej NAZWIE podsieci | nazwa jest unikalna dopiero w parze (projekt, region); kolizja dawałaby dopasowanie do złej sieci wyglądające na odczyt, czyli defekt gorszy od jawnej hipotezy |
+| czytać przypisanie podsieci przez `compute.subnetworks.get` zamiast z logu | odczyt bieżącego stanu odpowiada na inne pytanie niż okno historyczne (podsieć mogła zostać skasowana albo przepięta), wymaga uprawnień Compute dla tożsamości obserwatora i wprowadza zależność od API, którego niedostępność cofa detektor do fail-closed **bez śladu w metryce** |
+| dołożyć `subnetworks.insert` do filtra i **nie** ruszać zapytania odczytu | to są DWA różne filtry. Zdarzenie przepuszczone przez sink, ale niewpuszczone przez zapytanie odczytu, nie dociera do detektora — mapa wyszłaby pusta, a przebieg zielony |
+| zmienić kierunek błędu na „nieznana podsieć = nie licz" | zamienia przeszacowanie na ciszę dokładnie tam, gdzie strumień zawiódł. Sink, który nie dostarcza, wygląda wtedy jak czyste okno — ta klasa defektu ma już własny wpis w runbooku i nie wolno jej wprowadzać powtórnie |
+| osobny, czwarty kubełek na `subnetworks.insert` | rozłączność nie jest tu do niczego potrzebna: to ten sam detektor, to samo okno odczytu i ten sam konsument. Czwarty kubełek to trzeci grant, trzeci widok i trzecia rzecz do odtworzenia na nowym klastrze, kupione za nic |

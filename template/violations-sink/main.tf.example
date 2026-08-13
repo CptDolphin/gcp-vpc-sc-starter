@@ -95,9 +95,21 @@ locals {
   # sinkiem. KOSZT, POLICZONY, A NIE ODHACZONY: darmowy przydział ingestu Cloud Logging to 50 GiB/projekt/mc,
   # a wpis audytowy waży ~3,3 KB (zmierzone na tym kubełku) — czyli ~15 mln wpisów miesięcznie w cenie zero.
   # Żadna organizacja nie tworzy 15 mln maszyn na miesiąc; retencja <= 30 dni jest darmowa niezależnie.
+  #
+  # DLACZEGO TEŻ `subnetworks.insert` (DEC-42). Wpis maszyny w sieci CUSTOM-MODE nie niesie pola
+  # `networkInterfaces[].network` W OGÓLE — niesie wyłącznie `subnetwork` (zmierzone na żywym wpisie,
+  # #2028). Bez trzeciego strumienia obserwator nie ma z czego zbudować mapy podsieć->sieć, więc każdą
+  # maszynę liczy do KAŻDEJ świeżej sieci w projekcie (fail-closed) i nazywa w alercie sieć, w której tej
+  # maszyny mogło nigdy nie być. To jedyne zdarzenie niosące przypisanie podsieci do sieci: pole `network`
+  # występuje w nim tylko we wpisie OTWIERAJĄCYM operację (`operation.first`), a wpis zamykający ma
+  # `request` złożony wyłącznie z `@type` (zmierzone: 5/5 kontra 0/5, #2052).
+  #
+  # KOSZT: trzeci strumień jest RZADSZY niż dwa poprzednie — podsieci tworzy się raz na sieć/region, a nie
+  # raz na maszynę. Rachunek z akapitu wyżej (~15 mln wpisów/mc w cenie zero) nie zmienia się o rząd.
   compute_sink_filter = join(" OR ", [
     "protoPayload.methodName=\"v1.compute.networks.insert\"",
     "protoPayload.methodName=\"v1.compute.instances.insert\"",
+    "protoPayload.methodName=\"v1.compute.subnetworks.insert\"",
   ])
 
   network_bucket_id   = "${var.bucket_id}${var.network_bucket_suffix}"
@@ -305,7 +317,7 @@ resource "google_logging_project_bucket_config" "network_inserts" {
   # odtworzyć, KTÓRA sieć i KIEDY była poza granicą, i ograniczyć, co mogło wtedy wyjść.
   retention_days = var.retention_days
 
-  description = "Zdarzenia sterujące Compute (utworzenie sieci VPC i maszyny) z całej organizacji — wejście detektora okna „świeża sieć w członku egzekwowanym” (DEC-32)."
+  description = "Zdarzenia sterujące Compute (utworzenie sieci VPC, podsieci i maszyny) z całej organizacji — wejście detektora okna „świeża sieć w członku egzekwowanym” (DEC-32, mapa podsieć->sieć DEC-42)."
 }
 
 resource "google_logging_organization_sink" "network_inserts" {
