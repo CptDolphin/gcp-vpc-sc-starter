@@ -165,6 +165,22 @@ variable "grant_logging_viewer" {
   default     = true
 }
 
+variable "positive_control_project_id" {
+  description = "Projekt sondujący KONTROLI POZYTYWNEJ sondy granicy (`boundary-probe.yml`, sonda `chroniona-z-regula`). Konto plan dostaje w NIM — i tylko w nim — prawo odczytu logów, dzięki czemu dowód „reguła baseline kogoś WPUSZCZA” nie potrzebuje ani jednego uprawnienia org-wide. MUSI BYĆ CZŁONKIEM PERIMETRU, inaczej sonda mierzy brak granicy zamiast reguły (workflow to asertuje). Pusty string = brak pinowania: kontrola pozytywna celuje wtedy w projekt z wejścia i wymaga prawa odczytu w KAŻDYM członku, czyli w praktyce roli org-wide."
+  type        = string
+  default     = ""
+
+  # DLACZEGO DOMYŚLNIE PUSTY, skoro pinowanie jest stanem pożądanym: tej wartości nie da się zgadnąć ani
+  # wyprowadzić z konfiguracji — to decyzja wdrożenia, KTÓRY członek jest projektem sondującym. Wartość
+  # zmyślona przez szablon wskazywałaby projekt, którego nie ma, i dawała `apply` czerwony na starcie.
+  # Degradacja przy pustej wartości jest NAZWANA w podsumowaniu przelotu sondy, a nie cicha.
+
+  validation {
+    condition     = var.positive_control_project_id == "" || can(regex("^[a-z][a-z0-9-]{4,28}[a-z0-9]$", var.positive_control_project_id))
+    error_message = "positive_control_project_id to ID projektu (6-30 znaków, małe litery/cyfry/myślniki) albo pusty string."
+  }
+}
+
 variable "manage_deny_policy" {
   description = "Czy TEN stack tworzy politykę IAM Deny (sekcja 5b main.tf). `true` wymaga, żeby tożsamość applikująca miała `roles/iam.denyAdmin` — JEDYNĄ rolę w Google Cloud niosącą `iam.denypolicies.create`, a przy okazji `.delete` na każdej polityce deny w organizacji; roli własnej z tymi uprawnieniami zbudować się nie da (`NOT_SUPPORTED`). `false` = warstwa zostaje poza tym stackiem świadomie i przestaje udawać wdrożoną."
   type        = bool
