@@ -177,7 +177,7 @@ gh workflow run boundary-probe.yml -f project=<PROJEKT_CZLONKA> -f expect=blocke
    NADAL działa (czyli projekt nie jest po prostu zepsuty), a odmowa ma niezależny drugi dowód we wpisie
    audytowym. Czerwony przelot mówi, KTÓRA z tych sześciu nie zaszła.
 
-   **Trzy werdykty, nie dwa** (DEC-37). Tytuł adnotacji rozstrzyga, co się stało, bez otwierania logu:
+   **Trzy werdykty, nie dwa** (DEC-39). Tytuł adnotacji rozstrzyga, co się stało, bez otwierania logu:
 
    | tytuł adnotacji | co znaczy | kod wyjścia |
    |---|---|---|

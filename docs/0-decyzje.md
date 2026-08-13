@@ -2631,7 +2631,7 @@ nowych asercji jest czerwonych (6 × osiągalność + greenfield), a dwie premis
 repo nie zarządza (`manage_skeleton: false`), musi istnieć przed pierwszym apply — tak jak dotąd; bramka
 nie zamienia brownfieldu w greenfield i nie próbuje odgadnąć, czy cudzy szkielet stoi.
 
-## DEC-37 — Sonda ma trzy werdykty, nie dwa: „blokuje" · „nie blokuje" · „nie udało się zmierzyć"
+## DEC-39 — Sonda ma trzy werdykty, nie dwa: „blokuje" · „nie blokuje" · „nie udało się zmierzyć"
 
 **Decyzja.** Obie sondy granicy — ingressowa (`.github/workflows/boundary-probe.yml`) i egressowa
 (`tools/sonda_egress_wewnetrzna.py`) — orzekają w **trzech** stanach i nazywają je w treści werdyktu.
