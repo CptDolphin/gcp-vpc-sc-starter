@@ -27,6 +27,15 @@ on:
       - "contrib/**"
       - "tools/**"
       - ".github/workflows/**"
+      # `violations-sink/**` — TRZECI stack Terraforma (sinki org-level, kubełki, widoki, IAM strumienia
+      # naruszeń). Ta sama pomyłka co przy `iam-bootstrap/**` wyżej, popełniona po raz czwarty: stack
+      # powstał, a lista ścieżek i kroki niżej zostały przy dwóch. Zmierzone 2026-08-13: błąd składni HCL
+      # w `violations-sink/main.tf` (polski cudzysłów zamykający zapisany jako ASCII `"`) przeszedł CAŁY
+      # pipeline bez ani jednego czerwonego joba. Ten stack applikuje CZŁOWIEK z org-level
+      # `roles/logging.configWriter` — konto pipeline'u świadomie go NIE MA — więc jedynym miejscem, gdzie
+      # taki błąd wychodzi, jest ręczna sesja osoby o najwyższych uprawnieniach w organizacji.
+      # Odkąd lista stacków wyprowadza się z drzewa (DEC-34), stack bez tej ścieżki czerwieni selftest.
+      - "violations-sink/**"
       # `.github/actions/**` — tu leżą TERAZ same bramki treści. Bez tej ścieżki pull request zmieniający
       # wyłącznie definicję bramki nie uruchamiałby jej ani razu, czyli jedyny plik, którego regresja
       # rozbraja cały tor, byłby jedynym bez checku. Ta sama pomyłka co przy `iam-bootstrap/**` wyżej.
@@ -84,6 +93,28 @@ jobs:
         env:
           GOOGLE_OAUTH_ACCESS_TOKEN: nie-uzywany-testy-sa-plan-only
 
+      # KAŻDY stack Terraforma dostaje TEN SAM zestaw bramek bezkredencjałowych, a nie zestaw dobrany
+      # do tego, jak ważny się wydawał w dniu powstania. Powód jest zmierzony, nie estetyczny: przez
+      # dwie zmiany z rzędu `fmt`/`init`/`validate` biegły WYŁĄCZNIE na `terraform/`, więc `iam-bootstrap`
+      # miał tylko lintera, a `violations-sink` nie miał nic — i błąd składni HCL przeszedł tam cały
+      # pipeline na zielono (2026-08-13, komentarz przy `violations-sink/**` wyżej). Asymetria „ten stack
+      # ma bramkę, tamten nie" jest niewidoczna w przeglądzie: pull request wygląda tak samo zielono
+      # w obu przypadkach. Kompletność tej listy pilnuje selftest, wyprowadzając stacki z DRZEWA repo
+      # (DEC-34) — nowy katalog z `*.tf` bez kroków niżej czerwieni bramkę, zamiast czekać na incydent.
+      - name: iam-bootstrap — fmt
+        run: terraform -chdir=iam-bootstrap fmt -check -recursive
+      - name: iam-bootstrap — init (bez backendu)
+        run: terraform -chdir=iam-bootstrap init -backend=false
+      - name: iam-bootstrap — validate
+        run: terraform -chdir=iam-bootstrap validate
+
+      - name: violations-sink — fmt
+        run: terraform -chdir=violations-sink fmt -check -recursive
+      - name: violations-sink — init (bez backendu)
+        run: terraform -chdir=violations-sink init -backend=false
+      - name: violations-sink — validate
+        run: terraform -chdir=violations-sink validate
+
   tflint:
     name: tflint (static analysis)
     runs-on: ubuntu-latest
@@ -109,3 +140,8 @@ jobs:
 
       - name: tflint - iam-bootstrap stack
         run: tflint --chdir=iam-bootstrap --config="$PWD/.tflint.hcl" --minimum-failure-severity=notice
+
+      # Ten sam linter na stacku agregacji logów. Zmierzone na treści z dnia dołożenia bramki: zero
+      # findingów, więc próg `notice` zostaje taki sam jak wyżej — nie ma czego zwalniać z bramki.
+      - name: tflint - violations-sink stack
+        run: tflint --chdir=violations-sink --config="$PWD/.tflint.hcl" --minimum-failure-severity=notice

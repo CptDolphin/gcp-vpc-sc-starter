@@ -2449,6 +2449,56 @@ który wskazuje obiekt. Degradacja jest głośna i konkretna, więc świadomie n
 
 ---
 
+## DEC-34 — Zbiór stacków Terraforma bierze się z DRZEWA repozytorium, nie z listy w bramce
+
+**Decyzja.** Każdy katalog najwyższego poziomu zawierający `*.tf` jest **stackiem** i dostaje ten sam
+zestaw bramek bezkredencjałowych: `fmt -check`, `init -backend=false`, `validate`, `tflint --config`
+oraz własną ścieżkę w wyzwalaczu `validate.yml`. Kompletności pilnuje selftest, który listę stacków
+**wyprowadza z drzewa** (`stacki_terraform()`), a potem pyta workflow, czy dla każdego z nich ma kroki
+i ścieżkę. Zbiór, o który się pyta, i zbiór, którego się pyta, są więc różnymi zbiorami.
+
+**Dlaczego.** Poprzedni kształt asercji brzmiał `wf.count("tflint --chdir=") == 2`. Taka bramka mierzy,
+czy ktoś zepsuł to, co JUŻ JEST, i jest strukturalnie ślepa na to, czego jeszcze nie ma: nowy katalog
+z HCL-em przechodzi obok, a licznik zostaje zielony, bo dwa wystąpienia nadal są dwa. Przepuściła to
+dwa razy:
+
+* `iam-bootstrap` — dostał lintera, ale nigdy `fmt`/`init`/`validate`; przez dwie zmiany z rzędu jedynym
+  sprawdzeniem stacku nadającego WSZYSTKIE uprawnienia tego systemu był tflint;
+* `violations-sink` — nie dostał **nic**. Zmierzone 2026-08-13: błąd składni HCL (polski cudzysłów
+  zamykający zapisany jako ASCII `"` kończył literał, a parser meldował „This character is not used
+  within the language" kilkadziesiąt linii niżej, przy `LOG_ID(...)`, czyli w miejscu bez związku
+  z przyczyną) przeszedł **cały pipeline bez ani jednego czerwonego joba**.
+
+Konsekwencja drugiego przypadku jest gorsza niż zwykły czerwony PR po fakcie. Ten stack applikuje
+**człowiek** z org-level `roles/logging.configWriter` — konto pipeline'u świadomie tego uprawnienia
+nie ma (sink org-level czyta logi z całej organizacji, więc nadanie go tożsamości uruchamianej z każdego
+pull requesta oddawałoby tę zdolność automatowi). Jedynym miejscem, gdzie błąd mógł wyjść, była więc
+ręczna sesja osoby o najwyższych uprawnieniach w organizacji — moment, w którym cudza pomyłka kosztuje
+najwięcej i wygląda na problem środowiska, nie kodu.
+
+Asymetria „ten stack ma bramkę, tamten nie" jest przy tym **niewidoczna w przeglądzie**: pull request
+wygląda tak samo zielono w obu przypadkach, a „no checks reported on the branch" widzi tylko ten, kto
+wie, że powinien tam czegoś szukać. To ta sama klasa błędu, którą `validate.yml` ma już opisaną trzy
+razy przy własnych ścieżkach wyzwalacza (`iam-bootstrap/**`, `contrib/**`, `.github/actions/**`) —
+czwarte powtórzenie tego samego jest sygnałem, że brakowało nie kolejnego wpisu, tylko **niezmiennika**.
+
+**Co odrzucono i dlaczego.**
+
+| wariant | dlaczego nie |
+|---|---|
+| podbić licznik z `== 2` na `== 3` | naprawia jeden przypadek i odtwarza pułapkę dla stacku numer cztery. To dokładnie ten kształt, który DEC-20 nazwał wprost przy liczbach w prozie: wpisana liczba jest prawdziwa w dniu wpisania i nikt nie dostaje zgłoszenia, gdy przestaje być |
+| trzymać listę stacków w jednym pliku konfiguracyjnym i czytać ją i przez CI, i przez selftest | wtedy bramka pyta o zgodność z listą, a nie z rzeczywistością — katalog nieobecny na liście nadal nie ma bramki, tylko teraz z jednego miejsca. Rejestr, który nie jest wyprowadzony z drzewa, sam potrzebuje bramki na kompletność |
+| `matrix:` po stackach zamiast jawnych kroków | nazwy checków stają się `terraform fmt and validate (violations-sink)` — a ochrona gałęzi domyślnej pinuje checki po NAZWIE. Każdy nowy stack cicho zmieniałby zbiór wymaganych checków repozytorium wdrożonego, więc mechanizm ułatwiający dodanie stacku psułby przy okazji bramkę, która ma go pilnować |
+| zostawić `violations-sink` bez bramki, bo „i tak applikuje go człowiek" | to jest argument odwrotny do wniosku: apply robi człowiek z uprawnieniem, którego nie ma nikt inny, więc kod ma być sprawdzony ZANIM ta osoba zacznie. Bramka bezkredencjałowa nie potrzebuje żadnego dostępu do chmury, żeby to zrobić |
+| ograniczyć się do `terraform validate` (bez `fmt` i tflinta) | `validate` nie widzi martwej zmiennej ani brakującego pinu providera, a `fmt` jest jedyną bramką łapiącą rozjazd formatu, przez który diff kolejnej zmiany przestaje być czytelny. Koszt obu to sekundy w jobie bez credentiali |
+
+**Zakres, nazwany wprost.** Niezmiennik dotyczy stacków najwyższego poziomu. Konfiguracja Terraforma
+zagnieżdżona głębiej (np. moduł w podkatalogu stacku) jest sprawdzana razem ze swoim stackiem przez
+`fmt -recursive` i przez `init`, a nie osobno — i tak ma zostać, dopóki repozytorium nie używa modułów
+lokalnych (patrz wyłączona reguła `terraform_module_version` w `.tflint.hcl`).
+
+---
+
 ## DEC-35 — Zasób granularny deklaruje szkielet perimetru JAWNIE, bo referencja po nazwie nie jest krawędzią
 
 **Decyzja.** Wszystkie sześć zasobów granularnych — `…_dry_run_resource.member`, `…_resource.member`

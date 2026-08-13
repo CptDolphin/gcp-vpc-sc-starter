@@ -10,8 +10,13 @@
 # URUCHOMIENIE — `--config` z BEZWZGLĘDNĄ ścieżką jest obowiązkowe:
 #
 #     tflint --init
-#     tflint --chdir=terraform     --config="$PWD/.tflint.hcl" --minimum-failure-severity=notice
-#     tflint --chdir=iam-bootstrap --config="$PWD/.tflint.hcl" --minimum-failure-severity=notice
+#     tflint --chdir=terraform       --config="$PWD/.tflint.hcl" --minimum-failure-severity=notice
+#     tflint --chdir=iam-bootstrap   --config="$PWD/.tflint.hcl" --minimum-failure-severity=notice
+#     tflint --chdir=violations-sink --config="$PWD/.tflint.hcl" --minimum-failure-severity=notice
+#
+# Lista jest po JEDNYM wierszu na stack i ma być kompletna — pilnuje tego selftest, który wyprowadza
+# stacki z drzewa repozytorium, a nie z tej listy (DEC-34). Stack pominięty tutaj i w `validate.yml`
+# nie jest „jeszcze nieobjęty": jest katalogiem z HCL-em, którego nie czyta żadna bramka.
 #
 # PUŁAPKA, która nas złapała przy wdrażaniu: `--chdir=X` szuka `.tflint.hcl` w katalogu **X**, nie w tym, z
 # którego uruchomiono polecenie. Bez `--config` ten plik jest cicho ignorowany — tflint działa wtedy na
@@ -51,8 +56,8 @@ rule "terraform_documented_outputs" {
 }
 
 # ŚWIADOMIE WYŁĄCZONE: `terraform_module_version` (nie używamy modułów zewnętrznych — cała logika jest tu,
-# renderer to locals) oraz `terraform_required_version` w `iam-bootstrap` byłoby duplikatem — pin jest w
-# `versions.tf` obu stacków i sprawdza go `terraform_required_providers`.
+# renderer to locals) oraz `terraform_required_version` poza stackiem perimetru byłoby duplikatem — pin jest
+# w `versions.tf` każdego stacku i sprawdza go `terraform_required_providers`.
 rule "terraform_module_version" {
   enabled = false
 }
