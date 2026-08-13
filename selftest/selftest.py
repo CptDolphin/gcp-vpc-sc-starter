@@ -4680,24 +4680,38 @@ def test_tools() -> None:
 # To nie jest test dla ozdoby: bledna klasyfikacja jednego przypadku ("apply padl" policzone jako "regula
 # zniknela") sprawila, ze eksperyment przez tydzien produkowal wniosek odwrotny do prawdy — i ten wniosek
 # poszedl do uzasadnienia decyzji architektonicznej (DEC-6, #1904).
+#
+# ATRAPA `terraform` DRUKUJE PLAN Z ATRYBUTEM `etag` — i to jest najwazniejsza linijka w tym pliku.
+# Wlasnie ona zlamala poprzednia wersje eksperymentu (#1949): werdykt rozpoznawal konflikt przez
+# `grep -i etag` po CALYM logu apply, a plan Terraforma zawsze zawiera `+ etag = (known after apply)`,
+# wiec KAZDA awaria — takze `403` z braku quota project — wychodzila jako "konflikt GLOSNY". Kategoria
+# "nierozstrzygniete", dodana po #1904 przeciw tautologii, byla nieosiagalna. Bez tej linijki w atrapie
+# testy przechodza takze dla zepsutej implementacji, czyli nie sa testami.
 TERRAFORM_ATRAPA = """#!/usr/bin/env bash
 case "$*" in
   *" apply "*)
+    echo "      + etag             = (known after apply)"
     case "$*" in
       *state-a*) rc="${STUB_RC_A:-0}" ;;
       *)         rc="${STUB_RC_B:-0}" ;;
     esac
-    [ "$rc" != "0" ] && echo "${STUB_ERR:-blad}"
+    [ "$rc" != "0" ] && echo "Error: ${STUB_ERR:-blad}"
     exit "$rc" ;;
 esac
 exit 0
 """
 
+# Atrapa oddaje TYTULY, nie licznik: werdykt pyta "czy JEST regula tej strony, ktora zglosila sukces",
+# a nie "ile regul widac". Rozroznienie jest istotne — nadpisanie objawia sie brakiem KONKRETNEJ reguly
+# przy drugiej obecnej, czyli przy niezmienionym liczniku po stronie sumy.
 GCLOUD_PERIMETR_ATRAPA = """#!/usr/bin/env bash
+case "$*" in
+  *"perimeters dry-run update"*) exit 0 ;;
+esac
 python3 -c "
 import json
-n = int('${STUB_RULES:-2}')
-print(json.dumps({'spec': {'ingressPolicies': [{'title': 'race-test-%d' % i} for i in range(n)]}}))
+tytuly = '${STUB_TITLES-race-test-alpha race-test-beta}'.split()
+print(json.dumps({'spec': {'ingressPolicies': [{'title': t} for t in tytuly]}}))
 "
 """
 
@@ -4720,29 +4734,62 @@ def test_eksperyment_wyscigu() -> None:
         return sh(["bash", str(exp / "run.sh"), "1"], cwd=str(exp), env=dict(baza, **nadpisania))
 
     # 1. Oba apply OK, obie reguly — przebieg po prostu nie trafil w okno wyscigu.
-    p = przebieg(STUB_RC_A="0", STUB_RC_B="0", STUB_RULES="2")
-    check("wyscig: oba OK + 2 reguly = bez nalozenia (rc 0)",
+    p = przebieg(STUB_RC_A="0", STUB_RC_B="0")
+    check("wyscig: oba OK + obie reguly = bez nalozenia (rc 0)",
           p.returncode == 0 and "bez nałożenia w czasie" in p.stdout, p.stdout[-500:] + p.stderr[-300:])
 
     # 2. JEDYNY przypadek potwierdzajacy teze o cichym nadpisaniu — i jedyny konczacy sie bledem.
-    p = przebieg(STUB_RC_A="0", STUB_RC_B="0", STUB_RULES="1")
-    check("wyscig: oba OK + 1 regula = CICHA UTRATA (rc != 0)",
+    p = przebieg(STUB_RC_A="0", STUB_RC_B="0", STUB_TITLES="race-test-alpha")
+    check("wyscig: oba OK, a reguly B brak = CICHA UTRATA (rc != 0)",
           p.returncode != 0 and "CICHA UTRATA" in p.stdout, p.stdout[-500:] + p.stderr[-300:])
 
-    # 3. Realne zachowanie ACM: przegrany pada na eTagu. Nic nie ginie, wiec NIE jest to utrata.
-    p = przebieg(STUB_RC_A="0", STUB_RC_B="1", STUB_RULES="1",
-                 STUB_ERR="Error 400: The eTag provided 'abc' does not match the eTag 'def'")
+    # 3. Sciezka dry-run i kazde tworzenie reguly: przegrany pada na eTagu. Nic nie ginie — NIE jest to utrata.
+    p = przebieg(STUB_RC_A="0", STUB_RC_B="1", STUB_TITLES="race-test-alpha",
+                 STUB_ERR="Error 400: The eTag provided 'abc' does not match the eTag of the current "
+                          "version of the Access Policy, which is 'def'")
     check("wyscig: blad eTag = konflikt GLOSNY, nie utrata (rc 0)",
           p.returncode == 0 and "konflikt GŁOŚNY" in p.stdout and "CICHA UTRATA" not in p.stdout,
           p.stdout[-500:] + p.stderr[-300:])
 
-    # 4. REGRESJA, ktora zepsula pierwotny eksperyment: apply padl z powodu NIEZWIAZANEGO ze wspolbieznoscia
-    #    (tam — nieistniejaca tozsamosc). Stara logika liczyla to jako utrate reguly i potwierdzala teze.
-    p = przebieg(STUB_RC_A="0", STUB_RC_B="1", STUB_RULES="1",
+    # 4. REGRESJA #1904: apply padl z powodu NIEZWIAZANEGO ze wspolbieznoscia (tam — nieistniejaca
+    #    tozsamosc). Stara logika liczyla to jako utrate reguly i potwierdzala teze.
+    p = przebieg(STUB_RC_A="0", STUB_RC_B="1", STUB_TITLES="race-test-alpha",
                  STUB_ERR="Error 403: Permission 'accesscontextmanager.policies.update' denied")
     check("wyscig: inny blad = NIEROZSTRZYGNIETE, nie utrata reguly",
           "NIEROZSTRZYGNIĘTE" in p.stdout and "CICHA UTRATA" not in p.stdout,
           p.stdout[-500:] + p.stderr[-300:])
+
+    # 4b. REGRESJA #1949 — ta, ktora unieważniła caly poprzedni przebieg na zywo. Blad NIE MA nic wspolnego
+    #     z eTagiem, ale log apply zawiera slowo "etag" w PLANIE (atrapa je drukuje). Werdykt czytany
+    #     `grep -i etag` po logu odpowiadal tu "konflikt GLOSNY" i raportowal zwyciezce, ktory zapisal
+    #     regule — przy zerowej liczbie regul w API. Ten check pilnuje, ze werdykt idzie z KOMUNIKATU API.
+    p = przebieg(STUB_RC_A="1", STUB_RC_B="1", STUB_TITLES="",
+                 STUB_ERR="Error 403: Your application is authenticating by using local Application "
+                          "Default Credentials. The accesscontextmanager.googleapis.com API requires "
+                          "a quota project, which is not set by default.")
+    check("wyscig: slowo 'etag' w PLANIE nie robi z awarii konfliktu eTagu (regresja #1949)",
+          "NIEROZSTRZYGNIĘTE" in p.stdout and "konflikt GŁOŚNY" not in p.stdout,
+          p.stdout[-600:] + p.stderr[-300:])
+
+    # 4c. Cicha utrata jest sprawdzana PER STRONA i ma pierwszenstwo przed klasyfikacja bledu drugiej
+    #     strony: A zglosil sukces, jego reguly nie ma, wiec zostala nadpisana — niezaleznie od tego, ze
+    #     B padl na eTagu. Poprzednia wersja wymagala rc=0 po OBU stronach i tego ksztaltu nie widziala.
+    p = przebieg(STUB_RC_A="0", STUB_RC_B="1", STUB_TITLES="race-test-beta",
+                 STUB_ERR="Error 400: The eTag provided 'abc' does not match the eTag of the current "
+                          "version of the Access Policy, which is 'def'")
+    check("wyscig: zielone A bez swojej reguly = CICHA UTRATA, mimo eTagu po stronie B",
+          p.returncode != 0 and "CICHA UTRATA" in p.stdout, p.stdout[-600:] + p.stderr[-300:])
+
+    # 4d. KONTROLA ANTY-TAUTOLOGICZNA jest czescia narzedzia, nie procedura w glowie. Bez wykonania
+    #     sekwencyjnego brak reguly po przebiegu rownoleglym nie odroznia "zgubil wyscig" od "zepsuty
+    #     scenariusz" — a dokladnie tego rozroznienia zabraklo, gdy eksperyment mylil sie dwa razy.
+    p = przebieg(STUB_RC_A="0", STUB_RC_B="0", SEKWENCYJNIE="1")
+    check("wyscig: tryb SEKWENCYJNIE=1 daje kontrole i przechodzi przy komplecie regul",
+          p.returncode == 0 and "KONTROLA ZDANA" in p.stdout, p.stdout[-500:] + p.stderr[-300:])
+
+    p = przebieg(STUB_RC_A="0", STUB_RC_B="0", STUB_TITLES="race-test-alpha", SEKWENCYJNIE="1")
+    check("wyscig: kontrola sekwencyjna PADA, gdy scenariusz gubi regule bez wspolbieznosci",
+          p.returncode != 0 and "KONTROLA NIEZDANA" in p.stdout, p.stdout[-500:] + p.stderr[-300:])
 
     # 5. Tozsamosci sa PARAMETREM i sa obowiazkowe — brak = twarde zatrzymanie przed dotknieciem czegokolwiek.
     bez_tozsamosci = {k: v for k, v in baza.items() if k != "IDENTITY_A"}
