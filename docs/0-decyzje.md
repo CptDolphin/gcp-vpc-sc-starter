@@ -3120,3 +3120,65 @@ sinka. Ta zmiana odbiera fałszywym alarmom **jedną konkretną przyczynę** (ma
 | dołożyć `subnetworks.insert` do filtra i **nie** ruszać zapytania odczytu | to są DWA różne filtry. Zdarzenie przepuszczone przez sink, ale niewpuszczone przez zapytanie odczytu, nie dociera do detektora — mapa wyszłaby pusta, a przebieg zielony |
 | zmienić kierunek błędu na „nieznana podsieć = nie licz" | zamienia przeszacowanie na ciszę dokładnie tam, gdzie strumień zawiódł. Sink, który nie dostarcza, wygląda wtedy jak czyste okno — ta klasa defektu ma już własny wpis w runbooku i nie wolno jej wprowadzać powtórnie |
 | osobny, czwarty kubełek na `subnetworks.insert` | rozłączność nie jest tu do niczego potrzebna: to ten sam detektor, to samo okno odczytu i ten sam konsument. Czwarty kubełek to trzeci grant, trzeci widok i trzecia rzecz do odtworzenia na nowym klastrze, kupione za nic |
+
+---
+
+## DEC-45 — Kanał ticketowy weryfikowany przeciw SYMULATOROWI, nie przeciw fixture'owi
+
+**Decyzja.** Instancji ServiceNow nie będzie. Kanał `snow:` jest weryfikowany przeciw
+`tools/snow_symulator.py` — serwerowi HTTP na **pętli zwrotnej**, który implementuje kontrakt Table API
+opisany w `docs/5-servicenow-intake.md` §8. Cztery rzeczy naraz:
+
+1. **Symulator implementuje kontrakt, nie definiuje go.** §8 zostaje źródłem prawdy; rozjazd między §8
+   a symulatorem czerwieni `tools/snow_symulator_kontrakt.py` (39 asercji), wołany jako **bramka treści**
+   — czyli na torze pull requesta **i** na torze apply, a nie tylko w selfteście startera.
+2. **Dowód wierności przed użyciem.** Zanim symulator zostanie uznany za wierny, musi **odtworzyć defekt**:
+   stare, niesprawne zapytanie (bez `sysparm_fields`) nie dostaje przez niego `assignment_group.name`
+   i kończy się odmową, a dzisiejsze na tym samym serwerze i rekordzie przechodzi. Para, nie pojedynczy
+   przebieg.
+3. **`SNOW_INSTANCE` ma dwa dopuszczalne kształty i nic poza nimi**: nazwa instancji
+   (`^[a-z0-9][a-z0-9-]*$`) albo baza na pętli zwrotnej. Werdykt z symulatora niesie prefiks
+   `[SYMULATOR: …]` w każdej linii — tak samo jak werdykt z fixture'u niesie `[MATERIAŁ TESTOWY: …]`.
+4. **Przebieg symulowany oznacza się tak samo jak fixture'owy** (DEC-43): gałąź `onboard/test-…`, tytuł
+   `[TRYB TESTOWY] … — NIE MERGOWAC`, etykiety `dry-run, tryb-testowy` **bez** `onboarding`, baner
+   `[!WARNING]`, `::warning` i sekcja w podsumowaniu.
+
+**Dlaczego.** Fixture potwierdza nasze założenia — symulator ma je łamać. To nie jest metafora: fixture jest
+odpowiedzią, którą sami napisaliśmy, więc odpowiada na zapytanie, **które sobie wyobraziliśmy**, i nie ma jak
+zaprzeczyć. Zmierzone (DEC-43): narzędzie czytało `assignment_group.name`, a zamawiało samo `sysparm_query`;
+na żywej instancji odrzuciłoby **każdy** ticket, a sześć fixtur świeciło zielono. Symulator odpowiada na
+ZAPYTANIE regułą platformy, więc pytanie niesprawne dostaje odpowiedź niesprawną.
+
+Co ten symulator znalazł w pierwszym przebiegu — czyli dlaczego to nie jest kolejny plik zgadzający się z nami:
+
+- **wstrzyknięcie operatora w numer ticketu.** Numer wchodzi do zakodowanego zapytania, a `^`/`^OR` są tam
+  operatorami; `urlencode` ich nie unieszkodliwia (przepisuje na `%5E`, instancja dekoduje z powrotem).
+  Zmierzone: `--ticket 'RITM0000002^ORnumber=RITM0000001'` odsyłał rekord RITM0000001, a narzędzie
+  orzekało `OK` na numer RITM0000002 — zatwierdzenie jednego ticketu autoryzowało wniosek zgłoszony na
+  numer drugiego. Zamknięte dwiema warstwami: kształtem numeru na wejściu i **kontrolą 2** (`number`
+  z odpowiedzi == numer, o który pytaliśmy);
+- **degradacja zapytania po stronie instancji.** Przy `glide.invalid_query.returns_no_rows = false`
+  platforma odrzuca nierozpoznany warunek i wykonuje resztę — pytanie o nieistniejącą kolumnę odsyła
+  pierwszy wiersz tabeli, nie błąd. Kontrola 2 broni także tu, a symulator implementuje **oba** tryby tej
+  właściwości, bo jest to ustawienie instancji docelowej;
+- **sześć fixtur bez pola `number`**, mimo że zapytanie je zamawia — niekompletnych względem własnego
+  zapytania, czego nie widać, dopóki nikt nie zbuduje odpowiedzi **z** zapytania;
+- **`SNOW_INSTANCE` bez żadnej walidacji** wchodzące wprost do URL-a, czyli korzeń zaufania kanału sterowany
+  napisem.
+
+**Granica jest zapisana w trzech miejscach, nie w jednym.** Symulator nie zna pól własnych organizacji
+docelowej (`u_*`), jej przepływu approvali ani wersji jej API — stoi to w nagłówku
+`tools/snow_symulator.py`, w `docs/5-servicenow-intake.md` §9.4 i jest **pilnowane asercją** (D13), żeby
+refaktor tego nie skasował. Prerekwizyt uruchomienia kanału w nowym środowisku **nie zmienia się**: jeden
+odczyt z instancji docelowej (§8.4). Symulator skraca do niego drogę, nie zastępuje go.
+
+**Co odrzucono i dlaczego.**
+
+| wariant | powód odrzucenia |
+|---|---|
+| zostać przy fixturach (stan po DEC-43) | fixture nie umie zaprzeczyć: opisuje odpowiedź, a nie regułę jej budowania, więc każdy defekt w ZAPYTANIU jest dla niego niewidzialny. Trzy z czterech rzeczy wypisanych wyżej fixture przepuścił, a jedna z nich autoryzowała cudzy ticket |
+| darmowa instancja developerska (PDI) | rozstrzygnięte w DEC-43 i nie zmienia się: rejestracja to krok właściciela konta, instancja hibernuje i bywa odbierana po ~10 dniach bez logowania człowieka, a pól własnych organizacji docelowej i tak nie potwierdza. Dowód „na żywo", który wygasa sam, jest gorszy od zapisanego kontraktu |
+| symulator nasłuchujący na `0.0.0.0`, żeby dało się go użyć jako usługi kontenerowej z innego joba | system rekordu udawany pod adresem osiągalnym z zewnątrz to fałszywy system rekordu, a poświadczenie kanału poleciałoby pod cudzy adres. Pętla zwrotna nie ogranicza niczego, czego potrzebujemy: proces w tle na tym samym runnerze jest tańszy od usługi i nie wymaga obrazu |
+| słabsze oznaczenie PR-a dla trybu symulatora („jest wierniejszy niż fixture") | to jest dokładnie defekt, który DEC-43 zamykał: przebieg testowy nieodróżnialny od wniosku. „Wierniejszy" po miesiącu czyta się jako „prawdziwy", a różnicy nie widać w opisie pull requesta |
+| dopisać `sysapproval_approver` (druga kontrola po stronie approvalu), skoro mamy już symulator | symulator potwierdzi wyłącznie to, co sami w nim napiszemy — a kontrakt tej tabeli jest równie niezmierzony jak poprzedni. Bramka zbudowana na drugim niepotwierdzonym kontrakcie produkowałaby **zielony** werdykt o nieznanej wartości; kontrole dokładane bez pomiaru muszą produkować CZERWONY (uzasadnienie z DEC-43) |
+| oddzielny mechanizm oznaczania dla trybu symulatora | dwa warianty oznaczenia = dwa miejsca do zapomnienia. Wszystkie wartości powstają w JEDNYM kroku rozstrzygającym tryb, a warunek kroku werdyktu brzmi `!= 'normalny'`, więc trzeci tryb testowy jest objęty domyślnie |
