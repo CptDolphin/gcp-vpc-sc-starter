@@ -426,18 +426,25 @@ resource "google_monitoring_alert_policy" "vpcsc_network_window_workload" {
       Uwaga na dwa wpisy o tej samej `resourceName` (`operation.first` i `operation.last`) — to jedna
       operacja. Zero czasu okna to wpis WCZEŚNIEJSZY.
 
-      **Jeśli w adnotacji stoi `[HIPOTEZA]`, nazwa sieci powyżej NIE jest odczytem (DEC-40).** Wpis
-      audytowy maszyny dla sieci custom-mode nie niesie pola `network` — tylko `subnetwork` — więc
-      maszyna została dopasowana fail-closed do każdej świeżej sieci w tym projekcie. Rozstrzygnij
-      podsiecią z adnotacji, ZANIM zacytujesz nazwę sieci w zgłoszeniu:
+      **Adnotacja mówi, SKĄD wzięła się nazwa sieci — przeczytaj to, zanim ją zacytujesz (DEC-44).**
+      Trzy możliwe stany, bo maszyna w sieci custom-mode nie niesie pola `network`, tylko `subnetwork`:
+
+      * bez dopisku — sieć odczytana wprost z wpisu maszyny (sieć auto-mode). Nazwa jest faktem;
+      * `siec odczytana z mapy podsiec->siec` — sieć wynika z podsieci maszyny i ze zdarzenia
+        `subnetworks.insert` z tego samego okna. Nazwa jest faktem;
+      * `[HIPOTEZA]` w tytule — mapy **nie było** (podsieć starsza niż okno odczytu albo strumień
+        `subnetworks.insert` nie dotarł), więc maszyna została dopasowana fail-closed do każdej świeżej
+        sieci w projekcie. Nazwa sieci **nie jest odczytem.** Rozstrzygnij podsiecią z adnotacji:
 
       ```
       gcloud compute networks subnets describe <PODSIEC> --project=<PROJEKT> --region=<REGION> \
         --format='value(network)'
       ```
 
-      Inna sieć niż w alercie = fałszywy alarm (maszyna stała w sieci dojrzałej). Odnotuj go — częstość
-      takich trafień jest wejściem do decyzji o mapie podsieć→sieć, a nie szumem do zamiecenia.
+      Inna sieć niż w alercie = fałszywy alarm (maszyna stała w sieci dojrzałej). `[HIPOTEZA]` przestała
+      być stanem domyślnym i jest teraz sygnałem sama w sobie: jeśli pojawia się seryjnie, sprawdź, czy
+      trzeci strumień w ogóle dociera (`subnetworks.insert` w widoku sinka) — sink, który nie dostarcza,
+      wygląda dokładnie jak czyste okno.
 
       **2. Ogranicz, co mogło wyjść.** Okno trwa od utworzenia sieci do ~5 minut później (górna
       obserwacja 5 m 18 s; propagacja migocze, więc bierz górną, nie średnią). Pytanie brzmi: czy ta

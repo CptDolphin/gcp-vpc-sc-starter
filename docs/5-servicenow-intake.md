@@ -212,9 +212,10 @@ sama pozycja „wymaga człowieka", co App dywizji.
    dwa zgłoszenia tego samego projektu ustawiają się w kolejce, zamiast ścigać się o ten sam plik.
 2. **`snow_verify.py` — oddzwonienie do ServiceNow.** To jest krok, który zamienia „ufam wiadomości" w „ufam
    systemowi rekordu". Payload jest **danymi, nigdy autoryzacją**: zgłoszenie jest tak wiarygodne jak token,
-   którym je wysłano, a tokeny wyciekają. Skrypt sprawdza cztery rzeczy:
+   którym je wysłano, a tokeny wyciekają. Skrypt sprawdza pięć rzeczy:
    ticket istnieje · stan == zatwierdzony · **grupa** z ticketu należy do allowlisty sieciowej ·
-   **projekt w tickecie == projekt w zgłoszeniu** (payload nie podmienił celu po zatwierdzeniu).
+   **projekt w tickecie == projekt w zgłoszeniu** (payload nie podmienił celu po zatwierdzeniu) ·
+   **zatwierdzający != wnioskodawca** (rozdział obowiązków po OSOBIE — §8).
    Brak konfiguracji ServiceNow to **odmowa z komunikatem** (rc=2), nie traceback: „nie mamy jak zapytać"
    nigdy nie znaczy „zatwierdzono".
 3. **`render_member.py` — plik członka.** Nazwa: `<division>-<project_id>.yaml`. Skrypt **wymusza**
@@ -261,7 +262,10 @@ w razie błędu wypisuje przyczynę, nie odpowiedź API.
 | Sytuacja | Zachowanie | Co zrobić |
 |---|---|---|
 | ticket nie istnieje / stan ≠ zatwierdzony | `snow_verify.py` kończy błędem, **PR nie powstaje** | dokończyć approval; automat nie ma trybu „na razie otwórz" |
-| approver spoza grupy sieciowej | odrzucone (scenariusz samo-zatwierdzenia) | approval przez właściwą grupę |
+| approver spoza grupy sieciowej | odrzucone (samo-zatwierdzenie przez GRUPĘ wnioskodawcy) | approval przez właściwą grupę |
+| zatwierdzający == wnioskodawca | odrzucone — rozdział obowiązków po osobie (§8) | zatwierdzenie przez kogoś innego niż wnioskodawca; „byłem w grupie sieciowej" nie jest tu argumentem |
+| w odpowiedzi nie ma pola z wnioskodawcą albo niesie ono `sys_id` zamiast loginu | odrzucone z nazwaniem pola — kontrola, która **nie umie odrzucić**, jest gorsza od jej braku | potwierdzić nazwy pól na instancji docelowej i poprawić kontrakt (§8), nie obchodzić bramki |
+| ServiceNow odpowiada czymś, co nie jest JSON-em (instancja w hibernacji, strona logowania) | odrzucone (rc=2) z komunikatem, **nie traceback** | obudzić/naprawić instancję; „nie rozumiem odpowiedzi" nigdy nie znaczy „zatwierdzono" |
 | projekt w payloadzie ≠ projekt w tickecie | odrzucone | to jest podmiana celu po zatwierdzeniu — zgłoś do security, nie „popraw i wyślij ponownie" |
 | profil nie istnieje w katalogu | PR powstaje, ale OPA go blokuje z nazwą literówki | poprawić nazwę w formularzu, ponowić dispatch |
 | brakujący parametr profilu | OPA blokuje, podając którego brakuje | uzupełnić w formularzu |
@@ -283,11 +287,18 @@ Trzy poziomy, każdy uruchamialny lokalnie:
 **a) Weryfikacja ticketu na fixture** — bez sieci, bez instancji SNOW:
 
 ```bash
-python3 tools/snow_verify.py --ticket RITM0000001 --expect-project prj-x \
-  --offline-fixture tests/snow-approved.json      # przechodzi
-python3 tools/snow_verify.py --ticket RITM0000001 --expect-project prj-x \
-  --offline-fixture tests/snow-not-approved.json  # MUSI paść
+python3 tools/snow_verify.py --ticket RITM0000001 --expect-project prj-x-test \
+  --approver net-approver@example.com --offline-fixture tests/snow-approved.json      # przechodzi
+python3 tools/snow_verify.py --ticket RITM0000001 --expect-project prj-x-test \
+  --approver net-approver@example.com --offline-fixture tests/snow-not-approved.json  # MUSI paść
+# para anty-tautologiczna piątej kontroli: te same argumenty, inny WNIOSKODAWCA w fixturze
+python3 tools/snow_verify.py --ticket RITM0000001 --expect-project prj-x-test \
+  --approver net-approver@example.com \
+  --offline-fixture tests/snow-self-approved-person.json                              # MUSI paść
 ```
+
+`--approver` jest **wymagany**: kontrola, którą wyłącza się pominięciem flagi, jest kontrolą wyłączoną,
+a tego nie widać ani w logu przebiegu, ani w diffie zgłoszenia.
 
 **b) Renderowanie pliku członka** — sprawdza, że bot nie umie zapisać `enforced`:
 
@@ -314,23 +325,41 @@ gh workflow run intake.yml -R <ORG>/<REPO> --ref main \
 
 **Co ogranicza tryb testowy** (bo test na ścieżce wejściowej granicy bezpieczeństwa jest dziurą, dopóki
 ktoś nie napisze, co go ogranicza): nazwa fixture'a musi pasować do `^snow-[a-z0-9-]+$` i wskazywać plik
-w `tests/` **na gałęzi domyślnej**, czyli treść, która przeszła review; a projekt jest ograniczony
-przez `u_project_id` w samym fixturze, bo `snow_verify.py` porównuje go z `project_id` ze zgłoszenia.
-`tests/snow-approved.json` mówi `prj-x-test` — żadne wejście dispatchu nie zamieni tego na czyjś realny
-projekt.
+w `tests/` **na gałęzi domyślnej**, czyli treść, która przeszła review; plik musi deklarować się jako
+materiał testowy (pole `_material_testowy` — bez niego `snow_verify.py` odmawia, rc=2); a projekt jest
+ograniczony przez `u_project_id` w samym fixturze, bo `snow_verify.py` porównuje go z `project_id`
+ze zgłoszenia. `tests/snow-approved.json` mówi `prj-x-test` — żadne wejście dispatchu nie zamieni tego
+na czyjś realny projekt. Tryb testowy da się włączyć **wyłącznie** jawnym wejściem `fixture` zgłoszenia
+(wartość domyślna: pusta) — nie zmienną repozytorium, nie sekretem, nie plikiem w drzewie.
 
-Wszystkie fixture'y są w `tests/` (opis: `tests/README.md`) — trzy z pięciu opisują przypadki **negatywne**:
-approval w toku, samo-zatwierdzenie i podmiana projektu po approvalu. Selftest repozytorium
-(`python3 selftest/selftest.py`) uruchamia (a) i (b) na każdym przebiegu, na TYCH SAMYCH plikach, które
-cytuje ta dokumentacja — więc zepsuty fixture wychodzi w teście, nie u czytelnika.
-Bramka, która nigdy nie odrzuca, przechodzi każdy test pozytywny i nie chroni niczego.
+**Czym przebieg testowy KRZYCZY, że jest testem (DEC-43).** Do 2026-08-13 jedynym śladem trybu testowego
+poza logiem kroku była nazwa kroku, która w trybie normalnym wygląda tak samo. Zmierzone: przebieg
+z fixture'em otworzył pull requesta z **tą samą** nazwą gałęzi, **tym samym** tytułem, **tymi samymi**
+etykietami i opisem twierdzącym „verified against the ServiceNow API" — zdaniem nieprawdziwym dla przebiegu,
+który ServiceNow nie zapytał. Dziś przebieg z fixture'em oznacza się na pięć sposobów naraz:
 
-**Czego te fixture'y NIE pokrywają, powiedziane wprost.** `snow-self-approved.json` opisuje
-samo-zatwierdzenie przez **grupę wnioskodawcy** i tyle łapie `snow_verify.py`: porównuje grupę z ticketu
-z allowlistą sieciową. Nie porównuje **osoby** zatwierdzającej z wnioskodawcą, więc wnioskodawca będący
-członkiem grupy sieciowej zatwierdziłby własny ticket i przeszedł. Domknięcie wymaga odczytu rekordu
-approvalu (`sysapproval_approver`) z żywej instancji — a bramki pisanej „z wyobrażenia o kształcie API",
-bez możliwości zmierzenia jej na czymkolwiek prawdziwym, ten materiał nie przyjmuje.
+| gdzie | co widać |
+|---|---|
+| lista kroków przebiegu | osobny krok `WERDYKT NA MATERIALE TESTOWYM - system rekordu NIE zostal zapytany` |
+| adnotacje przebiegu | `::warning` z nazwą pliku, który zastąpił system rekordu |
+| podsumowanie przebiegu | sekcja `### TRYB TESTOWY` + zdanie, że werdykt **nie jest** dowodem zgody |
+| gałąź i tytuł pull requesta | `onboard/test-…` oraz `[TRYB TESTOWY] … — NIE MERGOWAC` |
+| etykiety i opis pull requesta | `tryb-testowy` **zamiast** `onboarding` (czyli poza zasięgiem bota z `intake-rebase.yml`) + baner `[!WARNING]` na górze opisu |
+
+Każda z tych wartości powstaje w **kroku rozstrzygającym fixture**, a krok otwierający pull requesta tylko
+je czyta — nie zna trybu i nie umie o nim zapomnieć. Selftest sprawdza to na WYJŚCIACH kroku (co realnie
+wyprodukował), a nie na obecności napisu w pliku.
+
+Wszystkie fixture'y są w `tests/` (opis: `tests/README.md`) — osiem z dziewięciu opisuje przypadki
+**negatywne**. Selftest repozytorium (`python3 selftest/selftest.py`) uruchamia (a) i (b) na każdym
+przebiegu, na TYCH SAMYCH plikach, które cytuje ta dokumentacja — więc zepsuty fixture wychodzi w teście,
+nie u czytelnika. Bramka, która nigdy nie odrzuca, przechodzi każdy test pozytywny i nie chroni niczego.
+
+**Czego te fixture'y NIE dowodzą, powiedziane wprost.** Nie dowodzą, że taki kształt odpowiedzi przychodzi
+z realnej instancji — żadnej nie zapytano ani razu. Piąta kontrola porównuje wnioskodawcę Z TICKETU
+z zatwierdzającym ZE ZGŁOSZENIA, więc zamyka samo-zatwierdzenie zrobione uczciwie, a nie payload kłamiący
+o zatwierdzającym; to wymaga odczytu rekordu approvalu (`sysapproval_approver`), czyli drugiego wywołania,
+którego kontrakt nie jest potwierdzony. Pełna lista założeń i sposób ich zmierzenia: §8.
 
 ---
 
@@ -375,9 +404,100 @@ tools/preflight_check.sh --project prj-example-vertex-dev --number 123456789012 
 Checki 1–5 policzą się przy okazji drugi raz — to jest tanie i zamierzone: uruchomienie z ręki ma dawać
 komplet, a nie wymagać sklejania go z dwóch źródeł.
 
-**Dlaczego to nie jest duplikat bramki OPA.** `perimeter.rego` sprawdza **kształt** adresu na plan-JSON i robi
+**Dlaczego to nie jest duplikat bramki OPA (a §8 niżej mówi, czego ten kanał NIE zmierzył).**
+`perimeter.rego` sprawdza **kształt** adresu na plan-JSON i robi
 to na każdym PR, bez żadnych poświadczeń — łapie literówkę w domenie. Adres poprawny składniowo, wskazujący na
 **nieistniejące** konto, przechodzi tam bez zająknięcia, a ACM odrzuca go dopiero przy apply komunikatem
 `invalid or non-existent` i wywraca **całą** zmianę, nie jedną regułę. Istnienie da się sprawdzić wyłącznie
 pytaniem do API, więc siedzi tam, gdzie są poświadczenia: w pre-flighcie. `user:`/`group:` pre-flight
 raportuje jako **niezweryfikowane** — to Directory API Workspace, inna domena administracyjna.
+
+---
+
+## 8. Kontrakt z ServiceNow — spisany, bo NIE jest zmierzony (DEC-43)
+
+Ten kanał **nie rozmawiał z żadną instancją ServiceNow ani razu**. Cała jego ścieżka — łącznie z jedynym
+przebiegiem, który dojechał do pull requesta — była weryfikowana fixture'em z `tests/`. To nie jest to samo,
+co „działa": fixture dowodzi, że kod poprawnie interpretuje odpowiedź o **zakładanym** kształcie, i nic ponadto.
+
+Rozstrzygnięcie jest świadome: kanał zostaje w trybie fixture'owym, a fixture przestaje udawać system rekordu
+i staje się **jawnie oznaczonym kontraktem**. Ryzyko nie znika — przestaje być niewidoczne.
+
+### 8.1 Zapytanie, które ten kod wysyła
+
+```http
+GET https://<instancja>.service-now.com/api/now/table/sc_req_item
+    ?sysparm_query=number=<ticket>
+    &sysparm_fields=number,approval,state,u_project_id,assignment_group.name,requested_for.user_name,opened_by.user_name
+    &sysparm_limit=1
+Accept: application/json
+Authorization: Basic <SNOW_USER:SNOW_TOKEN>
+```
+
+**`sysparm_fields` nie jest optymalizacją, tylko warunkiem poprawności.** Table API zwraca pola **dot-walk**
+(`assignment_group.name`) **wyłącznie wtedy, gdy zostały jawnie zamówione**; bez tego referencja przychodzi jako
+obiekt `{"link": …, "value": <sys_id>}`, a klucza z kropką w odpowiedzi nie ma w ogóle. Wcześniejsza wersja tego
+narzędzia **czytała** `assignment_group.name`, a **zamawiała** samo `sysparm_query` — czyli pytała o pole,
+którego jej własne zapytanie nie mogło przynieść, i na żywej instancji odrzuciłaby **każdy** ticket. Fixture
+obiecywał kształt, który dla tego zapytania nigdy by nie przyszedł; dlatego pola zapytania i pola werdyktu mają
+dziś jedno źródło (`POLA_WERDYKTU`), a selftest pilnuje tej równości w obie strony. Kształt bez zamówienia opisuje
+`tests/snow-raw-reference.json` i **musi** kończyć się odmową.
+
+### 8.2 Na czym stoi werdykt
+
+| Pole odpowiedzi | Kontrola | Gdy pola nie ma |
+|---|---|---|
+| `result: []` | 1 — ticket istnieje | odmowa: „payload zmyślił numer" |
+| `approval` (zapas: `state`) | 2 — stan zatwierdzony | wartość pusta ≠ `approved` → odmowa |
+| `assignment_group.name` | 3 — grupa z allowlisty sieciowej | pusta → odmowa (brak zapasowej nazwy pola: domysł w bramce fail-closed dokłada ścieżkę, którą nieznany kształt mógłby przejść) |
+| `u_project_id` | 4 — projekt z ticketu == projekt ze zgłoszenia | pusta ≠ `project_id` → odmowa |
+| `requested_for.user_name` (zapas: `opened_by.user_name`) | 5 — zatwierdzający != wnioskodawca | odmowa z nazwaniem obu pól, nie ciche przepuszczenie |
+
+Porównanie tożsamości normalizuje wielkość liter i **odcina domenę** (zgłoszenie podaje adres e-mail, ServiceNow
+trzyma login), a wartość wyglądającą na `sys_id` (32 znaki hex) odrzuca wprost — porównanie `sys_id` z adresem
+nigdy nie wypadłoby „ta sama osoba", czyli kontrola byłaby zielona zawsze. Negatyw: `tests/snow-requester-sysid.json`.
+
+### 8.3 Czego ten kontrakt NIE dowodzi
+
+1. **Że pola nazywają się tak w danej organizacji.** `u_project_id` jest polem WŁASNYM (`u_` = customer-defined),
+   a nazwa grupy zatwierdzającej to konfiguracja, nie stała platformy.
+2. **Że `approval` przyjmuje wartość `approved`** — zbiór wartości zależy od procesu w instancji.
+3. **Że zatwierdzenie było prawdziwe.** Kontrola 5 porównuje wnioskodawcę z ticketu z zatwierdzającym
+   **ze zgłoszenia**, więc zamyka uczciwe samo-zatwierdzenie, a nie payload kłamiący o zatwierdzającym.
+   Domknięcie = odczyt rekordu approvalu (tabela `sysapproval_approver`, pola `approver` i `state`), czyli drugie
+   wywołanie o kontrakcie równie niepotwierdzonym — dlatego nie jest napisane „na wyrost".
+4. **Że nieznane pole w `sysparm_fields` jest ignorowane**, a nie kończy zapytanie błędem.
+5. **Że uwierzytelnienie Basic przejdzie** — instancje bywają skonfigurowane inaczej (MFA, OAuth, ACL na tabeli).
+
+### 8.4 Jak to zamknąć — jeden odczyt, nie projekt
+
+Kanał wolno uznać za zweryfikowany dopiero, gdy ktoś wykona **jeden odczyt z instancji docelowej** i porówna
+odpowiedź z §8.1–8.2:
+
+```bash
+curl -sS -u "$SNOW_USER:$SNOW_TOKEN" -H 'Accept: application/json' \
+  "https://$SNOW_INSTANCE.service-now.com/api/now/table/sc_req_item?sysparm_query=number=RITM0000123&sysparm_fields=number,approval,state,u_project_id,assignment_group.name,requested_for.user_name,opened_by.user_name&sysparm_limit=1" \
+  | python3 -m json.tool
+```
+
+Werdykt tego odczytu jest binarny: albo klucze zgadzają się z tabelą §8.2 (wtedy fixture'y są prawdziwe i to
+trzeba zapisać), albo się nie zgadzają — i wtedy **poprawia się fixture'y**, bo fixture niezgodny
+z rzeczywistością jest gorszy od jego braku.
+
+**Instancja developerska (PDI) jako środowisko pomiarowe — co daje, a czego nie.** Dostawca wydaje bezpłatne
+instancje developerskie z pełnym Service Catalogiem, więc §8.1–8.2 da się na nich sprawdzić. Trzy właściwości,
+które trzeba znać, zanim ktoś oprze na tym bramkę:
+
+- instancja jest przypisana do **konta osobistego** w portalu deweloperskim (rejestracja: dane osobowe
+  + akceptacja regulaminu) — to jest krok dla człowieka, nie dla automatu;
+- instancja **hibernuje** po okresie bezczynności i bywa **odbierana** po ~10 dniach bez logowania człowieka;
+  wywołanie API z pipeline'u tego nie zastępuje. Poświadczenie w sekretach repozytorium zaczęłoby więc pewnego
+  dnia dostawać stronę HTML zamiast JSON-a — dlatego `snow_verify.py` traktuje „to nie jest JSON" jako odmowę
+  z komunikatem, a nie jako traceback;
+- PDI dowodzi **kontraktu platformy** (nazwy pól standardowych, semantyka `sysparm_fields`, kształt referencji),
+  **nie** konfiguracji organizacji docelowej: pola własne i nazwy grup i tak trzeba potwierdzić u niej.
+
+Wniosek praktyczny: PDI skraca listę z §8.3 o punkty 2, 4 i 5 (i część 3), ale punktu 1 nie zamknie nikt poza
+organizacją docelową. Dlatego **uruchomienie kanału ticketowego w nowym środowisku ma prerekwizyt: przelot
+§8.4 na jego instancji**, a do tego czasu kanał wolno uruchamiać wyłącznie w trybie testowym (§6c) — który,
+od DEC-43, sam mówi o sobie, czym jest.

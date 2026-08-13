@@ -38,6 +38,12 @@ STARTER = HERE.parent
 results = []
 ROOT: pathlib.Path | None = None
 
+# Zatwierdzajacy podawany narzedziu weryfikacji ticketu. Wartosc jest CZESCIA testu, nie ozdoba: rozni sie
+# od wnioskodawcy w `tests/snow-approved.json` (`dev-wnioskodawca`) i ZGADZA sie z wnioskodawca w
+# `tests/snow-self-approved-person.json` (`net-approver`) — czyli ta sama stala daje pare anty-tautologiczna
+# piatej kontroli. Podmiana jej na cos innego rozspaja test w obie strony naraz i to widac od razu.
+APPROVER = "net-approver@example.com"
+
 
 def check(name: str, cond: bool, detail: str = "") -> None:
     results.append((name, bool(cond), detail))
@@ -129,7 +135,7 @@ def bootstrap() -> None:
         "policy/perimeter.rego", "policy/perimeter_test.rego",
         "schemas/member.schema.json", "schemas/projects.schema.json",
         "schemas/policy.schema.json", "schemas/profile.schema.json",
-        "schemas/access-level.schema.json",
+        "schemas/access-level.schema.json", "schemas/contributors.schema.json",
         "terraform/locals.tf", "terraform/members.tf", "terraform/outputs.tf",
         "terraform/perimeter.tf", "terraform/rules.tf", "terraform/versions.tf",
         "terraform/contract.tf", "terraform/tests/renderer.tftest.hcl", "terraform/monitoring.tf",
@@ -180,6 +186,12 @@ def bootstrap() -> None:
         "tests/snow-approved.json", "tests/snow-not-approved.json", "tests/snow-self-approved.json",
         "tests/snow-wrong-project.json", "tests/dispatch-example.json",
         "tests/snow-not-found.json", "tests/snow-no-approval.json",
+        # Trzy negatywy piatej kontroli (DEC-43): samo-zatwierdzenie po OSOBIE (grupa poprawna, wiec
+        # cztery pierwsze checki przechodza), ksztalt odpowiedzi BEZ `sysparm_fields` (referencja jako
+        # {link, value} — jedyny fixture opisujacy odpowiedz, ktora realny endpoint na pewno umie
+        # wyprodukowac) i tozsamosc wnioskodawcy jako sys_id (porownanie nigdy by nie odrzucilo).
+        "tests/snow-self-approved-person.json", "tests/snow-raw-reference.json",
+        "tests/snow-requester-sysid.json",
         "tests/vpcsc-violation-dryrun.json",
         # Fikstura detektora martwego czlonka (DEC-42) — wierny ksztalt odpowiedzi Asset Inventory.
         "tests/asset-projekty.json",
@@ -1650,6 +1662,7 @@ def test_kanal_ticketowy() -> None:
     krok_fixture = next((s for s in list(wf["jobs"].values())[0]["steps"]
                          if s.get("name") == "test mode - resolve the fixture"), None)
     check("intake: krok trybu testowego istnieje", krok_fixture is not None)
+    wyjscia = {}
     if krok_fixture:
         skrypt = ROOT / "krok-fixture.sh"
         skrypt.write_text(krok_fixture["run"])
@@ -1662,17 +1675,89 @@ def test_kanal_ticketowy() -> None:
             ("snow-a; echo WSTRZYKNIETE", 1, "wstrzykniecie polecenia"),
             ("snow-nie-ma-takiego", 1, "fixture nie istnieje"),
         ]:
-            srodowisko = dict(os.environ, FIXTURE=wartosc,
+            (ROOT / "gh_out").write_text("")
+            srodowisko = dict(os.environ, FIXTURE=wartosc, DIVISION="dyw", PROJECT_ID="prj-x-test",
                               GITHUB_OUTPUT=str(ROOT / "gh_out"), GITHUB_STEP_SUMMARY=str(ROOT / "gh_sum"))
             r = sh(["bash", str(skrypt)], cwd=ROOT, env=srodowisko)
             check(f"intake fixture — {opis}", r.returncode == oczekiwany,
                   f"rc={r.returncode}, oczekiwano {oczekiwany}: {r.stdout[-200:]}")
+            if r.returncode == 0:
+                wyjscia[wartosc] = (ROOT / "gh_out").read_text()
             # Dowodem wykonania jest LINIA rowna wyjsciu `echo`, nie wystapienie napisu gdziekolwiek:
             # komunikat bledu cytuje wartosc fixture'a, wiec zawiera ten napis takze wtedy, gdy nic
             # sie nie wykonalo. Pierwsza wersja tej asercji zglaszala wlasnie taki falszywy alarm.
             if wartosc.startswith("snow-a;"):
                 check("intake fixture — polecenie z nazwy NIE zostalo wykonane",
                       not any(l.strip() == "WSTRZYKNIETE" for l in r.stdout.splitlines()), r.stdout[-200:])
+
+    # PRZEBIEG NA FIXTURZE NIE MOZE WYGLADAC JAK WNIOSEK (DEC-43). Zmierzone, zanim to powstalo: przebieg
+    # w trybie testowym otworzyl pull requesta z ta sama nazwa galezi, tym samym tytulem, tymi samymi
+    # etykietami i opisem twierdzacym „verified against the ServiceNow API" — zdaniem NIEPRAWDZIWYM dla
+    # przebiegu, ktory ServiceNow nie zapytal. Asercje ida na WYJSCIACH kroku (co realnie wyprodukowal),
+    # a nie na obecnosci napisu w pliku: napis w komentarzu zazielenilby test, nie zmieniajac PR-a.
+    normalny, testowy = wyjscia.get("", ""), wyjscia.get("snow-approved", "")
+    if normalny and testowy:
+        def wyjscie(tekst, klucz):
+            for linia in tekst.splitlines():
+                if linia.startswith(klucz + "="):
+                    return linia[len(klucz) + 1:]
+            return None
+        check("intake fixture — tryb rozstrzygniety jawnym wyjsciem, nie domyslem",
+              wyjscie(normalny, "tryb") == "normalny" and wyjscie(testowy, "tryb") == "testowy",
+              f"{wyjscie(normalny, 'tryb')!r} / {wyjscie(testowy, 'tryb')!r}")
+        for klucz, opis in (("galaz", "nazwa galezi"), ("tytul", "tytul pull requesta"),
+                            ("etykiety", "etykiety")):
+            check(f"intake fixture — {opis} przebiegu testowego ROZNI SIE od wniosku",
+                  wyjscie(testowy, klucz) != wyjscie(normalny, klucz),
+                  f"{klucz}: {wyjscie(testowy, klucz)!r} == {wyjscie(normalny, klucz)!r}")
+        check("intake fixture — tytul przebiegu testowego niesie znacznik, nie sam inny sufiks",
+              "TRYB TESTOWY" in (wyjscie(testowy, "tytul") or ""), wyjscie(testowy, "tytul"))
+        # Etykieta `onboarding` decyduje o zasiegu bota przepisujacego zgloszenia (`intake-rebase.yml`
+        # force-pushuje wylacznie PR-y z ta etykieta) — przebieg testowy ma z tego zasiegu wypasc.
+        check("intake fixture — przebieg testowy NIE dostaje etykiety `onboarding`",
+              "onboarding" not in (wyjscie(testowy, "etykiety") or ""), wyjscie(testowy, "etykiety"))
+        check("intake fixture — zdanie o pochodzeniu werdyktu mowi, ze ServiceNow NIE pytano",
+              "NIE zweryfikowano" in (wyjscie(testowy, "zrodlo") or "")
+              and "verified against the ServiceNow API" in (wyjscie(normalny, "zrodlo") or ""),
+              wyjscie(testowy, "zrodlo"))
+        check("intake fixture — opis PR-a przebiegu testowego dostaje baner ostrzegawczy",
+              "[!WARNING]" in testowy and "NIE JEST WNIOSEK" in testowy, testowy[-300:])
+        check("intake fixture — tryb normalny NIE dokleja banera",
+              (wyjscie(normalny, "baner") or "") == "", wyjscie(normalny, "baner"))
+
+    # Krok, ktory KRZYCZY w przebiegu. Sama adnotacja w podsumowaniu nie wystarcza: lista krokow jest
+    # pierwsza rzecza widoczna w zielonym przebiegu, a nazwa kroku rozstrzygajacego fixture wyglada tak
+    # samo w obu trybach (wykonuje sie zawsze).
+    krzyk = next((s for s in list(wf["jobs"].values())[0]["steps"]
+                  if "MATERIALE TESTOWYM" in (s.get("name") or "")), None)
+    check("intake: przebieg testowy ma WLASNY krok z werdyktem o materiale testowym", krzyk is not None,
+          str(kroki(wf)))
+    if krzyk:
+        check("intake: ten krok odpala sie WYLACZNIE w trybie testowym",
+              "steps.fixture.outputs.tryb" in str(krzyk.get("if", "")), str(krzyk.get("if")))
+        check("intake: ten krok zostawia adnotacje `::warning`", "::warning" in krzyk.get("run", ""),
+              krzyk.get("run", "")[:200])
+
+    # TRYBU TESTOWEGO NIE DA SIE WLACZYC NIEJAWNIE. Jedyne wejscie to `inputs.fixture` z pusta wartoscia
+    # domyslna — zadnej zmiennej repozytorium, zadnego sekretu, zadnego pliku w drzewie. Bramka, ktora da
+    # sie uzbroic z ustawien repozytorium, jest bramka, o ktorej nikt nie wie, ze jest zdjeta.
+    wejscie_fixture = (wf.get(True) or wf.get("on"))["workflow_dispatch"]["inputs"]["fixture"]
+    check("intake: tryb testowy domyslnie WYLACZONY (pusta wartosc domyslna, wejscie nieobowiazkowe)",
+          wejscie_fixture.get("default", "") == "" and wejscie_fixture.get("required") is not True,
+          str(wejscie_fixture))
+    check("intake: nazwa fixture'a pochodzi WYLACZNIE z wejscia zgloszenia",
+          (krok_fixture or {}).get("env", {}).get("FIXTURE") == "${{ inputs.fixture }}",
+          str((krok_fixture or {}).get("env")))
+    zrodla_offline = [w for w in re.findall(r"--offline-fixture\s+\"?(\S+?)\"?\s", tekst)]
+    check("intake: tryb offline karmiony WYLACZNIE sciezka z kroku fixture'u",
+          zrodla_offline and all("FIXTURE_PATH" in z for z in zrodla_offline), str(zrodla_offline))
+    check("intake: sciezka fixture'u nie pochodzi ze zmiennej repozytorium ani z sekretu",
+          not re.search(r"FIXTURE\w*:\s*\$\{\{\s*(vars|secrets)\.", tekst))
+
+    # Piata kontrola (zatwierdzajacy != wnioskodawca) jest WOLANA — flaga pominieta to kontrola wylaczona,
+    # a tego nie widac ani w logu przebiegu, ani w diffie zgloszenia.
+    check("intake: weryfikacja ticketu dostaje zatwierdzajacego ze zgloszenia (piata kontrola)",
+          "--approver" in tekst and "APPROVED_BY: ${{ inputs.approved_by }}" in tekst)
 
     # KTORY TOKEN OTWIERA PR, DECYDUJE CZY PR JEST SPRAWDZANY (DEC-22) — pelny zestaw asercji o
     # poswiadczeniu kanalu stoi w test_poswiadczenie_kanalu(), bo dotyczy TRZECH workflowow, nie dwoch.
@@ -1683,22 +1768,84 @@ def test_kanal_ticketowy() -> None:
         check(f"{plik}: po odmowie PR-a kasuje galaz, ktora wypchnal",
               "steps.pr.outcome == 'failure'" in tresc and "git/refs/heads" in tresc)
 
-    # snow_verify.py: cztery checki, cztery fixture'y. `snow-not-found` domyka punkt 1 („ticket
+    # snow_verify.py: piec checkow, piec rodzajow negatywu. `snow-not-found` domyka punkt 1 („ticket
     # istnieje"), ktory przez caly czas byl JEDYNYM bez pokrycia — ta galaz kodu nie wykonala sie
     # w zadnym tescie. `snow-no-approval` dokłada dowod, ze NIEZNANY ksztalt odpowiedzi degraduje sie
-    # do odmowy, a nie do zgody.
-    for fixture, opis in [("tests/snow-not-found.json", "ticket nie istnieje w systemie rekordu"),
-                          ("tests/snow-no-approval.json", "ticket bez zadnego sladu zatwierdzenia")]:
+    # do odmowy, a nie do zgody. Trzy ostatnie to piata kontrola (DEC-43).
+    for fixture, opis in [
+        ("tests/snow-not-found.json", "ticket nie istnieje w systemie rekordu"),
+        ("tests/snow-no-approval.json", "ticket bez zadnego sladu zatwierdzenia"),
+        ("tests/snow-self-approved-person.json", "samo-zatwierdzenie po OSOBIE (grupa poprawna)"),
+        ("tests/snow-raw-reference.json", "ksztalt odpowiedzi bez `sysparm_fields` (referencja jako obiekt)"),
+        ("tests/snow-requester-sysid.json", "tozsamosc wnioskodawcy jako sys_id (porownanie bez sensu)"),
+    ]:
         p = sh([sys.executable, "tools/snow_verify.py", "--ticket", "RITM0000001",
-                "--expect-project", "prj-x-test", "--offline-fixture", fixture], cwd=ROOT)
+                "--expect-project", "prj-x-test", "--approver", APPROVER,
+                "--offline-fixture", fixture], cwd=ROOT)
         check(f"snow_verify.py ODRZUCA: {opis}", p.returncode != 0, p.stdout + p.stderr)
+
+    # PARA ANTY-TAUTOLOGICZNA PIATEJ KONTROLI. Sam negatyw nie wystarcza: kontrola odrzucajaca WSZYSTKO
+    # przechodzi kazdy test negatywny. Ten sam zatwierdzajacy, dwa fixture'y roznice sie WYLACZNIE osoba
+    # wnioskodawcy — jeden ma przejsc, drugi paść z nazwanym powodem.
+    ok = sh([sys.executable, "tools/snow_verify.py", "--ticket", "RITM0000001", "--expect-project",
+             "prj-x-test", "--approver", APPROVER,
+             "--offline-fixture", "tests/snow-approved.json"], cwd=ROOT)
+    zly = sh([sys.executable, "tools/snow_verify.py", "--ticket", "RITM0000001", "--expect-project",
+              "prj-x-test", "--approver", APPROVER,
+              "--offline-fixture", "tests/snow-self-approved-person.json"], cwd=ROOT)
+    check("snow_verify.py: para anty-tautologiczna piatej kontroli (0 vs != 0, powod nazwany)",
+          ok.returncode == 0 and zly.returncode != 0 and "samo-zatwierdzenie" in zly.stderr,
+          f"ok={ok.returncode} zly={zly.returncode}: {zly.stderr[-200:]}")
+
+    # KONTROLI NIE DA SIE WYLACZYC POMINIECIEM FLAGI. `--approver` jest wymagany, wiec wywolanie bez niego
+    # konczy sie bledem argparse, a nie cicho pominietym checkiem.
+    p = sh([sys.executable, "tools/snow_verify.py", "--ticket", "RITM0000001", "--expect-project",
+            "prj-x-test", "--offline-fixture", "tests/snow-approved.json"], cwd=ROOT)
+    check("snow_verify.py bez --approver: odmawia zamiast pominac piata kontrole", p.returncode != 0,
+          p.stdout + p.stderr)
+
+    # FIXTURE MUSI POWIEDZIEC O SOBIE, ZE JEST FIXTUREM. Bez tego jedyna roznica miedzy werdyktem
+    # z systemu rekordu a werdyktem z pliku w repo jest nazwa kroku w workflow.
+    for plik in sorted((ROOT / "tests").glob("snow-*.json")):
+        doc = json.loads(plik.read_text())
+        check(f"tests/{plik.name}: deklaruje sie jako material testowy",
+              bool(str(doc.get("_material_testowy", "")).strip()), str(sorted(doc))[:120])
+    (ROOT / "snow-bez-znacznika.json").write_text(json.dumps(
+        {"result": [{"approval": "approved", "assignment_group.name": "network-team",
+                     "u_project_id": "prj-x-test", "requested_for.user_name": "ktos-inny"}]}))
+    p = sh([sys.executable, "tools/snow_verify.py", "--ticket", "RITM0000001", "--expect-project",
+            "prj-x-test", "--approver", APPROVER,
+            "--offline-fixture", "snow-bez-znacznika.json"], cwd=ROOT)
+    check("snow_verify.py ODRZUCA plik bez znacznika materialu testowego (rc=2, nie werdykt o tickecie)",
+          p.returncode == 2, f"rc={p.returncode}: {p.stderr[-200:]}")
+    p = sh([sys.executable, "tools/snow_verify.py", "--ticket", "RITM0000001", "--expect-project",
+            "prj-x-test", "--approver", APPROVER,
+            "--offline-fixture", "tests/snow-approved.json"], cwd=ROOT)
+    check("snow_verify.py: werdykt z fixture'u NIESIE to w kazdej linii, nie tylko w nazwie kroku",
+          "MATERIAŁ TESTOWY" in p.stdout, p.stdout[:200])
+
+    # KONTRAKT ZAPYTANIA: kazde pole, ktore czyta werdykt, MUSI byc jawnie zamowione w `sysparm_fields`.
+    # Dot-walk (`assignment_group.name`) Table API zwraca WYLACZNIE na zamowienie — bez tego referencja
+    # przychodzi jako obiekt {link, value}, a klucza z kropka nie ma w ogole. Tak wlasnie bylo: kod czytal
+    # `assignment_group.name`, a zapytanie prosilo o samo `sysparm_query`, wiec na zywej instancji ta
+    # bramka odrzucalaby KAZDY ticket. Asercja pilnuje tego sprzezenia w obie strony.
+    spec = importlib.util.spec_from_file_location("snow_verify_kontrakt", ROOT / "tools/snow_verify.py")
+    modul = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(modul)
+    url = modul.url_odczytu("instancja", "RITM0000001")
+    zamowione = set(urllib.parse.parse_qs(urllib.parse.urlparse(url).query)["sysparm_fields"][0].split(","))
+    czytane = set(re.findall(r'row\.get\(\s*"([^"]+)"', (ROOT / "tools/snow_verify.py").read_text()))
+    check("snow_verify.py: kazde czytane pole jest JAWNIE zamowione w sysparm_fields",
+          czytane and czytane <= zamowione, f"czytane bez zamowienia: {sorted(czytane - zamowione)}")
+    check("snow_verify.py: zamawiamy dot-walk grupy i wnioskodawcy (bez nich checki 3 i 5 sa slepe)",
+          {"assignment_group.name", *modul.POLA_WNIOSKODAWCY} <= zamowione, str(sorted(zamowione)))
 
     # Brak konfiguracji systemu rekordu to ODMOWA Z KOMUNIKATEM, nie traceback. Kod wyjscia byl niezerowy
     # tak czy siak, ale tryb awarii, ktorego nikt nie umie odczytac, konczy sie „to chyba flaka, puscmy
     # jeszcze raz" — czyli sciezka, na ktorej ludzie zaczynaja szukac obejscia bramki zamiast przyczyny.
     czyste = {k: v for k, v in os.environ.items() if k not in ("SNOW_INSTANCE", "SNOW_USER", "SNOW_TOKEN")}
     p = sh([sys.executable, "tools/snow_verify.py", "--ticket", "RITM0000001",
-            "--expect-project", "prj-x-test"], cwd=ROOT, env=czyste)
+            "--expect-project", "prj-x-test", "--approver", APPROVER], cwd=ROOT, env=czyste)
     check("snow_verify.py bez konfiguracji SNOW: odmowa z komunikatem, nie traceback",
           p.returncode == 2 and "ODRZUCONE" in p.stderr and "Traceback" not in p.stderr,
           f"rc={p.returncode}: {p.stderr[-200:]}")
@@ -2447,6 +2594,90 @@ def test_alerty() -> None:
           trafienie["siec_odczytana"] is False, str(trafienie))
     check("ZYWY ksztalt: szczegol niesie podsiec, czyli jedyna referencje do sprawdzenia hipotezy",
           trafienie["podsiec"] == "w1-ew1", str(trafienie))
+
+    # 11g. MAPA PODSIEC->SIEC (DEC-44) — KSZTALT ZDJETY Z ZYWYCH WPISOW, NIE Z DOKUMENTACJI GOOGLE.
+    # Zmierzone 2026-08-13 (#2052) na projekcie czlonkowskim labu, 10 wpisow = 5 operacji:
+    #   operation.first=true -> request = {name, network, ipCidrRange, ...}  network JEST  (5/5)
+    #   operation.last=true  -> request = {"@type": ...} i NIC WIECEJ        network BRAK  (0/5)
+    # Oba wpisy maja te sama `resourceName` w postaci `projects/<p>/regions/<r>/subnetworks/<s>` (bez hosta),
+    # podczas gdy wpis maszyny podaje podsiec jako PELNY URL. Fixture odwzorowuje oba ksztalty doslownie.
+    podsiec_first = {"logName": "projects/prj-example-alpha/logs/cloudaudit.googleapis.com%2Factivity",
+                     "resource": {"type": "gce_subnetwork", "labels": {"project_id": "prj-example-alpha"}},
+                     "timestamp": "2026-01-01T10:00:05Z",
+                     "operation": {"id": "operation-example-1", "first": True},
+                     "protoPayload": {"serviceName": "compute.googleapis.com",
+                                      "methodName": "v1.compute.subnetworks.insert",
+                                      "resourceName": ("projects/prj-example-alpha/regions/"
+                                                       "europe-west1/subnetworks/w1-ew1"),
+                                      "request": {"@type": "type.googleapis.com/compute.subnetworks.insert",
+                                                  "name": "w1-ew1", "ipCidrRange": "10.41.0.0/24",
+                                                  "network": ("https://compute.googleapis.com/compute/v1/"
+                                                              "projects/prj-example-alpha/global/networks/w1")}}}
+    podsiec_last = {"logName": "projects/prj-example-alpha/logs/cloudaudit.googleapis.com%2Factivity",
+                    "resource": {"type": "gce_subnetwork", "labels": {"project_id": "prj-example-alpha"}},
+                    "timestamp": "2026-01-01T10:00:39Z",
+                    "operation": {"id": "operation-example-1", "last": True},
+                    "protoPayload": {"serviceName": "compute.googleapis.com",
+                                     "methodName": "v1.compute.subnetworks.insert",
+                                     "resourceName": ("projects/prj-example-alpha/regions/"
+                                                      "europe-west1/subnetworks/w1-ew1"),
+                                     "request": {"@type": "type.googleapis.com/compute.subnetworks.insert"}}}
+    check("ZYWY ksztalt: wpis ZAMYKAJACY operacje podsieci NIE niesie referencji sieci",
+          pw.mapa_podsieci([podsiec_last]) == {}, str(pw.mapa_podsieci([podsiec_last])))
+    # ANTY-TAUTOLOGIA MAPY: karmimy PARA wpisow w kolejnosci, w jakiej przychodzi z API, i zadamy mapy
+    # NIEPUSTEJ. Gdyby `scal_operacje` zaczelo brac wpis `last` (kuszace: niesie potwierdzony skutek),
+    # mapa zrobilaby sie pusta, dopasowanie po cichu cofneloby sie do fail-closed, a testy ksztaltu samej
+    # funkcji nadal by przechodzily. Cisza jest wtedy nieodroznialna od „nikt nie tworzyl podsieci".
+    mapa = pw.mapa_podsieci([podsiec_last, podsiec_first])
+    check("mapa podsiec->siec powstaje z pary wpisow (bierze OTWIERAJACY, ten z `request`)",
+          mapa == {"projects/prj-example-alpha/regions/europe-west1/subnetworks/w1-ew1": "w1"}, str(mapa))
+    check("klucz mapy to PELNA sciezka, nie sama nazwa (nazwa jest unikalna dopiero w parze projekt+region)",
+          all(k.startswith("projects/") and "/regions/" in k for k in mapa), str(mapa))
+
+    # 11g-bis. SEDNO #2052: maszyna w sieci DOJRZALEJ obok swiezej sieci przestaje podnosic licznik.
+    # `maszyna_zywa` stoi w `w1-ew1`, czyli w sieci `w1`. Swieza siec `w2` powstaje w tym samym oknie
+    # i w tym samym projekcie — przed ta zmiana fail-closed liczyl maszyne takze do `w2` i nazywal `w2`
+    # w adnotacji, czyli siec, w ktorej tej maszyny nigdy nie bylo.
+    swieza_obok = dict(wpis_sieci, timestamp="2026-01-01T10:01:00Z",
+                       protoPayload=dict(wpis_sieci["protoPayload"],
+                                         resourceName="projects/prj-example-alpha/global/networks/w2"))
+    rozstrzygniete = pw.policz_okna_sieci([swieza_obok, maszyna_zywa, podsiec_first, podsiec_last], egz, 600)
+    check("ODCZYT, NIE HIPOTEZA: maszyna w sieci dojrzalej NIE podnosi licznika swiezej sieci obok",
+          rozstrzygniete["z_obciazeniem"] == 0, str(rozstrzygniete))
+    # KONTROLA POZYTYWNA DO POWYZSZEJ — bez niej „0" znaczyloby tyle samo, co zepsuty detektor.
+    wlasna = dict(wpis_sieci, timestamp="2026-01-01T10:00:00Z")  # siec `w1`, ta sama, w ktorej stoi maszyna
+    trafia = pw.policz_okna_sieci([wlasna, maszyna_zywa, podsiec_first, podsiec_last], egz, 600)
+    check("KONTROLA POZYTYWNA: ta sama para z maszyna w sieci SWIEZEJ nadal podnosi licznik",
+          trafia["z_obciazeniem"] == 1, str(trafia))
+    szczegol = trafia["szczegoly"][0]["obciazenie"][0]
+    check("znacznik [HIPOTEZA] znika: siec jest ODCZYTANA, gdy podsiec byla w mapie",
+          szczegol["siec_odczytana"] is True, str(szczegol))
+    check("adnotacja mowi, SKAD siec zostala odczytana (mapa vs wpis)",
+          szczegol["zrodlo_sieci"] == "mapa", str(szczegol))
+
+    # 11g-ter. NIEZNANA PODSIEC ZOSTAJE FAIL-CLOSED — kierunek bledu sie NIE ZMIENIA. Przeoczone okno jest
+    # nieodwracalne (ruch w nim nie zostawia sladu), wiec brak mapy musi nadal znaczyc „policz", a nie „milcz".
+    bez_mapy = pw.policz_okna_sieci([swieza_obok, maszyna_zywa], egz, 600)
+    check("podsiec NIEZNANA (brak `subnetworks.insert` w oknie) nadal liczy sie fail-closed",
+          bez_mapy["z_obciazeniem"] == 1, str(bez_mapy))
+    check("i nadal jest OZNACZONA jako nieodczytana, a nie podana jako fakt",
+          bez_mapy["szczegoly"][0]["obciazenie"][0]["siec_odczytana"] is False, str(bez_mapy))
+    # Ta sama nazwa podsieci w INNYM regionie nalezy do INNEJ sieci — splaszczenie klucza do nazwy
+    # skleiloby oba wpisy w jeden i dalo dopasowanie do zlej sieci.
+    inny_region = {"logName": "projects/prj-example-alpha/logs/cloudaudit.googleapis.com%2Factivity",
+                   "resource": {"type": "gce_subnetwork", "labels": {"project_id": "prj-example-alpha"}},
+                   "timestamp": "2026-01-01T10:00:05Z",
+                   "operation": {"id": "operation-example-2", "first": True},
+                   "protoPayload": {"serviceName": "compute.googleapis.com",
+                                    "methodName": "v1.compute.subnetworks.insert",
+                                    "resourceName": ("projects/prj-example-alpha/regions/"
+                                                     "us-central1/subnetworks/w1-ew1"),
+                                    "request": {"@type": "type.googleapis.com/compute.subnetworks.insert",
+                                                "network": ("https://compute.googleapis.com/compute/v1/"
+                                                            "projects/prj-example-alpha/global/networks/w9")}}}
+    dwa_regiony = pw.mapa_podsieci([podsiec_first, inny_region])
+    check("ta sama NAZWA podsieci w dwoch regionach daje DWA wpisy mapy, nie jeden",
+          len(dwa_regiony) == 2 and set(dwa_regiony.values()) == {"w1", "w9"}, str(dwa_regiony))
 
     # 11f. OKNO DOJRZEWANIA W KONFIGURACJI MUSI ZGADZAC SIE Z PROCEDURA. Mniejsze oskarzaloby o zlamanie
     # zasady kogos, kto ja stosowal; wieksze zglaszaloby jako incydent zachowanie zgodne z runbookiem.
@@ -4182,29 +4413,33 @@ def test_tools() -> None:
     # Fixture'y bierzemy z tests/ — tych samych, które cytuje docs/5-servicenow-intake.md. Generowanie ich
     # w kodzie testu dawało zieloną bramkę na danych, których czytelnik dokumentacji nie ma.
     p = sh([sys.executable, "tools/snow_verify.py", "--ticket", "RITM0000001",
-            "--expect-project", "prj-x-test", "--offline-fixture", "tests/snow-approved.json"], cwd=ROOT)
+            "--expect-project", "prj-x-test", "--approver", APPROVER,
+            "--offline-fixture", "tests/snow-approved.json"], cwd=ROOT)
     check("snow_verify.py przepuszcza zatwierdzony ticket (fixture z tests/)", p.returncode == 0,
           p.stdout + p.stderr)
 
     for fixture, opis in [("tests/snow-not-approved.json", "approval w toku"),
-                          ("tests/snow-self-approved.json", "samo-zatwierdzenie"),
+                          ("tests/snow-self-approved.json", "samo-zatwierdzenie przez GRUPE wnioskodawcy"),
                           ("tests/snow-wrong-project.json", "podmiana projektu po approvalu")]:
         p = sh([sys.executable, "tools/snow_verify.py", "--ticket", "RITM0000001",
-                "--expect-project", "prj-x-test", "--offline-fixture", fixture], cwd=ROOT)
+                "--expect-project", "prj-x-test", "--approver", APPROVER,
+                "--offline-fixture", fixture], cwd=ROOT)
         check(f"snow_verify.py ODRZUCA: {opis}", p.returncode != 0, p.stdout + p.stderr)
 
-    fixture_bad = {"result": [{"approval": "requested", "assignment_group.name": "network-team",
-                               "u_project_id": "prj-x-test"}]}
+    fixture_bad = {"_material_testowy": "selftest", "result": [
+        {"approval": "requested", "assignment_group.name": "network-team", "u_project_id": "prj-x-test"}]}
     (ROOT / "snow-pending.json").write_text(json.dumps(fixture_bad))
     p = sh([sys.executable, "tools/snow_verify.py", "--ticket", "RITM0000009",
-            "--expect-project", "prj-x-test", "--offline-fixture", "snow-pending.json"], cwd=ROOT)
+            "--expect-project", "prj-x-test", "--approver", APPROVER,
+            "--offline-fixture", "snow-pending.json"], cwd=ROOT)
     check("snow_verify.py ODRZUCA ticket bez zatwierdzenia", p.returncode == 1, p.stdout + p.stderr)
 
-    fixture_swap = {"result": [{"approval": "approved", "assignment_group.name": "network-team",
-                                "u_project_id": "prj-inny"}]}
+    fixture_swap = {"_material_testowy": "selftest", "result": [
+        {"approval": "approved", "assignment_group.name": "network-team", "u_project_id": "prj-inny"}]}
     (ROOT / "snow-swap.json").write_text(json.dumps(fixture_swap))
     p = sh([sys.executable, "tools/snow_verify.py", "--ticket", "RITM0000009",
-            "--expect-project", "prj-x-test", "--offline-fixture", "snow-swap.json"], cwd=ROOT)
+            "--expect-project", "prj-x-test", "--approver", APPROVER,
+            "--offline-fixture", "snow-swap.json"], cwd=ROOT)
     check("snow_verify.py ODRZUCA podmiane projektu w payloadzie", p.returncode == 1, p.stdout + p.stderr)
 
     # violations_report.py: brak wpisu != zero naruszeń — raport MUSI wypisać 0 dla każdego członka.
@@ -5558,10 +5793,42 @@ def test_schemas() -> None:
              ("schemas/profile.schema.json", sorted(str(p.relative_to(ROOT)) for p in (ROOT / "perimeter/profiles").glob("*.yaml"))),
              ("schemas/projects.schema.json", ["perimeter/projects.yaml"]),
              ("schemas/access-level.schema.json", sorted(str(p.relative_to(ROOT)) for p in (ROOT / "perimeter/access-levels").glob("*.yaml"))),
+             ("schemas/contributors.schema.json", ["perimeter/contributors.yaml"]),
              ("schemas/alerting.schema.json", ["perimeter/alerting.yaml"])]
     for schema, files in pairs:
         p = sh(["check-jsonschema", "--schemafile", schema, *files], cwd=ROOT)
         check(f"schema {pathlib.Path(schema).stem} akceptuje przyklady", p.returncode == 0, p.stdout[-500:])
+
+    # NEGATYWY DO SCHEMATU CONTRIBUTORS. Ten plik AUTORYZUJE — mowi, ktore repozytorium moze wnioskowac
+    # o ktory projekt — a jego bledy sa CICHE: regula OPA odczytuje brakujace pole jako puste, wiec
+    # literowka w kluczu daje puste uprawnienie zamiast odrzucenia. Kazdy przypadek nizej jest realnym
+    # ksztaltem pomylki, nie losowa mutacja.
+    contributors = yaml.safe_load((ROOT / "perimeter/contributors.yaml").read_text())
+
+    def _contributors_odrzuca(nazwa: str, mutacja) -> None:
+        import copy
+        zly = copy.deepcopy(contributors)
+        mutacja(zly["contributors"][0])
+        sciezka = ROOT / "contributors-zly.yaml"
+        sciezka.write_text(yaml.safe_dump(zly, allow_unicode=True))
+        try:
+            w = sh(["check-jsonschema", "--schemafile", "schemas/contributors.schema.json", sciezka.name], cwd=ROOT)
+            check(f"schema contributors ODRZUCA: {nazwa}", w.returncode != 0, w.stdout[-300:])
+        finally:
+            sciezka.unlink(missing_ok=True)
+
+    _contributors_odrzuca("literowka w kluczu (allowed_project bez `s`)",
+                          lambda c: c.__setitem__("allowed_project", c.pop("allowed_projects")))
+    _contributors_odrzuca("skrocony klucz (repo zamiast repository)",
+                          lambda c: c.__setitem__("repo", c.pop("repository")))
+    # WILDCARD: zakaz byl do 2026-08-13 wylacznie ZWYCZAJEM zapisanym w komentarzu pliku, a komentarz
+    # niczego nie odrzuca. `ORG/*` autoryzowaloby repozytorium do kazdego projektu w organizacji.
+    _contributors_odrzuca("wildcard w nazwie repozytorium",
+                          lambda c: c.__setitem__("repository", "ORG/*"))
+    # PUSTA LISTA nie autoryzuje niczego, a WYGLADA jak autoryzacja — wpis istnieje, wiec przeglad
+    # widzi „to repo jest skonfigurowane".
+    _contributors_odrzuca("pusta lista allowed_projects",
+                          lambda c: c.__setitem__("allowed_projects", []))
 
     # NEGATYWY DO SCHEMATU ALERTINGU. Oba przypadki są ciche na wdrożeniu: ukośnik na końcu bazy URL daje
     # `//7-alerty.md`, czyli 404 z alertu o 3:00, a brak jednego z kanałów daje politykę bez odbiorcy —

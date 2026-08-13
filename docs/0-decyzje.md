@@ -2997,3 +2997,105 @@ wejściu — i on należy do obserwatora, bo jest zdarzeniem w czasie, a nie wł
 | liczyć członków z `perimeter/projects.yaml` | deklaracja opisuje intencję. Fałszywy dowód produkuje to, co jest w granicy naprawdę — łącznie z numerem dopisanym poza pipeline'em, którego w deklaracji nie ma z definicji |
 | policzyć brak stanu jako `ACTIVE`, żeby „nie robić fałszywych alarmów" | to jest ten sam błąd, który ten alert ma tropić, przeniesiony o piętro niżej: cisza brana za spokój. Nieodczytany stan **jest** informacją i ma własną serię, własny warunek i własną procedurę |
 | bramka na pull requeście (odrzucone już w analizie zgłoszenia, zapisane tu, żeby nie wracało) | blokuje **własne lekarstwo** — usunięcie martwego wpisu idzie przez `plan` + `apply`. Do tego koszt rośnie z liczbą członków przy każdym wniosku, a opóźnienie indeksu (< 40 s) dawałoby fałszywe werdykty przy wniosku składanym tuż po utworzeniu projektu |
+---
+
+## DEC-43 — Kanał ticketowy zostaje na fixturach, a fixture przestaje udawać system rekordu
+
+**Decyzja.** Kanał ServiceNow **nie czeka na żywą instancję** i nie udaje, że ją miał. Trzy rzeczy naraz:
+
+1. **Fixture jest KONTRAKTEM, nie odpowiedzią systemu rekordu.** Każdy `tests/snow-*.json` niesie pole
+   `_material_testowy`, a `snow_verify.py` bez tego pola **odmawia** (rc=2) i przedrukowuje znacznik
+   w każdej linii werdyktu. Kontrakt zapytania (endpoint, `sysparm_fields`, kształt odpowiedzi, pola,
+   na których stoi werdykt, i lista „czego to NIE dowodzi") stoi w `docs/5-servicenow-intake.md` §8.
+2. **Przebieg w trybie testowym oznacza się sam** — własnym krokiem w liście kroków, adnotacją
+   `::warning`, sekcją w podsumowaniu, prefiksem gałęzi `onboard/test-…`, tytułem `[TRYB TESTOWY] … —
+   NIE MERGOWAC`, etykietą `tryb-testowy` **zamiast** `onboarding` i banerem `[!WARNING]` w opisie
+   pull requesta. Wszystkie te wartości powstają w kroku rozstrzygającym fixture; krok otwierający
+   pull requesta tylko je czyta, więc nie zna trybu i nie umie o nim zapomnieć.
+3. **Piąta kontrola: zatwierdzający != wnioskodawca**, fail-closed — brak pola tożsamości albo `sys_id`
+   zamiast loginu kończy się odmową z nazwaniem pola, nie cichym przepuszczeniem.
+
+**Dlaczego.** Kanał przeszedł end-to-end i to jest prawda o **transporcie**, nie o **kontrakcie**: krok
+„zweryfikuj ticket u źródła" porównywał zgłoszenie z plikiem w repozytorium. Zmierzone konsekwencje, obie
+na żywym przebiegu, nie w rozważaniach:
+
+- pull request przebiegu testowego był **nieodróżnialny od wniosku** — ta sama gałąź, tytuł i etykiety,
+  a w opisie zdanie „verified against the ServiceNow API, not against the dispatch payload", które dla
+  tego przebiegu było **nieprawdziwe**. Recenzent czytający taki PR nie miał jak zobaczyć, że werdykt
+  o zatwierdzeniu wydał plik z `tests/`;
+- narzędzie **czytało pole, którego jego własne zapytanie nie mogło przynieść**: dot-walk
+  (`assignment_group.name`) Table API zwraca wyłącznie na jawne zamówienie w `sysparm_fields`, a zapytanie
+  prosiło o samo `sysparm_query`. Na żywej instancji ta bramka odrzuciłaby **każdy** ticket — czyli fixture
+  nie tylko nie dowodził kształtu, ale opisywał kształt, którego to zapytanie nigdy by nie dostało.
+
+Druga obserwacja jest tu argumentem rozstrzygającym: dopóki nikt nie zapyta prawdziwej instancji, każda
+„zielona" ścieżka tego kanału jest zielona **wobec własnych założeń**. Odpowiedzią nie jest jednak bramka
+napisana z wyobrażenia o API — tylko rozdzielenie dwóch rzeczy, które dotąd wyglądały tak samo: **dowodu**
+(przebieg wobec systemu rekordu) i **testu** (przebieg wobec pliku w repozytorium). Ryzyko zostaje, ale
+przestaje być niewidoczne, a warunek uruchomienia kanału w nowym środowisku jest zapisany jako **jeden
+odczyt** (§8.4), nie jako projekt.
+
+**Asymetria, która pozwala dołożyć piątą kontrolę mimo niepotwierdzonego kontraktu.** Bramka pisana
+z wyobrażenia o API jest nie do przyjęcia, gdy produkuje **zielony** werdykt o nieznanej wartości. Ta
+produkuje **czerwony**: gdy pola tożsamości nie ma albo ma inny kształt, kanał odmawia i mówi, którego pola
+nie znalazł. Wymusza to potwierdzenie kontraktu **przed** uruchomieniem, zamiast przepuszczać wnioski
+w nadziei, że nazwy się zgadzają.
+
+| odrzucone | dlaczego |
+|---|---|
+| poczekać z kanałem na instancję developerską i dopiero wtedy cokolwiek zmieniać | rejestracja instancji to krok dla **człowieka** (konto osobiste, regulamin), a instancja hibernuje i bywa odbierana po ~10 dniach bez logowania — dowód „na żywo" wygasałby sam. Do tego PDI potwierdza kontrakt **platformy**, a nie nazwy pól własnych organizacji docelowej (`u_project_id`), więc nie znosi wymogu pomiaru u niej. Czekanie kosztowało nas natomiast to, co widać wyżej: przebieg testowy udający wniosek |
+| uznać kanał za niedostarczony i wyłączyć go do czasu pomiaru | ciężar dowodu i tak przenosimy na kanał dywizji (pięć przelotów na żywo), ale wyłączenie kanału ticketowego zabrałoby jedyny sposób mierzenia jego ścieżki transportowej — a to ona wyprodukowała ostatnie trzy defekty (wyścig o gałąź, token PR-a, sprzątanie po odmowie) |
+| zostawić fixture bez znacznika i opisać ograniczenie wyłącznie w dokumentacji | tak było. Ograniczenie stało w `tests/README.md` i w docstringu narzędzia, a mimo to przebieg testowy otworzył pull requesta twierdzącego coś przeciwnego. Dokumentacja, której nie widać w miejscu podejmowania decyzji, nie jest kontrolą |
+| dopisać piątą kontrolę jako odczyt `sysapproval_approver` (rekord approvalu) | drugie wywołanie o **równie niepotwierdzonym** kontrakcie, tyle że dwa razy droższe w utrzymaniu. Zamyka payload kłamiący o zatwierdzającym — i dlatego stoi w §8.3 jako nazwana luka do zmierzenia, a nie jako zielona bramka o nieznanej wartości |
+
+## DEC-44 — Maszynę do sieci dopasowuje MAPA PODSIEĆ→SIEĆ, a niewiedza nadal liczy się jak trafienie
+
+**Decyzja.** Filtr sinka zdarzeń sterujących Compute dostaje **trzeci** człon —
+`v1.compute.subnetworks.insert` — a obserwator buduje z niego mapę `projects/<p>/regions/<r>/subnetworks/<s>`
+→ **nazwa sieci** i dopasowuje nią maszynę do konkretnej świeżej sieci. Kolejność źródeł: najpierw jawna
+referencja `networkInterfaces[].network` z wpisu maszyny, a **dopiero gdy jej nie ma** — mapa. Trzy wyniki
+i ich skutki: podsieć znana i należąca do TEJ sieci = trafienie · znana i należąca do INNEJ = odrzucenie ·
+**nieznana = nadal fail-closed**, czyli liczy się jak trafienie.
+
+**Dlaczego to nie jest kosmetyka.** Wpis `v1.compute.instances.insert` dla sieci **custom-mode** nie niesie
+pola `networkInterfaces[].network` w ogóle — niesie wyłącznie `subnetwork` (zmierzone na żywym wpisie,
+#2028). Custom-mode jest trybem domyślnym dla każdej sieci tworzonej świadomie, więc ścieżka fail-closed
+była **domyślna, a nie wyjątkowa**: obserwator liczył każdą maszynę do KAŻDEJ świeżej sieci w projekcie
+i wpisywał w adnotację nazwę sieci, w której tej maszyny mogło nigdy nie być. Alert nazywał sieć, której
+nie odczytał — i robił to w treści CRITICAL, na kanale bezpieczeństwa, gdzie dyżurny nie ma jak tego
+sprawdzić inaczej niż ręcznie. Znacznik `[HIPOTEZA]` był uczciwy, ale hipoteza w alercie jest kosztem
+dyżuru, a nie informacją.
+
+**Dlaczego klucz mapy to PEŁNA ŚCIEŻKA, a nie nazwa podsieci.** Nazwa podsieci jest unikalna dopiero
+w parze (projekt, region): `web` w `europe-west1` i `web` w `us-central1` mogą należeć do dwóch różnych
+sieci. Spłaszczenie klucza do nazwy skleiłoby oba wpisy w jeden i dało dopasowanie do **złej** sieci —
+czyli dokładnie ten defekt, który ta decyzja zamyka, tylko trudniejszy do zauważenia, bo wyglądający na
+odczyt. Obie strony podają tę samą podsieć w innym kształcie (wpis maszyny — pełny URL, wpis podsieci —
+`resourceName` bez hosta), więc kotwicą normalizacji jest segment `projects/`.
+
+**Czego pomiar nie pozwolił założyć — i co z tego wynika dla testu.** `subnetworks.insert` zostawia **dwa**
+wpisy na jedną operację, a pole `network` niesie **wyłącznie** wpis otwierający (`operation.first`); wpis
+zamykający ma `request` złożony z samego `@type`. Zmierzone: **5/5** kontra **0/5** (10 wpisów, 5 operacji,
+2026-08-13). `scal_operacje` bierze wpis o najwcześniejszym znaczniku czasu, więc bierze właśnie otwierający —
+ale **jako skutek uboczny** reguły „zero czasu okna to moment utworzenia", a nie dlatego, że ktoś chciał
+`request`. Gdyby ta reguła kiedykolwiek zmieniła się na „ostatni wpis", mapa zrobiłaby się **pusta**,
+dopasowanie po cichu cofnęłoby się do fail-closed, a wszystkie testy kształtu samych funkcji nadal
+przechodziłyby. Dlatego selftest asertuje **niepustość mapy zbudowanej z pary wpisów**, a nie kształt
+funkcji: cisza po takiej regresji jest nieodróżnialna od „nikt nie tworzył podsieci".
+
+**Kierunek błędu się NIE ZMIENIA — i to jest warunek, nie efekt uboczny.** Podsieć nieznana (utworzona przed
+oknem odczytu, albo strumień nie dotarł) nadal liczy się do okna. Przeoczone okno jest **nieodwracalne**,
+bo ruch, który przez nie przeszedł, nie zostawia śladu; fałszywy alarm kosztuje jedno sprawdzenie w widoku
+sinka. Ta zmiana odbiera fałszywym alarmom **jedną konkretną przyczynę** (maszyna w sieci dojrzałej obok
+świeżej), a nie zamienia przeszacowania na ciszę.
+
+**Co odrzucono i dlaczego.**
+
+| wariant | powód odrzucenia |
+|---|---|
+| zostawić `[HIPOTEZA]` i kazać dyżurnemu rozstrzygać `subnets describe` | procedura istniała i jest poprawna, ale przenosi na dyżur pracę, którą detektor ma czym wykonać sam — a robi to w środku nocy, przy alercie CRITICAL, gdzie każdy dodatkowy krok jest kosztem czasu do decyzji |
+| dopasowywać po samej NAZWIE podsieci | nazwa jest unikalna dopiero w parze (projekt, region); kolizja dawałaby dopasowanie do złej sieci wyglądające na odczyt, czyli defekt gorszy od jawnej hipotezy |
+| czytać przypisanie podsieci przez `compute.subnetworks.get` zamiast z logu | odczyt bieżącego stanu odpowiada na inne pytanie niż okno historyczne (podsieć mogła zostać skasowana albo przepięta), wymaga uprawnień Compute dla tożsamości obserwatora i wprowadza zależność od API, którego niedostępność cofa detektor do fail-closed **bez śladu w metryce** |
+| dołożyć `subnetworks.insert` do filtra i **nie** ruszać zapytania odczytu | to są DWA różne filtry. Zdarzenie przepuszczone przez sink, ale niewpuszczone przez zapytanie odczytu, nie dociera do detektora — mapa wyszłaby pusta, a przebieg zielony |
+| zmienić kierunek błędu na „nieznana podsieć = nie licz" | zamienia przeszacowanie na ciszę dokładnie tam, gdzie strumień zawiódł. Sink, który nie dostarcza, wygląda wtedy jak czyste okno — ta klasa defektu ma już własny wpis w runbooku i nie wolno jej wprowadzać powtórnie |
+| osobny, czwarty kubełek na `subnetworks.insert` | rozłączność nie jest tu do niczego potrzebna: to ten sam detektor, to samo okno odczytu i ten sam konsument. Czwarty kubełek to trzeci grant, trzeci widok i trzecia rzecz do odtworzenia na nowym klastrze, kupione za nic |

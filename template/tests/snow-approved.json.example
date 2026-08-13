@@ -1,9 +1,12 @@
 {
+  "_material_testowy": "MATERIAL TESTOWY — to NIE jest odpowiedz ServiceNow, tylko wersjonowany kontrakt ksztaltu (tests/README.md). Werdykt wydany na tym pliku nie jest dowodem na zgode w systemie rekordu.",
   "result": [
     {
       "approval": "approved",
       "assignment_group.name": "network-team",
-      "u_project_id": "prj-x-test"
+      "u_project_id": "prj-x-test",
+      "requested_for.user_name": "dev-wnioskodawca",
+      "opened_by.user_name": "dev-wnioskodawca"
     }
   ]
 }
