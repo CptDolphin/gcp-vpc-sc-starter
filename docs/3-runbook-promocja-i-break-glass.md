@@ -390,8 +390,250 @@ w `policy.yaml`.** Trzeciej drogi nie ma i nie ma jej celowo — „wracamy, bo 
 
 ---
 
-## C. Offboarding (dla porządku)
+## C. Offboarding — wyprowadzenie członka z perimetru
 
 Usunięcie pliku członka wyprowadza projekt z **obu** konfiguracji. To także zmiana granicy bezpieczeństwa —
 projekt przestaje być chroniony — więc idzie przez ten sam review co dołączenie. Automatyczny PR z
 `expiry-sweep` jest **propozycją**: właściciel może zamiast tego potwierdzić wpis nową datą `review_by`.
+
+### Zakres — czego ta procedura NIE robi
+
+**Offboarding kończy się na granicy.** Cykl życia samego projektu GCP — założenie, skasowanie, przywrócenie —
+należy do zespołu właścicielskiego projektów. Ta procedura **nie kasuje projektu** i nie zakłada, że
+wykonujący ma do tego uprawnienie: w typowym wdrożeniu zespół perimetru **nie ma**
+`resourcemanager.projects.delete`, a projekt bywa kasowany bez jego udziału i bez powiadomienia.
+
+To nie jest ograniczenie do obejścia. `gcloud projects delete` jest operacją **nieodwracalną w praktyce**:
+soft-delete trwa 30 dni, `projectId` jest przez ten czas zajęty, a `undelete` **nie przywraca konta
+rozliczeniowego**. Wykonywanie jej na cudzym zasobie, w cudzym procesie, przy okazji zdejmowania ochrony,
+łączy dwie zmiany o różnych właścicielach i różnej odwracalności w jeden nieodkręcalny krok.
+
+Cztery znaczenia słowa „usuń", które trzeba rozdzielić, **zanim** zaczniesz:
+
+| co masz na myśli | co to naprawdę jest | kto to robi |
+|---|---|---|
+| „projekt ma przestać być chroniony" | **offboarding** — usunięcie wpisu z `perimeter/projects.yaml`. Zwykły pull request | **ta procedura**, kroki 1–5 |
+| „usuń też jego access level" | część **tego samego** PR-a, jeśli poziom należał do jednego członka; bramka pyta o REFEROWANIE (DEC-33) | **ta procedura**, krok 2 |
+| „skasuj projekt GCP" | `gcloud projects delete` — soft-delete 30 dni, ID zajęte, billing po `undelete` nie wraca | **zespół właścicielski projektów** — nie ta procedura; reakcja w części „Gdy projekt zniknie" |
+| „`terraform destroy` roota" | skasowanie perimetru, poziomów i reguł naraz — **nie ma legalnej ścieżki**: bramka odrzuca usunięcie perimetru, IAM Deny odbiera `servicePerimeters.delete` kontom CI, a rola własna nie ma `policies.delete` | człowiek z org-level, procedura wyjątkowa — nie ta |
+
+### Kolejność — najpierw granica, potem cokolwiek z projektem
+
+> **NAJPIERW wyprowadź członka z perimetru (PR + `apply`), DOPIERO POTEM ktokolwiek rusza projekt.**
+
+Odwrotna kolejność zostawia w konfiguracji **martwy numer, którego `apply` nie zauważa** — soft-delete jest
+dla Access Context Managera normalnym, rozwiązywalnym zasobem przez całe 30-dniowe okno. Zmierzone: po
+skasowaniu projektu członka `plan` = `No changes.`, `apply` = `0 added, 0 changed, 0 destroyed`,
+`spec.resources` **nadal z numerem**, obserwator = `drift_resources: 0`, `expiry-sweep` = krok PR `skipped`.
+Repozytorium i granica **zgadzają się co do projektu, który nie istnieje**.
+
+**Dlaczego to jest problem bezpieczeństwa, a nie porządku.** Raport naruszeń dalej liczy martwego członka,
+tyle że jego naruszenia spadają do zera — a zero to dokładnie **dowód „czystego okna"** wymagany przez bramkę
+promocji. Martwy wpis robi się więc z czasem **coraz lepszym kandydatem do egzekwowania**, na dowodzie,
+którego nikt nie zmierzył. Kontrola pozytywna: **poprawny offboarding tego NIE robi** — patrz „Co się dzieje
+z dowodem" niżej.
+
+**Gdy nie kontrolujesz drugiej strony.** Skoro projektu nie kasujemy my, tej kolejności nie da się
+wyegzekwować numeracją kroków. Egzekwuje ją **uzgodnienie z zespołem właścicielskim projektów** plus
+detekcja po naszej stronie — patrz „Gdy projekt zniknie".
+
+### Kroki
+
+1. Gałąź i usunięcie wpisu. Plik ma postać kanoniczną pilnowaną bramką w `validate.yml`, więc nie edytuj go
+   ręcznie w połowie — użyj modułu, który go zna:
+
+```bash
+git checkout -b offboard/<klucz-czlonka>
+python3 - <<'PY'
+import sys; sys.path.insert(0, "tools")
+import projects_file as pf
+doc = pf.dokument(open("perimeter/projects.yaml").read())
+doc["members"] = [w for w in doc["members"] if w["project_id"] != "<PROJECT_ID>"]
+open("perimeter/projects.yaml", "w").write(pf.zrzut(doc))
+PY
+```
+
+   → **DOWÓD:** `git diff --stat perimeter/projects.yaml` pokazuje **wyłącznie** usunięcie tego jednego wpisu.
+
+2. Access level członka — w **tym samym** PR-ze, jeśli po odejściu nie jest już przez nic referowany.
+   Bramka `vpcsc.perimeter` odrzuci usunięcie poziomu, który **nadal** jest referowany (regułą albo
+   `required_access_levels` innego poziomu), i poda jego nazwę; poziom osierocony przepuszcza (DEC-33).
+
+   → **DOWÓD (lokalnie, bez poświadczeń):**
+
+```bash
+check-jsonschema --schemafile schemas/projects.schema.json      perimeter/projects.yaml
+check-jsonschema --schemafile schemas/access-level.schema.json  perimeter/access-levels/*.yaml
+python3 tools/collect_declarations.py > declarations.json
+python3 tools/attribute_budget.py --input declarations.json --format markdown   # spadek `dry-run` = koszt członka
+conftest verify --policy policy
+```
+
+   `conftest test --namespace vpcsc.onboarding` zgłosi lokalnie fałszywe FAIL-e na członkach już
+   egzekwowanych — brakuje mu artefaktów „stan zastosowany" i „raport naruszeń", które dokłada CI.
+   To artefakt uruchomienia lokalnego, nie regresja.
+
+3. Opis PR-a. Szablon ma osobny haczyk *„a member is offboarded (stops being protected)"* — zaznacz go
+   i napisz wprost, **kto** przestaje być chroniony. To nie jest formalność: bramka promocji jest
+   **asymetryczna** i zatrzymuje wyłącznie ruch w stronę `enforced`. Zdjęcie ochrony — democja, offboarding,
+   break-glass — przechodzi **automatem**, bo przywraca ruch. Konsekwencja: **wyprowadzenie członka
+   `enforced` nie ma żadnej bramki maszynowej**, a jedyną kontrolą jest podpis recenzenta z CODEOWNERS.
+   Widoczność w diffie jest tu całą obroną.
+
+4. Scalenie i `apply`.
+
+```bash
+gh pr checks <N>                          # komplet zielony
+gh pr merge <N> --merge --delete-branch
+gh api repos/<ORG>/<REPO>/pulls/<N> -q '.merged, .merged_at'   # POTWIERDŹ scalenie, nie zakładaj
+```
+
+   `apply.yml` rusza na push do `main` (ścieżki `perimeter/**`, `terraform/**`). Zmierzone tempo:
+   **scalenie → członek poza granicą ≈ 82 s.**
+
+   → **DOWÓD — kolejności, nie samego „success":** w logu `apply` access level musi zacząć się kasować
+   **po** `Destruction complete` reguły, która go referowała:
+
+```
+…dry_run_ingress_policy.rule["<klucz>--…"]: Destruction complete   06:46:11.484
+…access_level.level["<poziom>"]:            Destroying…            06:46:11.485   ← 1 ms PO regule
+```
+
+   Ta kolejność nie bierze się sama: pilnuje jej `depends_on` w `terraform/rules.tf`. Bez niej graf nie ma
+   krawędzi między regułą a poziomem, oba `destroy` lecą równolegle przy domyślnym `-parallelism=10`,
+   a jeden z dwóch porządków API odrzuca komunikatem `you must first remove the reference` — czyli defekt,
+   którego jeden zielony przebieg nie wyklucza.
+
+5. **Weryfikacja na ŻYWEJ granicy — to jest krok rozstrzygający, nie formalność.** Zielony `apply` nie jest
+   dowodem: zmierzono przypadek, w którym repozytorium twierdziło „zdemotowany", a granica egzekwowała
+   jeszcze przez 3 min 01 s.
+
+```bash
+gcloud access-context-manager perimeters describe <PERIMETR> --policy=<POLICY> \
+  --format='value(status.resources,spec.resources)' | tr ',;' '\n\n' | grep -c '<PROJECT_NUMBER>'
+```
+
+   → **DOWÓD:** wynik **`0`** — numeru nie ma **ani** w konfiguracji egzekwowanej (`status`), **ani**
+   w dry-run (`spec`). Każda inna liczba znaczy, że `apply` nie zrobił tego, co pokazał `plan`.
+
+   **Kontrola anty-tautologiczna, bez której ten dowód jest pusty:** ten sam odczyt z numerem **innego,
+   nadal chronionego** członka musi zwrócić liczbę **niezerową**. Inaczej `0` nie odróżnia „członka nie ma"
+   od „odpowiedzi nie ma".
+
+   → **DOWÓD stanu:** `gh workflow run watch.yml --ref main` — obserwator czyta granicę surowym `GET`-em,
+   nie ze stanu Terraforma. Oczekuj `atrybuty_w_deklaracji` **równe** granicy, `drift_resources: 0`,
+   `apply_pending_seconds: 0`, a w kroku `plan` — `No changes. Your infrastructure matches the configuration.`
+
+**Po kroku 5 procedura jest skończona.** Projekt nadal istnieje, ma swoje zasoby i swojego właściciela —
+przestał być chroniony przez granicę. To jest cały zamierzony skutek.
+
+### Gdy `apply` padnie w połowie na kasowaniu access levelu (`Error 403`)
+
+Rola własna konta `apply` świadomie nie ma `accesscontextmanager.accessLevels.delete`, więc `apply` wykona
+wszystko **poza** ostatnim krokiem:
+
+```
+Error when reading or editing AccessLevel: googleapi: Error 403: The caller does not have permission
+```
+
+Stan jest wtedy **częściowo zastosowany**: członek i reguły już zniknęły z granicy, poziom został. To blokuje
+**całe repozytorium**, nie tylko to zadanie — obiekt siedzi w stanie, więc `plan` pokazuje `1 to destroy`,
+a każdy kolejny `apply` pada tym samym `403`.
+
+**Wyjście natychmiastowe:** przywróć wpis poziomu z `armed: false` i `unarmed_reason` mówiącym, że jest
+osierocony i czeka na uzupełnienie roli. `plan` wraca do `No changes`, `apply` przechodzi, poziom zostaje
+w katalogu jako jawny dług z odsyłaczem.
+
+**Czego NIE robić:** nie zostawiaj repozytorium z czerwonym `apply` „do jutra". Zablokowany `apply` blokuje
+**każdą** ścieżkę wdrożenia — w tym democję i break-glass, czyli dokładnie te, które przywracają ruch.
+Wpis-nagrobek jest brzydki i jest właściwą reakcją.
+
+### Gdy projekt zniknie — zdarzenie CUDZE, na które reagujemy
+
+| sytuacja | co robimy |
+|---|---|
+| projekt skasowany **po** offboardingu (kolejność zachowana) | **nic** — członka już nie ma w granicy |
+| projekt skasowany **przed** offboardingiem (kolejność złamana) | **wchodzimy w kroki 1–5 natychmiast po wykryciu**: wpis nadal zdejmuje ochronę z niczego i **fałszuje dowód promocyjny** |
+| projekt przywrócony (`undelete` w oknie 30 dni) | numer **ten sam**, więc konfiguracja granicy nie wymaga zmiany — ale **billing nie wraca**. Powrót do granicy idzie normalnym onboardingiem z pre-flightem, nie „cofnięciem offboardingu" |
+
+**Jak się o tym dowiemy.** Dziś: **nie dowiemy się sami** — martwego członka nie widzi żadna z warstw
+(`plan`, `apply`, dryf, `expiry-sweep`, raport, pre-flight, obserwator). Potrzebne są **dwie** rzeczy i obie
+trzeba świadomie ustawić przy wdrożeniu:
+
+1. **Uzgodnienie z zespołem właścicielskim projektów** — odpowiadające na cztery pytania: **skąd**
+   dowiadujemy się o skasowaniu (ticket, subskrypcja Asset Inventory, lista) · **w jakim czasie** od
+   `DELETE_REQUESTED` · czy jest **pytanie przed**, czy tylko **powiadomienie po** · **kto** po naszej stronie
+   reaguje. Bez tego uzgodnienia zapisz wprost, że powiadomienia nie ma — milczące założenie jest gorsze
+   od nazwanego braku.
+2. **Rekoncyliacja po naszej stronie**, w rytmie nie rzadszym niż okno obserwacji `dry-run` (dłuższa przerwa
+   dopuszcza promocję na dowodzie wyprodukowanym przez martwy projekt):
+
+```bash
+python3 - <<'PY'
+import subprocess, sys
+sys.path.insert(0, "tools")
+import projects_file
+for m in projects_file.wczytaj(".")["members"]:
+    s = subprocess.run(["gcloud", "projects", "describe", m["project_id"],
+                        "--format=value(lifecycleState)"], capture_output=True, text=True)
+    print(m["project_id"], s.stdout.strip() or f"BRAK (rc={s.returncode})")
+PY
+```
+
+   → **DOWÓD:** `ACTIVE` przy każdym wpisie. Każde `DELETE_REQUESTED` lub `BRAK` = wejście w krok 1 dla tego
+   członka, tego samego dnia.
+
+> [!WARNING]
+> Dwa fałszywe sygnały, oba zmierzone. **`gcloud projects list` nie pokazuje skasowanego projektu w ogóle**,
+> więc „nie ma go na liście" wygląda identycznie jak „nigdy go nie było" — pytaj `describe` po ID. Oraz:
+> przez ~60 s po skasowaniu wywołania na projekcie **nadal przechodzą**, więc pojedyncze zielone sprawdzenie
+> tuż po zdarzeniu nie znaczy nic.
+
+### Co się dzieje z DOWODEM po odejściu członka
+
+| | martwy projekt, wpis **został** | offboarding, wpis **usunięty** |
+|---|---|---|
+| raport naruszeń | członek **nadal liczony**, licznik z czasem spada do zera | **klucz członka znika w całości** |
+| co to znaczy dla bramki promocji | zero naruszeń = „czyste okno" → martwy członek robi się **coraz lepszym kandydatem** | nie ma czego promować; bramka nie ma wejścia |
+| wpisy w sinku | zostają | **zostają** — sink celowo nie filtruje po liście członków |
+| gdzie widać te wpisy | przypisane do członka | sekcja **„Naruszenia spoza listy członków"** + wiersz w tabeli klas |
+
+**Offboarding NIE produkuje fałszywego „czystego okna".** Dowód nie znika i nie zeruje się — zmienia
+przypisanie z „ten członek" na „projekt spoza listy", a raport podaje liczbę wprost. Fałszywe czyste okno
+powstaje **wyłącznie** w wariancie odwrotnym: wpis zostaje, projekt znika.
+
+**Powrót nie dziedziczy stażu.** `dry_run_since` odchodzi razem z wpisem; ponowny onboarding ustawia je na
+dzisiaj, więc okno obserwacji liczy się od zera. Kierunek bezpieczny.
+
+### Prerekwizyty przy powrocie — to są WYMAGANIA WOBEC WNIOSKODAWCY
+
+Powrót idzie **normalnym onboardingiem**, nie rewertem PR-a offboardingowego. Warunki poniżej wnioskodawca
+ma spełnić **przed** złożeniem wniosku; pre-flight je **sprawdza** i odrzuca wniosek, gdy ich nie ma —
+**nie naprawia ich za wnioskodawcę** (DEC-5, DEC-24).
+
+| prerekwizyt | czyj | co robi repozytorium perimetru |
+|---|---|---|
+| projekt istnieje i jest `ACTIVE`, numer zgadza się z `project_id` | zespół właścicielski projektów | `projects describe` — check pre-flightu |
+| konto rozliczeniowe podpięte | właściciel projektu | check pre-flightu, werdykt **`UWAGA`, nie czerwony** (konto `plan` nie czyta billingu) |
+| **Private Google Access** na podsieciach | dywizja / zespół sieciowy | `networks/subnets list` — check pre-flightu |
+| **prywatna strefa DNS** na restricted VIP (`199.36.153.4/30`); dla profili notebookowych osobno `private.googleapis.com` (`199.36.153.8/30`) | dywizja / zespół sieciowy | `dns managed-zones list` — check pre-flightu |
+| tożsamości z reguł (konta serwisowe) istnieją | dywizja | ACM i tak odrzuci całą zmianę komunikatem `invalid or non-existent` |
+
+**Dlaczego to nie jest formalność.** Projekt bez PGA i bez strefy DNS wchodzi do `dry-run` z kompletem
+zielonych bramek, przechodzi całe okno obserwacji „czysto" (bo nic w nim nie chodzi) i **umiera w dniu
+promocji** — ruch idzie publicznym endpointem i zostaje odcięty. Tryb awarii opóźniony o cały okres
+obserwacji. Katalog gotowych snippetów jest **dokumentacją do skopiowania** przez właściciela prerekwizytu,
+a nie kodem stosowanym przez nasz pipeline.
+
+### Definition of Done
+
+- [ ] wpis członka usunięty; `plan` po `apply` = `No changes. Your infrastructure matches the configuration.`
+- [ ] `perimeters describe`: numer **nieobecny** w `status.resources` **i** `spec.resources`, przy niezerowej
+      kontroli anty-tautologicznej na innym członku
+- [ ] `drift_resources: 0`, `apply_pending_seconds: 0`, deklaracja równa granicy
+- [ ] w logu `apply` poziom (jeśli kasowany) zaczyna się kasować **po** `Destruction complete` swojej reguły
+- [ ] jeśli `apply` padł na `403` — wpis-nagrobek `armed: false` wrócił, `apply` znów zielony, repozytorium
+      **odblokowane**
+- [ ] raport naruszeń: klucz członka zniknął, wpisy widać w sekcji „spoza listy członków"
+- [ ] **projektu nie kasowaliśmy** — a jeśli ma zniknąć, poszło to do zespołu właścicielskiego projektów
+      i nie jest częścią tej zmiany
