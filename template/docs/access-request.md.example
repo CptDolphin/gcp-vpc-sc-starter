@@ -25,7 +25,8 @@ sieciowego), zamiast czekać na ręczną zmianę wykonywaną przez inżyniera.
    - roles/accesscontextmanager.policyReader        [ORGANIZACJA]   odczyt polityki, perimetru, access levels
    - roles/browser                                  [ORGANIZACJA]   drzewo folderów/projektów (id <-> numer)
    - roles/cloudasset.viewer                        [ORGANIZACJA]   pre-flight: czy projekt istnieje / gdzie jest
-   - roles/logging.viewer                           [ORGANIZACJA]   naruszenia dry-run = dowód przed promocją
+   - roles/logging.viewer                           [ORGANIZACJA]   podgląd naruszeń dry-run PRZEZ CZŁOWIEKA
+     (konto CI tej roli NIE dostaje — patrz niżej: czyta widok sinka + `vpcScSinkReader`)
    - roles/serviceusage.serviceUsageViewer          [ORGANIZACJA]   czy API objęte baselinem są włączone
    (minimum, gdyby trzeba było ciąć: organizationViewer + policyReader + browser)
    UWAGA: granty ACM na folderze/projekcie NIE działają — tylko organizacja albo pojedyncza polityka.
@@ -35,6 +36,15 @@ sieciowego), zamiast czekać na ręczną zmianę wykonywaną przez inżyniera.
    - roles/cloudasset.viewer                        [ORGANIZACJA]
    - roles/compute.networkViewer                    [ORGANIZACJA lub foldery dywizji]
    - roles/dns.reader                               [ORGANIZACJA lub foldery dywizji]
+   - roles/monitoring.viewer                        [ORGANIZACJA]   refresh alertów/deskryptorów perimetru
+   - CUSTOM ROLA organizations/<ORG_ID>/roles/vpcScSinkReader        [ORGANIZACJA]
+       logging.sinks.get      (JEDNO uprawnienie — guard: czy sink naruszeń istnieje i ma ten sam filtr)
+     ŚWIADOMIE BEZ roles/logging.viewer: raport czyta WIDOK sinka (viewAccessor), a kontrola pozytywna
+     sondy ma nadanie PER-PROJEKT w wyznaczonym projekcie sondującym. Konto CI nie ma prawa odczytu
+     treści logów na organizacji.
+   - CUSTOM ROLA projects/<PROJEKT_SONDUJACY>/roles/vpcScPositiveControlReader   [JEDEN PROJEKT]
+       logging.logEntries.list, logging.logMetrics.list
+   - roles/logging.viewAccessor                     [WIDOK kubełka sinka naruszeń]
    - roles/storage.objectAdmin                      [prefiks bucketa stanu Terraform]
 
 2. Konto serwisowe  sa-vpcsc-apply@<PROJEKT>.iam.gserviceaccount.com  (jedyna tożsamość zapisująca)
@@ -44,7 +54,6 @@ sieciowego), zamiast czekać na ręczną zmianę wykonywaną przez inżyniera.
        accesscontextmanager.accessLevels.get / list / create / update
      (BEZ servicePerimeters.create, BEZ servicePerimeters.delete, BEZ accessLevels.delete, BEZ policies.*)
    - roles/storage.objectAdmin                      [prefiks bucketa stanu Terraform]
-   - (opcjonalnie) roles/logging.viewer             [ORGANIZACJA]
 
 3. IAM Deny [ORGANIZACJA] dla obu kont:
    accesscontextmanager.servicePerimeters.delete

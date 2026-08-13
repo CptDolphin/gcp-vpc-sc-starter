@@ -180,10 +180,26 @@ variable "wif_provider_id" {
   }
 }
 
-variable "grant_logging_viewer" {
-  description = "Czy nadać kontu plan roles/logging.viewer na organizacji. Bez tego workflow violations-report nie odczyta naruszeń dry-run, a wtedy promocja do enforced opiera się na deklaracji zamiast na dowodzie. DRUGI, MNIEJ OCZYWISTY SKUTEK ustawienia na false: przy włączonej sekcji `monitoring` w policy.yaml ta sama rola daje kontu plan `logging.logMetrics.get`, bez którego KAŻDY `terraform plan` pada na odświeżeniu metryk — czyli wyłączenie raportu wyłącza też planowanie."
+variable "grant_sink_reader" {
+  description = "Czy nadać kontu plan rolę własną `vpcScSinkReader` (JEDNO uprawnienie: `logging.sinks.get`) na organizacji. Potrzebna guardowi w `violations-report`, który przed odczytem sprawdza, że sink istnieje, ma `includeChildren` i ten sam filtr co odczyt — bez tego sink, który nie dostarcza, jest nieodróżnialny od czystego okna obserwacji i przepuszcza promocję. Zakres org-level wynika z tego, że sink org-level nie ma innego rodzica; uprawnienie czyta KONFIGURACJĘ logowania, nie treść logów. Zastąpiło org-wide `roles/logging.viewer` (28 uprawnień, w tym `logging.logEntries.list` na całej organizacji)."
   type        = bool
   default     = true
+}
+
+variable "positive_control_project_id" {
+  description = "Projekt sondujący KONTROLI POZYTYWNEJ sondy granicy (`boundary-probe.yml`, sonda `chroniona-z-regula`). Konto plan dostaje w NIM — i tylko w nim — prawo odczytu logów, dzięki czemu dowód „reguła baseline kogoś WPUSZCZA” nie potrzebuje ani jednego uprawnienia org-wide. MUSI BYĆ CZŁONKIEM PERIMETRU, inaczej sonda mierzy brak granicy zamiast reguły (workflow to asertuje). Pusty string = brak pinowania: kontrola pozytywna celuje wtedy w projekt z wejścia i wymaga prawa odczytu w KAŻDYM członku, czyli w praktyce roli org-wide."
+  type        = string
+  default     = ""
+
+  # DLACZEGO DOMYŚLNIE PUSTY, skoro pinowanie jest stanem pożądanym: tej wartości nie da się zgadnąć ani
+  # wyprowadzić z konfiguracji — to decyzja wdrożenia, KTÓRY członek jest projektem sondującym. Wartość
+  # zmyślona przez szablon wskazywałaby projekt, którego nie ma, i dawała `apply` czerwony na starcie.
+  # Degradacja przy pustej wartości jest NAZWANA w podsumowaniu przelotu sondy, a nie cicha.
+
+  validation {
+    condition     = var.positive_control_project_id == "" || can(regex("^[a-z][a-z0-9-]{4,28}[a-z0-9]$", var.positive_control_project_id))
+    error_message = "positive_control_project_id to ID projektu (6-30 znaków, małe litery/cyfry/myślniki) albo pusty string."
+  }
 }
 
 variable "manage_deny_policy" {

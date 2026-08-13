@@ -501,3 +501,126 @@ Wniosek praktyczny: PDI skraca listę z §8.3 o punkty 2, 4 i 5 (i część 3), 
 organizacją docelową. Dlatego **uruchomienie kanału ticketowego w nowym środowisku ma prerekwizyt: przelot
 §8.4 na jego instancji**, a do tego czasu kanał wolno uruchamiać wyłącznie w trybie testowym (§6c) — który,
 od DEC-43, sam mówi o sobie, czym jest.
+
+---
+
+## 9. Symulator zamiast instancji — bo fixture potwierdza założenia, a symulator ma je łamać
+
+§8 opisuje kontrakt, którego nikt nie zmierzył, i zostaje **źródłem prawdy**. Ta sekcja opisuje narzędzie,
+które ten kontrakt **implementuje**, żeby dało się o niego uderzyć: `tools/snow_symulator.py` — serwer HTTP
+na pętli zwrotnej, mówiący językiem Table API. Instancji ServiceNow nie będzie (decyzja: DEC-46), więc kanał
+jest weryfikowany przeciw czemuś, co potrafi mu **zaprzeczyć**.
+
+### 9.1 Na czym polega różnica — i dlaczego to nie jest „fixture w innym opakowaniu"
+
+| | fixture (`tests/snow-*.json`) | symulator (`tools/snow_symulator.py`) |
+|---|---|---|
+| czym jest | gotową **odpowiedzią**, którą sami napisaliśmy | implementacją **kontraktu**: dostaje zapytanie, buduje odpowiedź regułą |
+| co robi z niesprawnym zapytaniem | odpowiada tak samo dobrze, jak na sprawne — bo nie zna zapytania | odpowiada **niesprawnie**: brak `sysparm_fields` = brak dot-walku |
+| co może wykryć | że kod źle interpretuje **założony** kształt | że kod **pyta źle**, że pyta **o coś innego**, że nie sprawdza, **czy dostał to, o co prosił** |
+| czego nie może | zaprzeczyć nam | zaprzeczyć organizacji docelowej (§9.4) |
+
+Defekt z §8 to dokładnie ten przypadek: `snow_verify.py` czytał `assignment_group.name`, a zamawiał samo
+`sysparm_query`. Fixture świecił zielono, bo miał ten klucz wpisany ręcznie; żywa instancja odrzuciłaby
+**każdy** ticket. Symulator, który tego nie odtwarza, jest bezwartościowy — i to jest pierwsza rzecz, którą
+udowadnia `tools/snow_symulator_kontrakt.py`.
+
+### 9.2 Dowód wierności — para na jednym serwerze i jednym rekordzie
+
+```bash
+python3 tools/snow_symulator_kontrakt.py     # 39 asercji; D1* to dowód wierności
+```
+
+| asercja | co mierzy |
+|---|---|
+| **D1a–D1c** | stare zapytanie (bez `sysparm_fields`) **nie dostaje** `assignment_group.name`; referencja przychodzi jako `{link, value}`; żaden klucz odpowiedzi nie zawiera kropki |
+| **D1d** | werdykt na tej odpowiedzi = **ODMOWA** — czyli symulator odtwarza defekt, zanim uznamy go za wierny |
+| **D1e–D1f** | dzisiejsze zapytanie na **tym samym serwerze i rekordzie** przechodzi — para anty-tautologiczna; bez niej „wszystko odrzucam" zdałoby test |
+| **D1g** | `tests/snow-approved.json` obiecuje klucze, których stare zapytanie **nie mogło dostać** — zdanie z §8 zamienione w asercję |
+
+Sam harness też jest mierzony negatywem, i to nie w teorii: podmiana symulatora tak, by dokleił dot-walk bez
+zamówienia (czyli zaczął zachowywać się jak fixture), czerwieni **pięć** asercji D1. Harness mierzy symulator,
+nie siebie.
+
+### 9.3 Co symulator znalazł, czego fixture znaleźć nie mógł
+
+**Szósta kontrola: „czy to w ogóle ten ticket".** Numer ticketu wchodzi do **zakodowanego zapytania**
+(`sysparm_query=number=<ticket>`), a `^` i `^OR` są w tym języku **operatorami** — nie znakami URL-a, więc
+`urlencode` ich nie unieszkodliwia, tylko przepisuje na `%5E`, a instancja dekoduje z powrotem. Zmierzone na
+symulatorze: `--ticket 'RITM0000002^ORnumber=RITM0000001'` odsyłał rekord **RITM0000001**, a narzędzie
+orzekało `OK: RITM0000002^ORnumber=RITM0000001 zatwierdzony…` — czyli zatwierdzenie jednego ticketu
+autoryzowało onboarding zgłoszony na numer drugiego. Fixture nie mógł tego pokazać: plik napisany jako
+odpowiedź na nasze zapytanie z definicji dotyczy ticketu, o który pytamy.
+
+Zamknięte **dwiema** warstwami, każda mierzona osobno (warstwa bez własnego pomiaru znika przy pierwszym
+refaktorze):
+
+1. `NUMER_TICKETU` — kształt na wejściu, `^[A-Za-z0-9_-]{1,64}$`, zapytanie w ogóle nie wychodzi (D9a);
+2. kontrola 2 — `number` z odpowiedzi musi równać się numerowi, o który pytaliśmy (D9c).
+
+Druga warstwa broni także wtedy, gdy zapytanie zdegraduje się **bez naszego udziału**: przy
+`glide.invalid_query.returns_no_rows = false` platforma **odrzuca nierozpoznany warunek i wykonuje resztę**,
+więc pytanie o nieistniejącą kolumnę potrafi odesłać pierwszy wiersz tabeli zamiast błędu (D8a–D8b).
+Wartości domyślnej tej właściwości **nie potwierdziliśmy na stronie referencyjnej dostawcy** — źródła
+społecznościowe mówią `false`. Dlatego symulator implementuje **oba** tryby, a domyślnie ten gorszy dla nas:
+bramka ma być poprawna przy obu, bo to jest ustawienie instancji docelowej, nie nasze.
+
+**Fixture'y dostały brakujące pole.** Zapytanie zamawia `number`, więc żywa instancja by je odesłała —
+a sześć fixtur go nie miało. Nie były „złe": były **niekompletne względem własnego zapytania**, i nikt tego
+nie widział, dopóki nikt nie porównał ich z odpowiedzią zbudowaną z zapytania.
+
+**Kształt `SNOW_INSTANCE` przestał być dowolny.** Wartość wchodziła do URL-a bez sprawdzenia, więc napis
+z ukośnikiem przestawiał **cel** zapytania — a to jest korzeń zaufania całego kanału. Dziś dopuszczalne są
+dwa kształty i nic poza nimi: nazwa instancji (`^[a-z0-9][a-z0-9-]*$`) albo baza na **pętli zwrotnej**
+(`http://127.0.0.1:<port>`). Pętla zwrotna, a nie „dowolny adres http": symulator pod adresem osiągalnym
+z zewnątrz to nie narzędzie testowe, tylko fałszywy system rekordu.
+
+### 9.4 CZEGO SYMULATOR **NIE** DOWODZI
+
+To jest ta sekcja, dla której cała reszta istnieje. Zielony przebieg przeciw symulatorowi znaczy: *nasz kod
+rozmawia poprawnie z czymś, co zachowuje się zgodnie z opublikowaną dokumentacją platformy*. Nie znaczy nic
+więcej, a w szczególności **nie jest gotowością produkcyjną**:
+
+1. **Nie zna pól własnych organizacji docelowej.** `u_project_id` ma prefiks `u_`, czyli jest polem
+   **customer-defined**. Symulator wie o nim tylko tyle, że my je zamawiamy. W organizacji docelowej może
+   nazywać się inaczej, być referencją zamiast tekstu albo nie istnieć — i wtedy kanał odmówi każdemu wnioskowi.
+2. **Nie zna przepływu approvali organizacji docelowej.** Tu `approval` to kolumna tekstowa, którą wpisaliśmy do pliku
+   danych. Tam zatwierdzenie to rekordy `sysapproval_approver`, workflow, delegacje i role.
+3. **Nie zna wersji ani konfiguracji jego API.** ACL na tabeli, właściwości systemowe, MFA/OAuth zamiast
+   Basic, limity, rodzina wydań — każde z tych ustawień zmienia odpowiedź.
+4. **Nie potwierdza zbioru wartości `approval`** — `APPROVED_STATES` zostaje naszym domysłem o ich procesie.
+5. **Nie potwierdza, że Basic w ogóle przejdzie** — tu przechodzi, bo tak to napisaliśmy.
+
+Ta sama lista stoi w nagłówku `tools/snow_symulator.py`, a `tools/snow_symulator_kontrakt.py` (D13) pilnuje,
+żeby refaktor jej nie skasował. **Prerekwizyt uruchomienia kanału w nowym środowisku nie zmienia się:**
+jeden odczyt z instancji docelowej, §8.4. Symulator skraca do niego drogę — nie zastępuje go.
+
+### 9.5 Skąd wiemy, że tak to działa
+
+Symulator odtwarza zachowania z dokumentacji dostawcy, nie z naszej wygody. Tabela źródeł — z jawną kolumną
+pewności, bo część rzeczy da się ustalić tylko z relacji, a nie ze strony referencyjnej — stoi w nagłówku
+`tools/snow_symulator.py` (wiersze `Z1`–`Z7`). Pozycje o pewności niższej niż wysoka są tam **nazwane**, nie
+wygładzone: dokładne brzmienie błędu v1, dokładny tekst `detail` przy 401, wartość domyślna
+`glide.invalid_query.returns_no_rows`.
+
+### 9.6 Uruchomienie
+
+```bash
+# harness dowodowy — to samo, co w bramce treści CI
+python3 tools/snow_symulator_kontrakt.py
+
+# sam serwer, do ręcznych prób (port 0 = wybierz wolny i wypisz)
+python3 tools/snow_symulator.py --dane tests/symulator-instancja.json --port 0 \
+  --uzytkownik u --haslo h &
+SNOW_INSTANCE=http://127.0.0.1:<port> SNOW_USER=u SNOW_TOKEN=h \
+  python3 tools/snow_verify.py --ticket RITM0000001 --expect-project prj-x-test \
+    --approver net-approver@example.com          # 0; negatywy: RITM0000002…RITM0000005, RITM0000009
+```
+
+**Cały kanał przeciw symulatorowi** — `gh workflow run intake.yml … -f symulator=tak`, bez `-f fixture`.
+Przebieg znaczy się **tak samo** jak fixture'owy (§6): własny krok, `::warning`, sekcja w podsumowaniu,
+gałąź `onboard/test-…`, tytuł `[TRYB TESTOWY] … — NIE MERGOWAC`, etykiety `dry-run, tryb-testowy` **bez**
+`onboarding` i baner `[!WARNING]` w opisie. To jest wybór, nie przeoczenie: symulator jest wierniejszy od
+fixture'u, ale nadal **nie jest** systemem rekordu, a słabsze oznaczenie po miesiącu przeczytałoby się jako
+„prawdziwy". Podanie `fixture` i `symulator` naraz kończy się odmową — dwa systemy rekordu to zero systemów
+rekordu.

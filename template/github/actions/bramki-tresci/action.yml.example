@@ -528,6 +528,24 @@ runs:
       shell: bash
       run: python3 tools/attribute_budget.py --input declarations.json --format markdown | tee -a "$GITHUB_STEP_SUMMARY"
 
+    # KONTRAKT KANAŁU TICKETOWEGO ZMIERZONY NA SYMULATORZE, A NIE NA FIXTURZE (DEC-46).
+    #
+    # DLACZEGO TO JEST BRAMKA, A NIE „TEST GDZIEŚ OBOK". `snow_verify.py`, `snow_symulator.py` i fixture'y
+    # żyją TAKŻE w tym repozytorium i można je tu zmienić bezpośrednio — a wtedy jedyną rzeczą pilnującą
+    # zgodności z kontraktem §8 był selftest STARTERA, czyli mechanizm chodzący po cudzym drzewie. To ta
+    # sama pomyłka, którą zmierzono trzy razy w jeden dzień: zasada zapisana w starterze DLA startera,
+    # niezastosowana do materiału, który starter wysyła. Bramka stoi tu, bo `bramki-tresci` woła zarówno
+    # `validate.yml` (tor pull requesta), jak i `apply.yml` (mutator) — więc nie omija jej push prosto
+    # na gałąź domyślną.
+    #
+    # WYJĄTEK OD „BEZ ANI JEDNEGO WYWOŁANIA API" Z NAGŁÓWKA TEJ AKCJI, powiedziany wprost: harness robi
+    # wywołania HTTP — wyłącznie na 127.0.0.1, do serwera, który sam startuje i gasi. Zero poświadczeń,
+    # zero sieci na zewnątrz, zero tożsamości w chmurze, więc zasada „ten zestaw wykonuje się bez żadnej
+    # tożsamości" zostaje nienaruszona. Koszt zmierzony lokalnie: ~2 s.
+    - name: kontrakt kanalu ticketowego (symulator, bez sieci na zewnatrz)
+      shell: bash
+      run: python3 tools/snow_symulator_kontrakt.py
+
     # ZNACZNIK „WSZYSTKIE BRAMKI TREŚCI SIĘ WYKONAŁY". Musi stać jako OSTATNI krok orzekający — na nim
     # i na znaczniku narzędzi stoi cała klasyfikacja werdyktu niżej. Nie da się go postawić „mniej więcej
     # na końcu": bramka, po której go przestawiono, przestaje wpływać na werdykt, choć nadal czerwieni job.

@@ -3120,3 +3120,113 @@ sinka. Ta zmiana odbiera fałszywym alarmom **jedną konkretną przyczynę** (ma
 | dołożyć `subnetworks.insert` do filtra i **nie** ruszać zapytania odczytu | to są DWA różne filtry. Zdarzenie przepuszczone przez sink, ale niewpuszczone przez zapytanie odczytu, nie dociera do detektora — mapa wyszłaby pusta, a przebieg zielony |
 | zmienić kierunek błędu na „nieznana podsieć = nie licz" | zamienia przeszacowanie na ciszę dokładnie tam, gdzie strumień zawiódł. Sink, który nie dostarcza, wygląda wtedy jak czyste okno — ta klasa defektu ma już własny wpis w runbooku i nie wolno jej wprowadzać powtórnie |
 | osobny, czwarty kubełek na `subnetworks.insert` | rozłączność nie jest tu do niczego potrzebna: to ten sam detektor, to samo okno odczytu i ten sam konsument. Czwarty kubełek to trzeci grant, trzeci widok i trzecia rzecz do odtworzenia na nowym klastrze, kupione za nic |
+
+---
+
+## DEC-45 — `apply` kończy się DOWODEM, że zastosował to, co zamierzał; dowodem jest pusty plan, nie kod wyjścia
+
+**Decyzja.** Ostatnim krokiem joba `apply` jest `terraform plan -input=false -detailed-exitcode` wykonany
+**bezpośrednio po** `terraform apply`, w **tym samym jobie** (czyli pod tym samym zamkiem
+`concurrency: vpc-sc-apply`). Werdykt wystawia `tools/weryfikacja_po_apply.py` i czyta go z **treści planu**
+(`terraform show -json`), nie z kodu wyjścia. Werdykty są trzy: `ZGODNE` (plan pusty), `ROZJAZD` (plan
+niepusty zaraz po udanym apply) i `NIE ZMIERZONO` (planu nie da się odczytać). Dwa ostatnie czerwienią
+przebieg. Krok mierzy własny czas i wypisuje go do podsumowania każdego przebiegu.
+
+**Dlaczego.** Zielony `apply` na regule **egzekwowanej aktualizowanej w miejscu** nie dowodzi, że zapis
+wszedł: z 9 przebiegów, w których **oba** równoległe applye zgłosiły `rc=0`, **5 skończyło się brakiem
+jednej ze zmian w żywym API** — bez jednego błędu (DEC-6). Bez tego kroku jedynym sygnałem
+wdrożenia granicy jest kolor przebiegu, o którym **wiadomo, że kłamie** — a na tym sygnale stoją wszystkie
+pozostałe bramki, dowody i promocje. Serializacja zmniejsza szansę trafienia w okno, ale go nie usuwa:
+jednostką eTagu jest **access policy**, a `concurrency:` obejmuje jedno repozytorium, więc pisarz spoza
+tego workflowa (człowiek z `gcloud`, osobny stack, ręczne odtworzenie perimetru) w to okno wchodzi
+i nic go nie serializuje.
+
+**Dlaczego werdykt z treści, a nie z kodu wyjścia.** `-detailed-exitcode` zwraca niezero także wtedy, gdy
+plan **w ogóle się nie wykonał** (wygasłe poświadczenia, `403`, limit tempa, przerwany refresh). Uznanie
+tego za „zmiana nie wylądowała" byłoby dokładnie tym błędem, który dwa razy zepsuł pomiar wyścigu:
+awaria narzędzia raportowana jako wynik pomiaru. Stąd trzeci werdykt i stąd kierunek zależności — kod
+wyjścia jest **wejściem** dla klasyfikatora, a rozstrzyga zawartość planu. Konsekwencja fail-closed:
+plan, którego nie da się odczytać (brak pliku, niepełny JSON), NIE jest „czysto" — także przy kodzie `0`.
+
+**Dlaczego to nie jest fałszywy alarm blokujący wdrożenie.** Krok biegnie **po** `apply`, więc czerwony
+przebieg nie cofa ani nie wstrzymuje zmiany — jest alarmem o rozjeździe, nie utratą drogi wdrożenia.
+Odwrotnie niż bramka przed `apply`, której awaria zatrzymałaby jedyną ścieżkę mutacji granicy.
+
+**Cena, nazwana wprost.** Jeden dodatkowy pełny refresh na przebieg mutujący. Każdy granularny zasób ACM
+czyta **cały** perimetr, a kwota `read_requests` to 500/min na organizację — przy 500 członkach jeden plan
+to ~271 wywołań, więc dwa plany w tej samej minucie są blisko sufitu. Dlatego krok podaje zmierzony czas
+w każdym przebiegu zamiast opierać się na jednorazowym pomiarze z dnia wdrożenia.
+
+**Co odrzucono i dlaczego.**
+
+| wariant | powód odrzucenia |
+|---|---|
+| zostawić sam kod wyjścia `apply` jako dowód | to jest stan sprzed tej decyzji i jest **zmierzony jako nieprawdziwy** (5/9 przebiegów). Zielony `apply` mówi „provider nie zgłosił błędu", a nie „granica wygląda jak plik w gicie" |
+| porównywać `perimeters describe` z deklaracją zamiast planu | tańsze (jedno wywołanie zamiast refreshu), ale wymaga **drugiego renderera** deklaracji — a dwa renderery rozjeżdżają się i wtedy bramka opisuje własny błąd, nie granicę. Do tego `describe` widzi wyłącznie perimetr, a ten stan trzyma także access levele, obiekt kontraktu i polityki alertów: cicha utrata na którymkolwiek z nich przeszłaby niezauważona |
+| `retry` z backoffem na eTagu zamiast weryfikacji | leczy **wyłącznie ścieżkę głośną**. Na ścieżce, którą zmierzono, nie ma błędu, więc nie ma wyzwalacza retry — a odsetek przebiegów „oba OK" (czyli tych, w których zmierzono utratę) retry **podnosi**. Rozstrzygnięte w DEC-6 |
+| weryfikacja w osobnym jobie (`needs: apply`) | zwalnia zamek `concurrency` między zapisem a odczytem, czyli otwiera dokładnie to okno, które ma wykrywać. Do tego drugi job = drugi `init` i drugi odczyt stanu, więc cena rośnie zamiast maleć |
+| plan zawężony `-target` do zasobów, które ten apply zmieniał | tańszy (1–3 odczyty zamiast pełnego refreshu), ale odpowiada na węższe pytanie: nie zobaczy zasobu z tego samego stanu, który stracił swoją treść przy okazji. Bramka wyglądająca na „stan zgadza się z gitem", a mierząca podzbiór, jest gorsza od jawnie droższej |
+| uruchamiać weryfikację tylko wtedy, gdy plan przed apply był niepusty | oszczędza refresh na przebiegach bez zmian, ale kosztuje jedyny moment, w którym tanio widać dryf: `apply` bez zmian na wejściu jest właśnie tym przebiegiem, w którym rozjazd wprowadzony z zewnątrz zobaczyłby ktoś pierwszy raz |
+| ostrzeżenie (`::warning::`) zamiast czerwonego przebiegu | rozjazd po apply znaczy, że granica NIE jest tym, co przeszło review. Ostrzeżenie w zielonym przebiegu nie zostanie przeczytane — a dokładnie tę klasę defektu („zielone, a niedziałające") ten mechanizm zamyka |
+
+---
+
+## DEC-46 — Kanał ticketowy weryfikowany przeciw SYMULATOROWI, nie przeciw fixture'owi
+
+**Decyzja.** Instancji ServiceNow nie będzie. Kanał `snow:` jest weryfikowany przeciw
+`tools/snow_symulator.py` — serwerowi HTTP na **pętli zwrotnej**, który implementuje kontrakt Table API
+opisany w `docs/5-servicenow-intake.md` §8. Cztery rzeczy naraz:
+
+1. **Symulator implementuje kontrakt, nie definiuje go.** §8 zostaje źródłem prawdy; rozjazd między §8
+   a symulatorem czerwieni `tools/snow_symulator_kontrakt.py` (39 asercji), wołany jako **bramka treści**
+   — czyli na torze pull requesta **i** na torze apply, a nie tylko w selfteście startera.
+2. **Dowód wierności przed użyciem.** Zanim symulator zostanie uznany za wierny, musi **odtworzyć defekt**:
+   stare, niesprawne zapytanie (bez `sysparm_fields`) nie dostaje przez niego `assignment_group.name`
+   i kończy się odmową, a dzisiejsze na tym samym serwerze i rekordzie przechodzi. Para, nie pojedynczy
+   przebieg.
+3. **`SNOW_INSTANCE` ma dwa dopuszczalne kształty i nic poza nimi**: nazwa instancji
+   (`^[a-z0-9][a-z0-9-]*$`) albo baza na pętli zwrotnej. Werdykt z symulatora niesie prefiks
+   `[SYMULATOR: …]` w każdej linii — tak samo jak werdykt z fixture'u niesie `[MATERIAŁ TESTOWY: …]`.
+4. **Przebieg symulowany oznacza się tak samo jak fixture'owy** (DEC-43): gałąź `onboard/test-…`, tytuł
+   `[TRYB TESTOWY] … — NIE MERGOWAC`, etykiety `dry-run, tryb-testowy` **bez** `onboarding`, baner
+   `[!WARNING]`, `::warning` i sekcja w podsumowaniu.
+
+**Dlaczego.** Fixture potwierdza nasze założenia — symulator ma je łamać. To nie jest metafora: fixture jest
+odpowiedzią, którą sami napisaliśmy, więc odpowiada na zapytanie, **które sobie wyobraziliśmy**, i nie ma jak
+zaprzeczyć. Zmierzone (DEC-43): narzędzie czytało `assignment_group.name`, a zamawiało samo `sysparm_query`;
+na żywej instancji odrzuciłoby **każdy** ticket, a sześć fixtur świeciło zielono. Symulator odpowiada na
+ZAPYTANIE regułą platformy, więc pytanie niesprawne dostaje odpowiedź niesprawną.
+
+Co ten symulator znalazł w pierwszym przebiegu — czyli dlaczego to nie jest kolejny plik zgadzający się z nami:
+
+- **wstrzyknięcie operatora w numer ticketu.** Numer wchodzi do zakodowanego zapytania, a `^`/`^OR` są tam
+  operatorami; `urlencode` ich nie unieszkodliwia (przepisuje na `%5E`, instancja dekoduje z powrotem).
+  Zmierzone: `--ticket 'RITM0000002^ORnumber=RITM0000001'` odsyłał rekord RITM0000001, a narzędzie
+  orzekało `OK` na numer RITM0000002 — zatwierdzenie jednego ticketu autoryzowało wniosek zgłoszony na
+  numer drugiego. Zamknięte dwiema warstwami: kształtem numeru na wejściu i **kontrolą 2** (`number`
+  z odpowiedzi == numer, o który pytaliśmy);
+- **degradacja zapytania po stronie instancji.** Przy `glide.invalid_query.returns_no_rows = false`
+  platforma odrzuca nierozpoznany warunek i wykonuje resztę — pytanie o nieistniejącą kolumnę odsyła
+  pierwszy wiersz tabeli, nie błąd. Kontrola 2 broni także tu, a symulator implementuje **oba** tryby tej
+  właściwości, bo jest to ustawienie instancji docelowej;
+- **sześć fixtur bez pola `number`**, mimo że zapytanie je zamawia — niekompletnych względem własnego
+  zapytania, czego nie widać, dopóki nikt nie zbuduje odpowiedzi **z** zapytania;
+- **`SNOW_INSTANCE` bez żadnej walidacji** wchodzące wprost do URL-a, czyli korzeń zaufania kanału sterowany
+  napisem.
+
+**Granica jest zapisana w trzech miejscach, nie w jednym.** Symulator nie zna pól własnych organizacji
+docelowej (`u_*`), jej przepływu approvali ani wersji jej API — stoi to w nagłówku
+`tools/snow_symulator.py`, w `docs/5-servicenow-intake.md` §9.4 i jest **pilnowane asercją** (D13), żeby
+refaktor tego nie skasował. Prerekwizyt uruchomienia kanału w nowym środowisku **nie zmienia się**: jeden
+odczyt z instancji docelowej (§8.4). Symulator skraca do niego drogę, nie zastępuje go.
+
+**Co odrzucono i dlaczego.**
+
+| wariant | powód odrzucenia |
+|---|---|
+| zostać przy fixturach (stan po DEC-43) | fixture nie umie zaprzeczyć: opisuje odpowiedź, a nie regułę jej budowania, więc każdy defekt w ZAPYTANIU jest dla niego niewidzialny. Trzy z czterech rzeczy wypisanych wyżej fixture przepuścił, a jedna z nich autoryzowała cudzy ticket |
+| darmowa instancja developerska (PDI) | rozstrzygnięte w DEC-43 i nie zmienia się: rejestracja to krok właściciela konta, instancja hibernuje i bywa odbierana po ~10 dniach bez logowania człowieka, a pól własnych organizacji docelowej i tak nie potwierdza. Dowód „na żywo", który wygasa sam, jest gorszy od zapisanego kontraktu |
+| symulator nasłuchujący na `0.0.0.0`, żeby dało się go użyć jako usługi kontenerowej z innego joba | system rekordu udawany pod adresem osiągalnym z zewnątrz to fałszywy system rekordu, a poświadczenie kanału poleciałoby pod cudzy adres. Pętla zwrotna nie ogranicza niczego, czego potrzebujemy: proces w tle na tym samym runnerze jest tańszy od usługi i nie wymaga obrazu |
+| słabsze oznaczenie PR-a dla trybu symulatora („jest wierniejszy niż fixture") | to jest dokładnie defekt, który DEC-43 zamykał: przebieg testowy nieodróżnialny od wniosku. „Wierniejszy" po miesiącu czyta się jako „prawdziwy", a różnicy nie widać w opisie pull requesta |
+| dopisać `sysapproval_approver` (druga kontrola po stronie approvalu), skoro mamy już symulator | symulator potwierdzi wyłącznie to, co sami w nim napiszemy — a kontrakt tej tabeli jest równie niezmierzony jak poprzedni. Bramka zbudowana na drugim niepotwierdzonym kontrakcie produkowałaby **zielony** werdykt o nieznanej wartości; kontrole dokładane bez pomiaru muszą produkować CZERWONY (uzasadnienie z DEC-43) |
+| oddzielny mechanizm oznaczania dla trybu symulatora | dwa warianty oznaczenia = dwa miejsca do zapomnienia. Wszystkie wartości powstają w JEDNYM kroku rozstrzygającym tryb, a warunek kroku werdyktu brzmi `!= 'normalny'`, więc trzeci tryb testowy jest objęty domyślnie |
