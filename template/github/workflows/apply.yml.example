@@ -12,10 +12,18 @@
 #     plan without it the API rejects the setting and the environment silently ends up with no protection
 #     rule at all. `tools/bootstrap_github.sh` therefore READS THE SETTING BACK and refuses to report
 #     success on a missing human gate; `docs/1`, stage 4, says what to write down when there is none.
-#   * single-flight concurrency — Access Context Manager modifies the org-level policy as a whole and guards
-#     it with an eTag, so two parallel applies do not corrupt anything silently: the loser fails with
-#     `Error 400: The eTag provided ... does not match`. The reason to serialize is RELIABILITY — without it
-#     roughly every overlapping run fails and has to be retried by hand (measured, see DEC-6).
+#   * single-flight concurrency — a CORRECTNESS control, not a convenience one, and the difference is not
+#     academic. Access Context Manager modifies the org-level policy as a whole and guards it with an eTag
+#     whose unit is the ACCESS POLICY, not the perimeter (a write to a neighbouring perimeter invalidates
+#     it — measured, so splitting into two perimeters buys no second write lane). On the DRY-RUN path, and
+#     on every rule CREATION, the loser then fails loudly with `Error 400: The eTag provided ... does not
+#     match the eTag of the current version of the Access Policy`. But an ENFORCED rule updated IN PLACE
+#     (those resources have `Update` in the schema and go read-modify-write over the whole list) **loses a
+#     change SILENTLY**: of 9 overlapping runs where BOTH applies reported success, 5 ended with one side's
+#     change absent from the live API — no error anywhere. Retrying on the eTag does NOT substitute for
+#     serialising: it only cures the path that reports an error, and it would raise the share of runs where
+#     both sides go green — exactly the ones that lost data. Corollary for anyone reading a green run here:
+#     a green `apply` does not end the change, reading the API does (measured, see DEC-6).
 #   * bramka promocji — jedyny punkt, w którym ten workflow ZATRZYMUJE SIĘ i czeka na człowieka, i jedyna
 #     kontrola tutaj, która NIE JEST ustawieniem repozytorium: działa na każdym planie GitHuba. Zatrzymuje
 #     apply, który zacząłby egzekwować granicę wobec członka będącego dziś w dry-run — bo to jedyna zmiana
