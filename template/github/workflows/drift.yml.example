@@ -10,7 +10,7 @@
 # ==========================================================================================
 #   1. Czy obiekt, ktory Terraform ZNA, zmienil sie poza pipeline'em?   -> `plan -detailed-exitcode`
 #   2. Czy na granicy stoi obiekt, ktorego Terraform NIE ZNA?           -> `tools/dryf_nieobjete.py`
-#                                                                          (DEC-46)
+#                                                                          (DEC-48)
 #
 # Drugie pytanie ma wlasny krok, bo plan na nie NIE ODPOWIADA i nie moze: szkielet perimetru niesie
 # `ignore_changes` na szesciu listach (czlonkowie i reguly w obu konfiguracjach), a zasoby granularne

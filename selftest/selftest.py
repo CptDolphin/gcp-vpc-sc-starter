@@ -163,7 +163,7 @@ def bootstrap() -> None:
         # Druga polowa dryfu: obiekt DOPISANY do granicy poza pipeline'em. `terraform plan` go nie widzi
         # i nie zobaczy — szkielet niesie `ignore_changes` na szesciu listach, a zasoby granularne
         # powstaja z `for_each` po deklaracji, wiec obiekt spoza deklaracji nie ma instancji w stanie
-        # (DEC-46).
+        # (DEC-48).
         "tools/dryf_nieobjete.py",
         # Sonda EGRESS uruchamiana WEWNATRZ perimetru — jedyny tor mierzacy kierunek wyjscia.
         # `boundary-probe.yml` wola z runnera CI i mierzy WYLACZNIE ingress; "wewnatrz" jest wlasnoscia
@@ -1920,7 +1920,7 @@ def test_poswiadczenie_kanalu() -> None:
     # galaz WYPCHNIETA, pull requesta brak). Nikt tego nie zauwazyl, bo do tego dnia zaden czlonek nie
     # przekroczyl `review_by`, wiec krok byl zawsze `skipped`, a przebieg zielony.
     #
-    # Wyliczanka nazw jest bramka, ktora chroni dokladnie tyle, ile ktos pamietal w dniu jej pisania (DEC-47).
+    # Wyliczanka nazw jest bramka, ktora chroni dokladnie tyle, ile ktos pamietal w dniu jej pisania (DEC-49).
     # Zbior wyprowadzony z tresci obejmuje sam z siebie kazdy NASTEPNY kanal otwierajacy pull requesta.
     wszystkie = sorted((ROOT / ".github/workflows").glob("*.yml"))
     OTWIERA_PR = re.compile(r"peter-evans/create-pull-request@|gh pr create\b")
@@ -2102,7 +2102,7 @@ def test_dryf_nieobjete() -> None:
     `ignore_changes` na szesciu listach (inaczej szkielet i zasoby granularne kasuja sobie nawzajem
     zawartosc przy kazdym apply), a zasoby granularne powstaja z `for_each` po deklaracji. Obiekt
     dopisany do granicy poza pipeline'em nie ma wiec instancji w stanie — nie ma czego odswiezyc.
-    To NIE JEST do naprawienia w planie; to jest do naprawienia obok niego (DEC-46).
+    To NIE JEST do naprawienia w planie; to jest do naprawienia obok niego (DEC-48).
     """
     print("\n== obiekty spoza pipeline'u (druga polowa dryfu) ==")
     narzedzie = str(ROOT / "tools/dryf_nieobjete.py")

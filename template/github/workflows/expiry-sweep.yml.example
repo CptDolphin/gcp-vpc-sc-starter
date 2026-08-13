@@ -59,7 +59,7 @@ jobs:
           cat expired.txt >> "$GITHUB_STEP_SUMMARY"
 
       # TOKEN APPA MINTOWANY W PRZEBIEGU — dokladnie ten sam mechanizm i ten sam powod, co w kanale
-      # wejsciowym (DEC-22). Ten workflow zostal wtedy pominiety i przez to NIE MOGL zrobic nic (DEC-47).
+      # wejsciowym (DEC-22). Ten workflow zostal wtedy pominiety i przez to NIE MOGL zrobic nic (DEC-49).
       #
       # ZMIERZONE (2026-08-13, #1950, pierwszy w historii przebieg z realnie wygaslym czlonkiem): krok
       # znalezienia wygasnietych zadzialal (`count=1`, wpis usuniety z pliku, commit powstal), galaz

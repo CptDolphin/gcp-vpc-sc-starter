@@ -26,7 +26,7 @@ CO Z TEGO WYNIKA DLA WDROŻENIA. Zmiana wprowadzona ręcznie prawie nigdy nie je
 DOPISANIEM: ktoś dokłada regułę ingress „na chwilę", dokłada projekt do granicy, tworzy access level pod
 incydent. Wykrywacz ślepy na dopisanie jest ślepy na najczęstszy kształt obejścia procesu.
 
-CO TO NARZĘDZIE ROBI (DEC-46). Porównuje INWENTARZ: co żyje w API kontra co Terraform planuje utrzymywać.
+CO TO NARZĘDZIE ROBI (DEC-48). Porównuje INWENTARZ: co żyje w API kontra co Terraform planuje utrzymywać.
 Kierunek jest JEDEN — raportujemy wyłącznie NADMIAR po stronie chmury:
 
     żywe − planowane  →  obiekt spoza pipeline'u (nikt tego nie zgłosi, bo plan tego nie widzi)
