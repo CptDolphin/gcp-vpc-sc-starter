@@ -74,6 +74,12 @@ i przeczytaj [`docs/1-wdrozenie.md`](docs/1-wdrozenie.md) — kolejność krokó
 - [`docs/6-uklad-repozytoriow.md`](docs/6-uklad-repozytoriow.md) — **plik na projekt czy jeden `projects.yml`**:
   co gdzie ląduje przy 100–200 projektach, diagram struktury folderów i pomiar konfliktów (10 równoległych
   PR-ów: 10/10 kontra 1/10)
+- [`docs/7-alerty.md`](docs/7-alerty.md) — alert po alercie: co znaczy, kto to odczuwa, procedura per objaw
+- [`docs/8-zmiany-reczne.md`](docs/8-zmiany-reczne.md) — zmiany, których nie obsługuje żaden formularz:
+  wniosek ręczny, profil, access level (dodanie i **uzbrojenie**), `restricted_services`
+- [`docs/9-karta-wejscia.md`](docs/9-karta-wejscia.md) — **wejście do cudzej organizacji**: pytania o stan
+  zastany granicy, uprawnienia (łącznie z tymi, których nie dostaniemy) i cudze procesy — każde z konsekwencją
+  odpowiedzi „nie" i mapą odpowiedź→knob
 - [`.github/actions/contrib/README.md`](.github/actions/contrib/README.md) — instrukcja dla **innych
   repozytoriów**: co dostają w kontrakcie, jak walidują u siebie, czego nie mogą. Akcja mieszka TUTAJ,
   a nie w repozytorium perimetru: `uses:` rozwiązuje się tokenem repo dywizji, zanim wykona się
