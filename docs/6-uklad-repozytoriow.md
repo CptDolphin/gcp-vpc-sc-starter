@@ -175,6 +175,7 @@ nigdy nie decydowała własność pliku, tylko KANAŁ:
 * `snow:` — ticket weryfikowany oddzwonieniem do ServiceNow, a odpowiedź nazywa projekt,
 * `pr:` — `perimeter/contributors.yaml` mapuje repozytorium na dozwolone projekty, i ten plik leży TUTAJ,
 * `manual:` — approval pod CODEOWNERS; to jedyny kanał, który ta linia kiedykolwiek bramkowała.
+  Procedura krok po kroku: [`8-zmiany-reczne.md` §8.1](8-zmiany-reczne.md#81-wniosek-ręczny-architekta-change_ref-manual).
 
 Własność „dywizja nie zonboarduje cudzego projektu" trzyma się więc dokładnie tak samo jak wcześniej.
 

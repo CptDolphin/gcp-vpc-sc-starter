@@ -475,8 +475,8 @@ odpowiedzi i wnioski:
 |---|---|
 | Przepływ rzadki (miesięczny job) | wydłuż okno dla tej klasy projektów, nie dla wszystkich |
 | Przepływ nowy (wdrożenie w trakcie okna) | promocja musi być po zamrożeniu zmian u dywizji |
-| Brak profilu pokrywającego wzorzec | dodaj profil (trzeci taki sam wyjątek = sygnał, nie czwarty wyjątek) |
-| Access level za wąski | popraw access level — to zmiana dotykająca wszystkich, więc osobny PR |
+| Brak profilu pokrywającego wzorzec | dodaj profil (trzeci taki sam wyjątek = sygnał, nie czwarty wyjątek) — procedura: [`8-zmiany-reczne.md` §8.2](8-zmiany-reczne.md#82-dodanie-profilu-do-katalogu) |
+| Access level za wąski | popraw access level — to zmiana dotykająca wszystkich, więc osobny PR; procedura wraz z **uzbrojeniem** i parą kanarków: [`8-zmiany-reczne.md` §8.3](8-zmiany-reczne.md#83-dodanie-i-uzbrojenie-access-levelu) |
 
 Ponowna promocja: świeże okno, świeży raport, ten sam próg. Skrócenie okna „bo już raz było zielono" to
 dokładnie ta decyzja, która wywołała incydent.
