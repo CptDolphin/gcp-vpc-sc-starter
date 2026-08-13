@@ -2595,6 +2595,90 @@ def test_alerty() -> None:
     check("ZYWY ksztalt: szczegol niesie podsiec, czyli jedyna referencje do sprawdzenia hipotezy",
           trafienie["podsiec"] == "w1-ew1", str(trafienie))
 
+    # 11g. MAPA PODSIEC->SIEC (DEC-44) — KSZTALT ZDJETY Z ZYWYCH WPISOW, NIE Z DOKUMENTACJI GOOGLE.
+    # Zmierzone 2026-08-13 (#2052) na projekcie czlonkowskim labu, 10 wpisow = 5 operacji:
+    #   operation.first=true -> request = {name, network, ipCidrRange, ...}  network JEST  (5/5)
+    #   operation.last=true  -> request = {"@type": ...} i NIC WIECEJ        network BRAK  (0/5)
+    # Oba wpisy maja te sama `resourceName` w postaci `projects/<p>/regions/<r>/subnetworks/<s>` (bez hosta),
+    # podczas gdy wpis maszyny podaje podsiec jako PELNY URL. Fixture odwzorowuje oba ksztalty doslownie.
+    podsiec_first = {"logName": "projects/prj-example-alpha/logs/cloudaudit.googleapis.com%2Factivity",
+                     "resource": {"type": "gce_subnetwork", "labels": {"project_id": "prj-example-alpha"}},
+                     "timestamp": "2026-01-01T10:00:05Z",
+                     "operation": {"id": "operation-example-1", "first": True},
+                     "protoPayload": {"serviceName": "compute.googleapis.com",
+                                      "methodName": "v1.compute.subnetworks.insert",
+                                      "resourceName": ("projects/prj-example-alpha/regions/"
+                                                       "europe-west1/subnetworks/w1-ew1"),
+                                      "request": {"@type": "type.googleapis.com/compute.subnetworks.insert",
+                                                  "name": "w1-ew1", "ipCidrRange": "10.41.0.0/24",
+                                                  "network": ("https://compute.googleapis.com/compute/v1/"
+                                                              "projects/prj-example-alpha/global/networks/w1")}}}
+    podsiec_last = {"logName": "projects/prj-example-alpha/logs/cloudaudit.googleapis.com%2Factivity",
+                    "resource": {"type": "gce_subnetwork", "labels": {"project_id": "prj-example-alpha"}},
+                    "timestamp": "2026-01-01T10:00:39Z",
+                    "operation": {"id": "operation-example-1", "last": True},
+                    "protoPayload": {"serviceName": "compute.googleapis.com",
+                                     "methodName": "v1.compute.subnetworks.insert",
+                                     "resourceName": ("projects/prj-example-alpha/regions/"
+                                                      "europe-west1/subnetworks/w1-ew1"),
+                                     "request": {"@type": "type.googleapis.com/compute.subnetworks.insert"}}}
+    check("ZYWY ksztalt: wpis ZAMYKAJACY operacje podsieci NIE niesie referencji sieci",
+          pw.mapa_podsieci([podsiec_last]) == {}, str(pw.mapa_podsieci([podsiec_last])))
+    # ANTY-TAUTOLOGIA MAPY: karmimy PARA wpisow w kolejnosci, w jakiej przychodzi z API, i zadamy mapy
+    # NIEPUSTEJ. Gdyby `scal_operacje` zaczelo brac wpis `last` (kuszace: niesie potwierdzony skutek),
+    # mapa zrobilaby sie pusta, dopasowanie po cichu cofneloby sie do fail-closed, a testy ksztaltu samej
+    # funkcji nadal by przechodzily. Cisza jest wtedy nieodroznialna od „nikt nie tworzyl podsieci".
+    mapa = pw.mapa_podsieci([podsiec_last, podsiec_first])
+    check("mapa podsiec->siec powstaje z pary wpisow (bierze OTWIERAJACY, ten z `request`)",
+          mapa == {"projects/prj-example-alpha/regions/europe-west1/subnetworks/w1-ew1": "w1"}, str(mapa))
+    check("klucz mapy to PELNA sciezka, nie sama nazwa (nazwa jest unikalna dopiero w parze projekt+region)",
+          all(k.startswith("projects/") and "/regions/" in k for k in mapa), str(mapa))
+
+    # 11g-bis. SEDNO #2052: maszyna w sieci DOJRZALEJ obok swiezej sieci przestaje podnosic licznik.
+    # `maszyna_zywa` stoi w `w1-ew1`, czyli w sieci `w1`. Swieza siec `w2` powstaje w tym samym oknie
+    # i w tym samym projekcie — przed ta zmiana fail-closed liczyl maszyne takze do `w2` i nazywal `w2`
+    # w adnotacji, czyli siec, w ktorej tej maszyny nigdy nie bylo.
+    swieza_obok = dict(wpis_sieci, timestamp="2026-01-01T10:01:00Z",
+                       protoPayload=dict(wpis_sieci["protoPayload"],
+                                         resourceName="projects/prj-example-alpha/global/networks/w2"))
+    rozstrzygniete = pw.policz_okna_sieci([swieza_obok, maszyna_zywa, podsiec_first, podsiec_last], egz, 600)
+    check("ODCZYT, NIE HIPOTEZA: maszyna w sieci dojrzalej NIE podnosi licznika swiezej sieci obok",
+          rozstrzygniete["z_obciazeniem"] == 0, str(rozstrzygniete))
+    # KONTROLA POZYTYWNA DO POWYZSZEJ — bez niej „0" znaczyloby tyle samo, co zepsuty detektor.
+    wlasna = dict(wpis_sieci, timestamp="2026-01-01T10:00:00Z")  # siec `w1`, ta sama, w ktorej stoi maszyna
+    trafia = pw.policz_okna_sieci([wlasna, maszyna_zywa, podsiec_first, podsiec_last], egz, 600)
+    check("KONTROLA POZYTYWNA: ta sama para z maszyna w sieci SWIEZEJ nadal podnosi licznik",
+          trafia["z_obciazeniem"] == 1, str(trafia))
+    szczegol = trafia["szczegoly"][0]["obciazenie"][0]
+    check("znacznik [HIPOTEZA] znika: siec jest ODCZYTANA, gdy podsiec byla w mapie",
+          szczegol["siec_odczytana"] is True, str(szczegol))
+    check("adnotacja mowi, SKAD siec zostala odczytana (mapa vs wpis)",
+          szczegol["zrodlo_sieci"] == "mapa", str(szczegol))
+
+    # 11g-ter. NIEZNANA PODSIEC ZOSTAJE FAIL-CLOSED — kierunek bledu sie NIE ZMIENIA. Przeoczone okno jest
+    # nieodwracalne (ruch w nim nie zostawia sladu), wiec brak mapy musi nadal znaczyc „policz", a nie „milcz".
+    bez_mapy = pw.policz_okna_sieci([swieza_obok, maszyna_zywa], egz, 600)
+    check("podsiec NIEZNANA (brak `subnetworks.insert` w oknie) nadal liczy sie fail-closed",
+          bez_mapy["z_obciazeniem"] == 1, str(bez_mapy))
+    check("i nadal jest OZNACZONA jako nieodczytana, a nie podana jako fakt",
+          bez_mapy["szczegoly"][0]["obciazenie"][0]["siec_odczytana"] is False, str(bez_mapy))
+    # Ta sama nazwa podsieci w INNYM regionie nalezy do INNEJ sieci — splaszczenie klucza do nazwy
+    # skleiloby oba wpisy w jeden i dalo dopasowanie do zlej sieci.
+    inny_region = {"logName": "projects/prj-example-alpha/logs/cloudaudit.googleapis.com%2Factivity",
+                   "resource": {"type": "gce_subnetwork", "labels": {"project_id": "prj-example-alpha"}},
+                   "timestamp": "2026-01-01T10:00:05Z",
+                   "operation": {"id": "operation-example-2", "first": True},
+                   "protoPayload": {"serviceName": "compute.googleapis.com",
+                                    "methodName": "v1.compute.subnetworks.insert",
+                                    "resourceName": ("projects/prj-example-alpha/regions/"
+                                                     "us-central1/subnetworks/w1-ew1"),
+                                    "request": {"@type": "type.googleapis.com/compute.subnetworks.insert",
+                                                "network": ("https://compute.googleapis.com/compute/v1/"
+                                                            "projects/prj-example-alpha/global/networks/w9")}}}
+    dwa_regiony = pw.mapa_podsieci([podsiec_first, inny_region])
+    check("ta sama NAZWA podsieci w dwoch regionach daje DWA wpisy mapy, nie jeden",
+          len(dwa_regiony) == 2 and set(dwa_regiony.values()) == {"w1", "w9"}, str(dwa_regiony))
+
     # 11f. OKNO DOJRZEWANIA W KONFIGURACJI MUSI ZGADZAC SIE Z PROCEDURA. Mniejsze oskarzaloby o zlamanie
     # zasady kogos, kto ja stosowal; wieksze zglaszaloby jako incydent zachowanie zgodne z runbookiem.
     zrodlo = yaml.safe_load((ROOT / "perimeter/alerting.yaml").read_text()).get("violations_source", {})

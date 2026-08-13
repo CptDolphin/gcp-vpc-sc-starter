@@ -82,10 +82,14 @@ ASSET_TYP_PROJEKT = "cloudresourcemanager.googleapis.com/Project"
 # wiec licznik oparty na kodzie wyjscia myli slepote z rozpoznaniem.
 STAN_ZYWY = "ACTIVE"
 
-# Zdarzenia sterujace Compute, z ktorych sklada sie okno. Oba sa Admin Activity — zawsze wlaczone
+# Zdarzenia sterujace Compute, z ktorych sklada sie okno. Wszystkie sa Admin Activity — zawsze wlaczone
 # i niekonfigurowalne, wiec nie da sie ich wylaczyc po stronie projektu czlonkowskiego.
 COMPUTE_SIEC = "v1.compute.networks.insert"
 COMPUTE_MASZYNA = "v1.compute.instances.insert"
+# TRZECI strumien, i jedyne zrodlo mapy podsiec->siec (DEC-44). Bez niego dopasowanie maszyny do sieci
+# custom-mode NIE MA z czego powstac: wpis maszyny niesie wylacznie `subnetwork` (patrz `sieci_maszyny`),
+# a z samej referencji podsieci nie da sie odczytac, do ktorej sieci ona nalezy.
+COMPUTE_PODSIEC = "v1.compute.subnetworks.insert"
 
 # Domyslne okno dojrzewania sieci. Gorna OBSERWACJA z pomiaru to 5 m 18 s (3 przeloty: 5 m 18 s / 3 m 53 s
 # / 4 m 41 s, rozrzut 85 s), a propagacja jest NIEDETERMINISTYCZNA i migocze — DEC-32 bierze wiec zapas
@@ -570,12 +574,10 @@ def sieci_maszyny(wpis: dict) -> list[str]:
 def podsieci_maszyny(wpis: dict) -> list[str]:
     """Nazwy PODSIECI, do ktorych podpieta jest tworzona maszyna. PUSTA LISTA = nie dalo sie odczytac.
 
-    ISTNIEJE, BO `sieci_maszyny` NA ZYWYCH DANYCH NIE ZWRACA NIC (patrz jej docstring). Ta liczba NIE
-    bierze udzialu w dopasowaniu — z samej referencji podsieci nie da sie odczytac, do ktorej SIECI ona
-    nalezy, a strumien sinka nie niesie `v1.compute.subnetworks.insert`, wiec mapy podsiec->siec nie ma
-    z czego zbudowac. Sluzy WYLACZNIE za wskazowke dla dyzurnego: adnotacja przebiegu i tresc alertu
-    podaja nazwe sieci, ktora przy dopasowaniu fail-closed jest HIPOTEZA, a nie odczytem — bez podsieci
-    dyzurny nie ma czym tej hipotezy sprawdzic ani obalic.
+    ISTNIEJE, BO `sieci_maszyny` NA ZYWYCH DANYCH NIE ZWRACA NIC (patrz jej docstring). Zwraca SAMA
+    NAZWE, wiec sluzy do POKAZANIA czlowiekowi (adnotacja, tresc alertu), a nie do dopasowania —
+    nazwa podsieci jest unikalna dopiero w parze (projekt, region), wiec jako klucz mapy bylaby
+    dwuznaczna. Do dopasowania sluzy `sciezki_podsieci_maszyny` nizej.
     """
     zadanie = (wpis.get("protoPayload") or {}).get("request") or {}
     nazwy = []
@@ -584,6 +586,67 @@ def podsieci_maszyny(wpis: dict) -> list[str]:
         if nazwa:
             nazwy.append(nazwa)
     return nazwy
+
+
+def _sciezka_podsieci(ref: str) -> str:
+    """Referencja podsieci -> `projects/<p>/regions/<r>/subnetworks/<s>`. Puste, gdy to nie podsiec.
+
+    DLACZEGO NORMALIZACJA, A NIE PLASKA NAZWA. Obie strony dopasowania podaja te sama podsiec w INNYM
+    ksztalcie — zmierzone na zywych wpisach 2026-08-13 (#2052):
+
+        instances.insert   request.networkInterfaces[0].subnetwork =
+            https://compute.googleapis.com/compute/v1/projects/<p>/regions/<r>/subnetworks/<s>
+        subnetworks.insert protoPayload.resourceName =
+            projects/<p>/regions/<r>/subnetworks/<s>            (bez hosta i bez /compute/v1)
+
+    Kotwica `projects/` sprowadza oba do jednej postaci. Klucz zostaje PELNA SCIEZKA, a nie sama nazwa,
+    bo nazwa podsieci jest unikalna tylko w obrebie (projekt, region): `web` w `europe-west1` i `web`
+    w `us-central1` moga nalezec do DWOCH ROZNYCH sieci, a splaszczenie do nazwy sklejaloby je w jeden
+    wpis mapy i dawalo dopasowanie do zlej sieci — czyli dokladnie ten defekt, ktory ta zmiana zamyka.
+    """
+    tekst = str(ref or "")
+    if "/subnetworks/" not in tekst:
+        return ""
+    i = tekst.find("projects/")
+    return tekst[i:] if i >= 0 else ""
+
+
+def sciezki_podsieci_maszyny(wpis: dict) -> list[str]:
+    """Znormalizowane sciezki podsieci maszyny — klucze do `mapa_podsieci`. PUSTA = nie dalo sie odczytac."""
+    zadanie = (wpis.get("protoPayload") or {}).get("request") or {}
+    sciezki = []
+    for nic in (zadanie.get("networkInterfaces") or []):
+        sciezka = _sciezka_podsieci(nic.get("subnetwork"))
+        if sciezka:
+            sciezki.append(sciezka)
+    return sciezki
+
+
+def mapa_podsieci(wpisy: list[dict]) -> dict[str, str]:
+    """Mapa `projects/../regions/../subnetworks/<s>` -> NAZWA SIECI, ze zdarzen `subnetworks.insert`.
+
+    ZMIERZONE NA ZYWYCH WPISACH 2026-08-13 (#2052, 10 wpisow = 5 operacji, projekt czlonkowski labu) —
+    i to jest jedyny powod, dla ktorego ta funkcja wyglada tak, a nie prosciej:
+
+        operation.first=true  ->  request = {name, network, ipCidrRange, ...}   network JEST   (5/5)
+        operation.last=true   ->  request = {"@type": ...} i NIC WIECEJ         network BRAK   (0/5)
+
+    Czyli siec niesie WYLACZNIE wpis otwierajacy operacje. `scal_operacje` bierze wpis o NAJWCZESNIEJSZYM
+    znaczniku czasu, wiec bierze wlasnie `first` — ale bierze go jako skutek uboczny reguly „zero czasu
+    okna to moment utworzenia", a nie dlatego, ze ktos chcial `request`. Gdyby ta regula kiedykolwiek
+    zmienila sie na „ostatni wpis" (kuszace: `last` niesie potwierdzony skutek), mapa zrobilaby sie PUSTA
+    — a pusta mapa nie wywala niczego, tylko po cichu cofa dopasowanie do fail-closed. Cisza jest wtedy
+    nieodroznialna od „nikt nie tworzyl podsieci". Dlatego selftest asertuje NIEPUSTOSC mapy zbudowanej
+    z PARY wpisow (first + last) tej samej operacji, a nie sam ksztalt funkcji.
+    """
+    mapa: dict[str, str] = {}
+    for z in scal_operacje(wpisy, COMPUTE_PODSIEC):
+        zadanie = (z["wpis"].get("protoPayload") or {}).get("request") or {}
+        siec = _siec_z_referencji(zadanie.get("network"))
+        sciezka = _sciezka_podsieci(z["zasob"])
+        if siec and sciezka:
+            mapa[sciezka] = siec
+    return mapa
 
 
 def policz_okna_sieci(wpisy: list[dict], egzekwowane: set[str], okno_s: int) -> dict:
@@ -607,19 +670,22 @@ def policz_okna_sieci(wpisy: list[dict], egzekwowane: set[str], okno_s: int) -> 
     okno jest nieodwracalne, bo ruch, ktory przez nie przeszedl, NIE ZOSTAWIA SLADU (41 przekroczen granicy,
     0 wpisow audytowych).
 
-    WARIANT (b) JEST SCIEZKA DOMYSLNA, A NIE WYJATKIEM — ZMIERZONE 2026-08-13 NA ZYWYM WPISIE (#2028).
-    Pierwsza wersja tego komentarza zakladala, ze (b) uruchamia sie rzadko, „gdy `request` bywa przyciety".
-    Odczyt wpisu dostarczonego przez sink pokazal, ze `v1.compute.instances.insert` dla sieci CUSTOM-MODE
-    nie niesie pola `network` W OGOLE (szczegoly w `sieci_maszyny`), wiec dla kazdej takiej maszyny
-    dopasowanie idzie przez (b). PRAKTYCZNE ZNACZENIE: w projekcie, w ktorym w tym samym oknie powstala
-    swieza siec ORAZ powstala maszyna w sieci DOJRZALEJ, alert zapali sie na tej drugiej i wskaze w
-    adnotacji nazwe tej pierwszej. Kierunek bledu pozostaje bezpieczny (nie da sie przeoczyc realnego
-    okna), ale precyzja pary jest mniejsza, niz sugerowala nazwa metryki — i dyzurny MUSI to wiedziec,
-    zanim potraktuje nazwe sieci w alercie jako fakt. Scisle dopasowanie wymaga mapy podsiec->siec, czyli
-    `v1.compute.subnetworks.insert` w filtrze sinka; osobne zgloszenie, bo dotyka sinka org-level.
+    SIEC ODCZYTUJE SIE NA DWA SPOSOBY, A DOPIERO ICH BRAK URUCHAMIA (b) — DEC-44. Wpis maszyny w sieci
+    CUSTOM-MODE nie niesie pola `network` w ogole (#2028), wiec sposob pierwszy — jawna referencja
+    z `sieci_maszyny` — na zywych danych milczy i (b) bylo sciezka DOMYSLNA. Sposob drugi to mapa
+    podsiec->siec zbudowana ze zdarzen `subnetworks.insert` z TEGO SAMEGO okna odczytu: wpis maszyny
+    zawsze niesie `subnetwork`, wiec gdy podsiec jest w mapie, siec jest ODCZYTEM, a nie hipoteza.
+
+    CO SIE PRZEZ TO ZMIENIA W KIERUNKU BLEDU: NIC. Podsiec NIEZNANA (utworzona przed oknem odczytu, albo
+    strumien `subnetworks.insert` nie dotarl) nadal idzie przez (b) i nadal liczy sie do okna. Zmienia sie
+    tylko to, ze maszyna w sieci DOJRZALEJ obok swiezej sieci przestaje podnosic licznik — bo teraz wiadomo,
+    ze stoi gdzie indziej, zamiast byc zgadywana. Alert przestaje nazywac siec, ktorej nie odczytal.
     """
     sieci = [z for z in scal_operacje(wpisy, COMPUTE_SIEC) if projekt_wpisu(z["wpis"]) in egzekwowane]
     maszyny = [z for z in scal_operacje(wpisy, COMPUTE_MASZYNA) if projekt_wpisu(z["wpis"]) in egzekwowane]
+    # Mapa idzie z CALEGO okna odczytu, nie z projektow egzekwowanych — podsiec jest tu faktem
+    # o topologii, a nie zdarzeniem do policzenia, wiec zawezanie jej niczego nie chroni, a moze zgubic.
+    podsiec_do_sieci = mapa_podsieci(wpisy)
 
     szczegoly = []
     for s in sieci:
@@ -632,15 +698,22 @@ def policz_okna_sieci(wpisy: list[dict], egzekwowane: set[str], okno_s: int) -> 
             if not (s["czas"] <= m["czas"] <= s["czas"] + okno_s):
                 continue
             podpiete = sieci_maszyny(m["wpis"])
+            zrodlo = "wpis" if podpiete else ""
+            if not podpiete:
+                # Kolejnosc ma znaczenie: mapy pytamy DOPIERO, gdy jawnej referencji nie ma. Jawna
+                # referencja jest odczytem z tego samego wpisu, wiec nie ma czego nia przebijac.
+                podpiete = [podsiec_do_sieci[p] for p in sciezki_podsieci_maszyny(m["wpis"])
+                            if p in podsiec_do_sieci]
+                zrodlo = "mapa" if podpiete else ""
             if podpiete and nazwa and nazwa not in podpiete:
                 continue
             trafione.append({
                 "maszyna": m["zasob"].rsplit("/", 1)[-1],
                 "po_sekundach": round(m["czas"] - s["czas"]),
                 # `False` = dopasowanie poszlo sciezka fail-closed, czyli `siec` obok jest HIPOTEZA.
-                # Na zywych danych to jest przypadek DOMYSLNY dla sieci custom-mode, nie wyjatkowy
-                # (#2028) — dlatego obok leci podsiec, jedyna referencja, ktora wpis realnie niesie.
+                # `True` = siec zostala ODCZYTANA: albo z wpisu maszyny, albo z mapy podsiec->siec.
                 "siec_odczytana": bool(podpiete),
+                "zrodlo_sieci": zrodlo or None,
                 "podsiec": ", ".join(podsieci_maszyny(m["wpis"])) or None,
             })
         szczegoly.append({"projekt": projekt, "siec": nazwa,
@@ -1016,10 +1089,16 @@ def zmierz(args) -> int:
                 # sie zmiescic w calosci w jednym przebiegu. Bez tego zapasu siec utworzona tuz przed
                 # granica okna zostalaby przeczytana bez swojej maszyny, a w nastepnym przebiegu — maszyna
                 # bez swojej sieci, i para nie zostalaby zlozona przez ZADEN przebieg.
+                #
+                # TRZECI CZLON (`subnetworks.insert`) MUSI BYC TU, A NIE TYLKO W FILTRZE SINKA — to sa
+                # DWA rozne filtry i przepuszczenie zdarzenia przez sink nic nie daje, dopoki zapytanie
+                # odczytu go nie wpuszcza. Pominiecie tego miejsca nie wywala niczego: mapa podsiec->siec
+                # wyszlaby pusta, dopasowanie cofneloby sie do fail-closed, a przebieg nadal bylby zielony.
                 wpisy_compute = czytaj_widok(
                     f"{baza_sieci}/{widok_sieci}",
                     f'protoPayload.methodName="{COMPUTE_SIEC}" OR '
-                    f'protoPayload.methodName="{COMPUTE_MASZYNA}"',
+                    f'protoPayload.methodName="{COMPUTE_MASZYNA}" OR '
+                    f'protoPayload.methodName="{COMPUTE_PODSIEC}"',
                     teraz - okno - okno_dojrzewania, g_token)
                 okna_sieci = policz_okna_sieci(wpisy_compute, egzekwowane, okno_dojrzewania)
             except (urllib.error.HTTPError, urllib.error.URLError, KeyError) as e:
@@ -1049,14 +1128,21 @@ def zmierz(args) -> int:
                 # PRZY DOPASOWANIU FAIL-CLOSED NAZWA SIECI JEST HIPOTEZA — i adnotacja MUSI to mowic
                 # wprost. Na zywych danych `network` nie wystepuje we wpisie maszyny (#2028), wiec
                 # „siec X dostala obciazenie" bez tego zastrzezenia bylo zdaniem twierdzacym wiecej, niz
-                # pomiar uprawnia: maszyna mogla stac w sieci dojrzalej. Podajemy PODSIEC, bo to jedyna
-                # referencja, ktora wpis realnie niesie, i to nia dyzurny rozstrzyga w jednej komendzie.
+                # pomiar uprawnia: maszyna mogla stac w sieci dojrzalej.
+                #
+                # ODKAD JEST MAPA PODSIEC->SIEC (DEC-44) TA SCIEZKA JEST WYJATKIEM, A NIE DOMYSLNA — ale
+                # nadal istnieje (podsiec starsza niz okno odczytu, brak strumienia). Adnotacja nazywa
+                # ZRODLO odczytu, bo „z wpisu" i „z mapy" roznia sie tym, czego wymagaly: mapa dziala
+                # tylko wtedy, gdy `subnetworks.insert` trafil do tego samego okna. Dyzurny, ktory tego
+                # nie wie, nie odrozni „odczytalem" od „mialem z czego odczytac".
                 czesci = []
                 for o in s["obciazenie"]:
                     tekst = f"{o['maszyna']} po {o['po_sekundach']} s"
+                    podsiec = o.get("podsiec") or "nieodczytana"
                     if not o["siec_odczytana"]:
-                        podsiec = o.get("podsiec") or "nieodczytana"
                         tekst += f" (siec NIEODCZYTANA z wpisu — dopasowanie fail-closed, podsiec: {podsiec})"
+                    elif o.get("zrodlo_sieci") == "mapa":
+                        tekst += f" (siec odczytana z mapy podsiec->siec, podsiec: {podsiec})"
                     czesci.append(tekst)
                 opis = ", ".join(czesci)
                 pewnosc = "" if all(o["siec_odczytana"] for o in s["obciazenie"]) else " [HIPOTEZA]"
