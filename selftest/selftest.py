@@ -5938,6 +5938,24 @@ def test_boundary_probe() -> None:
           and "vpcServiceControlsUniqueIdentifier" in audyt
           and "vpcServiceControlsUniqueId" in audyt)
 
+    # ZRODLO DRUGIEGO DOWODU JEST BRAMKOWANE, BO OD NIEGO ZALEZY MODEL UPRAWNIEN (#2053). Odczyt
+    # audit-logu Z PROJEKTU CZLONKA dziala, ale wymaga prawa czytania logu kazdego czlonka — czyli przy
+    # kilkuset projektach rozsianych po organizacji sprowadza sie do org-wide `roles/logging.viewer`.
+    # Sink org-level daje ten sam dowod za JEDNO nadanie. Bez tej asercji powrot do `--project` byloby
+    # zmiana o jednym slowie, ktora cicho przywraca uprawnienie org-wide.
+    # KOMENTARZE POMIJAMY. Krok tlumaczy w komentarzu, ze DO 2026-08-13 czytal `--project="$PROJEKT"` —
+    # a asercja czytajaca tekst dokumentu zamiast kodu wywracalaby sie o wlasne uzasadnienie i uczyla
+    # kasowania uzasadnien. Ta sama zasada, co w guardzie „no dry-run commit command".
+    audyt_kod = "\n".join(l for l in audyt.splitlines() if not l.lstrip().startswith("#"))
+    check("boundary-probe: krok audytowy czyta WIDOK SINKA, nie log projektu czlonka",
+          "--bucket=" in audyt_kod and "--view=" in audyt_kod
+          and '--project="$PROJEKT"' not in audyt_kod,
+          audyt_kod[:600])
+    # Puste wspolrzedne sinka musza byc czerwone: bez tego `gcloud` odmawia komunikatem o skladni,
+    # a diagnoza idzie w strone uprawnien — czyli tam, gdzie problemu nie ma.
+    check("boundary-probe: brak zmiennej sinka jest odrzucany (fail-closed)",
+          "brak zmiennej repozytorium" in audyt, audyt[:600])
+
     # Pusty zbior oczekiwanych identyfikatorow NIE moze znaczyc „zaliczone" — inaczej brak odmowy
     # w odpowiedziach (czyli granica, ktora nie zadzialala) dawalby zielony krok przez brak danych.
     check("boundary-probe: brak identyfikatorow w odpowiedziach konczy krok bledem",

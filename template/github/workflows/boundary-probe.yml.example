@@ -471,7 +471,12 @@ jobs:
       - name: odmowa w audit-logu
         if: ${{ github.event.inputs.expect == 'blocked' }}
         env:
-          PROJEKT: ${{ github.event.inputs.project }}
+          # `PROJEKT` ZDJETY z tego kroku swiadomie: po przejsciu na sink nie jest tu uzywany do niczego,
+          # a zostawiony sugerowalby, ze krok nadal celuje w log czlonka. Zmienna zyje dalej w krokach,
+          # ktore realnie sonduja ten projekt.
+          SINK_PROJECT: ${{ vars.VIOLATIONS_SINK_PROJECT }}
+          SINK_BUCKET: ${{ vars.VIOLATIONS_SINK_BUCKET }}
+          SINK_LOCATION: ${{ vars.VIOLATIONS_SINK_LOCATION }}
         run: |
           set -o pipefail
           # PONAWIAMY, ZAMIAST ORZEKAC OD RAZU. Wpis audytowy pojawia sie w `logging read` po ~14 s od
@@ -507,14 +512,44 @@ jobs:
           fi
           echo "oczekiwane identyfikatory: $(wc -l < oczekiwane-id.txt)"
 
-          PROBY=8
+          # ZRODLEM DRUGIEGO DOWODU JEST SINK, NIE LOG PROJEKTU CZLONKA (#2053).
+          #
+          # Do 2026-08-13 ten krok czytal `--project="$PROJEKT"`, czyli audit-log CZLONKA. Dzialalo,
+          # ale kupowalo dowod za cene, ktora widac dopiero przy skali: prawo odczytu logu czlonka bralo
+          # sie z org-wide `roles/logging.viewer` na koncie `plan` — czyli z odczytu KAZDEGO logu
+          # w organizacji. Przy kilkuset czlonkach rozsianych po calej organizacji (i ~50 nowych
+          # miesiecznie, dokladanych przez zespol, ktory nie pyta nas o zgode) nie ma miedzy „org-wide"
+          # a „lista nie do utrzymania" nic posrodku: zmierzone, dzisiejsi czlonkowie leza juz w DWOCH
+          # roznych folderach.
+          #
+          # Sink org-level `include_children` routuje KAZDE naruszenie VPC-SC w organizacji do jednego
+          # kubelka w projekcie administracyjnym — jedno nadanie `roles/logging.viewAccessor`, niezaleznie
+          # od liczby czlonkow. Ten sam sink czyta raport naruszen (#1969). Zmierzone przed zmiana: widok
+          # sinka NIESIE `vpcServiceControlsUniqueId`, czyli dokladnie pole, po ktorym ten krok koreluje.
+          #
+          # OKNO CZEKANIA URASTA, BO SINK JEST WOLNIEJSZY. Do `logging read` projektu ~14 s, do sinka
+          # 22-24 s (pulapka #7). Osiem prob po 15 s dawalo 120 s i miescilo sie takze dla sinka, ale bez
+          # marginesu na jego wlasne opoznienie indeksowania — stad dwanascie prob. Gorna granica jest
+          # swiadomie wyzsza od zmierzonej: indeksowanie nie ma gwarancji czasowej, a bramka padajaca przy
+          # POPRAWNYM zachowaniu systemu jest szumem, ktory sie wylacza.
+          for ZMIENNA in SINK_PROJECT SINK_BUCKET SINK_LOCATION; do
+            if [ -z "${!ZMIENNA}" ]; then
+              # PUSTA WSPOLRZEDNA NIE MOZE ZNACZYC „czytam skadinad". Bez tego `gcloud` dostalby pusty
+              # `--bucket=` i odmowil komunikatem o skladni, a diagnoza poszlaby w strone uprawnien.
+              echo "::error::brak zmiennej repozytorium $ZMIENNA — bez wspolrzednych sinka nie ma drugiego zrodla dowodu"
+              exit 1
+            fi
+          done
+
+          PROBY=12
           ODSTEP=15
           CZEKANO=0
           for PROBA in $(seq 1 "$PROBY"); do
             if ! gcloud logging read \
                  'protoPayload.metadata."@type"="type.googleapis.com/google.cloud.audit.VpcServiceControlAuditMetadata"
                   AND NOT protoPayload.metadata.dryRun="true"' \
-                 --project="$PROJEKT" --freshness=1h --limit=50 --format=json > odmowy.json; then
+                 --project="$SINK_PROJECT" --bucket="$SINK_BUCKET" --location="$SINK_LOCATION" \
+                 --view="$SINK_BUCKET" --freshness=1h --limit=50 --format=json > odmowy.json; then
               echo "::error::nie udalo sie przeczytac audit-logu — brak drugiego dowodu"
               exit 1
             fi
