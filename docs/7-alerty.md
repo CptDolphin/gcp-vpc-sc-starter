@@ -129,6 +129,9 @@ przy dwóch zdrowych konfiguracjach, drugie ukrywa tę, która właśnie się za
 atrybuty z **żywej granicy** (`servicePerimeters.get`), a nie z plików YAML. Powód jest konkretny:
 `attribute_budget.py` modeluje renderer na podstawie deklaracji i jest przez to ślepy na wszystko, co jest
 w granicy, a czego nie ma w Gicie — zdublowane reguły po nieudanym odzysku stanu, ręczne dopiski, dryf.
+Konsolidacja powtarzalnego wzorca w profil jest jedną z reakcji na ten alert i ma własną procedurę
+(z pomiarem budżetu **przed**, nie po): [`8-zmiany-reczne.md` §8.2](8-zmiany-reczne.md#82-dodanie-profilu-do-katalogu).
+
 Bramka na PR-ze odpowiada na pytanie „czy moja zmiana się zmieści" (i tam deklaracja jest właściwa, bo
 zmiany w chmurze jeszcze nie ma); alert odpowiada na pytanie „ile zostało w granicy". Obie liczby lądują
 w podsumowaniu przebiegu `watch.yml` obok siebie, a ich rozjazd jest osobną kontrolą — z **dwiema**

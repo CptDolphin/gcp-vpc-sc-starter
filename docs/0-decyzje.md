@@ -2756,3 +2756,45 @@ a raport podaje ich liczbę wprost. Fałszywe okno powstaje **wyłącznie** w ko
 | zostawić krok i dopisać przypis „u kogoś innego robi to inny zespół" | przypis nie zmienia tego, że krok stoi w numerowanej ścieżce i wykonujący do niego dojdzie. Procedura, która w połowie oddaje sterowanie, nie nazywając przekazania, jest gorsza od procedury, która się kończy |
 | wyciąć z materiału warianty tworzące i kasujące projekty | to one dają reprodukowalność „od zera" i możliwość ćwiczenia odtworzenia. Problemem jest brak etykiety, nie obecność wariantu — koszt adnotacji bliski zeru, koszt utraty ćwiczenia wysoki |
 | czekać z przepisaniem procedury na automat wykrywający martwego członka | odwrotna kolejność. Uzgodnienie i rekoncyliacja są tańsze, działają bez kodu i dopiero one mówią automatowi, **jakiego czasu detekcji** ma pilnować |
+
+---
+
+## DEC-39 — Dowodem zmiany ręcznej jest ODCZYT z żywego API, nie zielony `apply`
+
+**Decyzja.** Cztery zmiany, które w tym repozytorium wykonuje człowiek, a nie kanał wejścia — wniosek ręczny
+architekta (`change_ref: manual:`), dodanie profilu do katalogu, dodanie i uzbrojenie access levelu, zmiana
+`restricted_services` — mają procedury w JEDNYM dokumencie (`docs/8-zmiany-reczne.md`) i wspólny kształt
+ostatniego kroku: **odczyt stanu z żywego API po apply** (`perimeters describe`, `levels describe`, przelot
+`boundary-probe.yml`). „Pipeline zielony" nie kończy żadnej z nich. Dla access levelu krok weryfikacyjny jest
+mocniejszy i nazwany wprost: **para kanarków** — ten sam przelot sondy w stanie rozbrojonym i uzbrojonym,
+bo pojedyncze „przeszło" jest obserwacją, nie dowodem.
+
+**Dlaczego.** Zielony `apply` dowodzi, że **zapisaliśmy to, co chcieliśmy zapisać**, i niczego więcej. Każda
+z tych czterech zmian ma zmierzony tryb awarii, który na zielonym apply wygląda identycznie jak sukces:
+access level z zakresami dokumentacyjnymi jest w konsoli kompletny i **nie autoryzuje nikogo** · profil
+`bq-omni-external-read` przeszedł schemat, OPA, `validate` i `plan`, stał w katalogu i był **nieaplikowalny
+od dnia powstania** · usługa spoza wsparcia VPC-SC przechodzi wszystkie bramki offline i pada dopiero na
+org-plane · offboarding zatrzymał się na `403` **po** zastosowaniu reszty planu, zostawiając stan częściowo
+zastosowany. Cztery różne przyczyny, jeden wspólny wniosek: między „zapisane" a „działa" jest odczyt,
+i tylko on jest dowodem.
+
+Drugie uzasadnienie dotyczy tego, dlaczego procedury stoją RAZEM. Te cztery czynności łączy własność, której
+nie ma żadna inna zmiana w tym repozytorium: **nie mają systemu rekordu**. Wniosek z ServiceNow weryfikuje
+oddzwonienie do API, wniosek z repozytorium dywizji — mapowanie repo→projekty. Tutaj jedynym śladem intencji
+jest treść pull requesta, a wnioskodawca i zatwierdzający bywają tą samą osobą. Dokument, który je zbiera,
+może więc powiedzieć raz to, co inaczej trzeba by powtórzyć cztery razy: kto zatwierdza, czym jest dowód
+i czego rewert nie cofa.
+
+**Zatwierdzający — nazwany, nie zmechanizowany.** Trzy z tych czterech zmian rozszerzają dostęp. Dla ścieżki
+egress poza Google Cloud zatwierdzającego niesie mechanizm (`policy.yaml` §`egress_approvals`, DEC-23);
+dla pozostałych trzech **odpowiednika nie ma i ten dokument go nie dorabia**. Zatwierdzający jest nazwany
+w procedurze, a jego ślad zostaje w opisie pull requesta i w `change_ref`. Świadomy residual: CODEOWNERS bez
+ochrony gałęzi nie jest egzekwowany przez GitHuba, więc realną bramką pozostaje OPA na obu torach (DEC-16),
+a ona pyta o **kształt** zmiany, nie o to, kto ją przeczytał.
+
+| odrzucone | dlaczego |
+|---|---|
+| dopisać cztery procedury do dokumentów, w których dziś stoją ich fragmenty (`3-runbook`, `5-servicenow`, `7-alerty`) | rozsypuje odpowiedź na pytanie „co ja właściwie mogę tu zmienić ręcznie" na trzy dokumenty posortowane wg czego innego (objaw alertu, kanał wejścia, etap życia członka). Fragmenty tam były — i dlatego przez cały ten czas nikt nie zauważył, że procedury nie ma |
+| uznać zielony `apply` za wystarczający dowód i opisać tylko kroki | to jest dokładnie stan sprzed tego dokumentu: cztery scenariusze **z kodem i dowodem, bez procedury**, a przy tym cztery zmierzone awarie, których zielony apply nie odróżnił od sukcesu |
+| dorobić mechanizm zatwierdzania dla profilu, access levelu i `restricted_services` na wzór `egress_approvals` | trzy nowe wpisy do utrzymania, wprowadzone razem z pierwszą procedurą, która ich dotyczy — zanim wiadomo, czy nazwany zatwierdzający w procedurze wystarcza. Ryzyko jest znane i nazwane; mechanizm powstanie, gdy okaże się, że nazwanie nie działa, a nie „na wszelki wypadek" |
+| wymagać pary kanarków przy KAŻDEJ z czterech procedur | para mierzy access level i tylko on ma tryb awarii „obiekt wygląda kompletnie i nie autoryzuje nikogo, a wpuszczenia nie widać w logu". Dla członka, profilu i listy usług tańszy odczyt (`describe`) odpowiada na to samo pytanie — wymóg pary byłby tam rytuałem, nie kontrolą |

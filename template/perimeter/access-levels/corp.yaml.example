@@ -24,6 +24,9 @@
 # i w `describe` wygląda na kompletny.
 #
 #   armed: false  = „ten poziom dziś nie wpuszcza nikogo i wiemy o tym"  → wymaga `unarmed_reason`
+#
+# JAK Z TEGO WYJŚĆ — czyli jak przejść z `armed: false` na poziom, który kogoś realnie wpuszcza, i czym
+# to udowodnić (para kanarków; z logu wpuszczenia NIE WIDAĆ): docs/8-zmiany-reczne.md §8.3.
 #   armed: true   = „ktoś realnie może stąd przyjść"                     → przy `ip_subnetworks` wymaga
 #                   `source_of_truth` + `reviewed` (skąd wartość i kiedy potwierdzona)
 #   (brak pola)   = `true`

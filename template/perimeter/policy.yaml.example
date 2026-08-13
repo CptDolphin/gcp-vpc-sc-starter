@@ -34,6 +34,9 @@ perimeter:
 # obrazy treningowe z Artifact Registry, notebooki przez notebooks. Perimetr chroniący tylko aiplatform
 # zostawia dane w miejscu, z którego i tak da się je wyprowadzić. Guard OPA (baseline_locked.rego) blokuje
 # usunięcie aiplatform z tej listy.
+# ZMIANA TEJ LISTY MA WŁASNĄ PROCEDURĘ — docs/8-zmiany-reczne.md §8.4. Powód, dla którego nie jest to
+# zwykła edycja YAML-a: lista nie jest per członek, więc dotyka WSZYSTKICH naraz i w obu konfiguracjach,
+# a usunięcie usługi zdejmuje ochronę bez odpalenia jakiegokolwiek alertu.
 restricted_services:
   - aiplatform.googleapis.com
   - storage.googleapis.com
