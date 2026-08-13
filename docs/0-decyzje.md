@@ -2816,9 +2816,10 @@ a raport podaje ich liczbę wprost. Fałszywe okno powstaje **wyłącznie** w ko
   pytanie przed czy powiadomienie po · kto reaguje) plus rekoncyliacja po naszej stronie.
 * **Brak uzgodnienia zapisujemy wprost.** Milczące założenie „ktoś nam powie" jest gorsze od nazwanego
   braku, bo nie ma właściciela ani czasu detekcji.
-* Rekoncyliacja (`projects describe` po każdym `project_id` z `perimeter/projects.yaml`) chodzi w rytmie
-  **nie rzadszym niż okno obserwacji `dry-run`** — dłuższa przerwa dopuszcza promocję na dowodzie
-  wyprodukowanym przez martwy projekt.
+* Rekoncyliacja chodzi w rytmie **nie rzadszym niż okno obserwacji `dry-run`** — dłuższa przerwa dopuszcza
+  promocję na dowodzie wyprodukowanym przez martwy projekt. **Nośnik rozstrzyga DEC-42** (obserwator,
+  Asset Inventory, rytm godzinny); zapowiadana tu pętla `projects describe` po `project_id` z deklaracji
+  została odczytem kontrolnym człowieka, a nie mechanizmem — powód jest w DEC-42.
 * Materiał, który tworzy albo kasuje projekty na potrzeby odtworzenia od zera i ćwiczeń, **zostaje**, ale
   jest oznaczony jako wariant środowiska referencyjnego. Bez etykiety czytelnik nie odróżni „tak się to
   robi" od „tak to robiono tam, gdzie były uprawnienia".
@@ -2914,3 +2915,85 @@ a ona pyta o **kształt** zmiany, nie o to, kto ją przeczytał.
 | uznać zielony `apply` za wystarczający dowód i opisać tylko kroki | to jest dokładnie stan sprzed tego dokumentu: cztery scenariusze **z kodem i dowodem, bez procedury**, a przy tym cztery zmierzone awarie, których zielony apply nie odróżnił od sukcesu |
 | dorobić mechanizm zatwierdzania dla profilu, access levelu i `restricted_services` na wzór `egress_approvals` | trzy nowe wpisy do utrzymania, wprowadzone razem z pierwszą procedurą, która ich dotyczy — zanim wiadomo, czy nazwany zatwierdzający w procedurze wystarcza. Ryzyko jest znane i nazwane; mechanizm powstanie, gdy okaże się, że nazwanie nie działa, a nie „na wszelki wypadek" |
 | wymagać pary kanarków przy KAŻDEJ z czterech procedur | para mierzy access level i tylko on ma tryb awarii „obiekt wygląda kompletnie i nie autoryzuje nikogo, a wpuszczenia nie widać w logu". Dla członka, profilu i listy usług tańszy odczyt (`describe`) odpowiada na to samo pytanie — wymóg pary byłby tam rytuałem, nie kontrolą |
+
+## DEC-42 — Żywotność członka mierzy Asset Inventory JEDNYM wywołaniem, a „nie odczytano" nigdy nie znaczy „ACTIVE"
+
+**Decyzja.** Rekoncyliację zapowiedzianą w DEC-38 wykonuje **obserwator** (`watch.yml` →
+`tools/perimeter_watch.py`), a nie osobny przelot ani bramka na pull requeście. Źródłem stanu jest **Cloud
+Asset Inventory** (`searchAllResources`, typ `cloudresourcemanager.googleapis.com/Project`, zakres
+organizacji) — **jedno wywołanie na przebieg**, nie `resourcemanager.projects.get` po każdym członku.
+Listę członków bierzemy z **żywej granicy** (`spec.resources` + `status.resources`), a nie z deklaracji.
+Wynik to jedna metryka `custom.googleapis.com/vpcsc/members_not_active` z etykietą `state` o **zamkniętym**
+zbiorze wartości: `not_active` (stan odczytany i inny niż `ACTIVE`) oraz `unreadable` (stanu **nie**
+odczytano). Obie serie publikują się w każdym przebiegu, także z zerem; gdy odczytu nie ma w ogóle —
+**nie publikuje się nic**, a warunek „brak danych" polityki alertu zamienia ślepotę w sygnał.
+
+**Dlaczego.** Trzy rzeczy rozstrzygnęły kształt, a nie jedna.
+
+*Uprawnienie, które już mamy.* `resourcemanager.projects.get` nie ma **żadne** konto pipeline'u: konto
+apply ma wyłącznie własną rolę na perimetrze, konto watch nie ma nic na organizacji, a konto planu —
+sześć ról, wśród nich `roles/cloudasset.viewer` (zawiera `cloudasset.assets.searchAllResources`). Wariant
+„zapytaj Resource Managera o każdego członka" zaczynałby się więc od nowego nadania na organizacji, czyli
+od rozszerzenia uprawnień po to, żeby wykryć problem, którego przyczyną jest cudze uprawnienie do
+kasowania. Asset Inventory kosztuje **zero nowych nadań**.
+
+*Koszt nie rośnie z liczbą członków.* Przy kilkuset członkach wariant per członek to kilkaset wywołań przy
+każdym przebiegu; tutaj jest to jedno wywołanie na stronę wyników. Ta sama własność jest powodem, dla
+którego wariant per członek nie nadaje się na bramkę PR-a — a bramki i tak nie ma z cięższego powodu
+(niżej).
+
+*Widzi to, czego `projects list` nie pokazuje.* Lista projektów domyślnie oddaje wyłącznie `ACTIVE`, więc
+martwy członek jest w niej **niewidoczny** — „nie ma go na liście" wygląda identycznie jak „nigdy go nie
+było". `searchAllResources` zwraca `state` również dla projektów w `DELETE_REQUESTED`, czyli odpowiada na
+pytanie, które faktycznie zadajemy.
+
+**Werdykt budujemy na TREŚCI, nie na kodzie błędu.** `projects describe` odpowiada tym samym komunikatem
+na „nie ma projektu" i na „brak dostępu", więc licznik oparty na kodzie wyjścia myli ślepotę z rozpoznaniem
+— i myli ją w kierunku niebezpiecznym, bo brak odpowiedzi najłatwiej policzyć jako „nic nie znaleziono,
+czyli w porządku". Stąd trzeci worek i osobna seria: numer, dla którego indeks nie oddał stanu, jest
+**`unreadable`**, nigdy `ACTIVE`. Przyczyn tego stanu nie zgadujemy (twarde skasowanie po 30 dniach,
+opóźnienie indeksu, zawężony zakres, odebrane uprawnienie) — detektor, który by je zgadywał, byłby
+pewniejszy siebie niż pomiar na to pozwala. **Raport częściowy jest lepszy niż brak raportu**: jeden
+członek bez stanu nie wywraca przelotu, reszta jest policzona — ale nie ma ścieżki zamiatającej go pod
+„ACTIVE".
+
+**Opóźnienie indeksu jest realne i zapisane, a nie przemilczane.** Asset Inventory to indeks nadążający za
+Resource Managerem. Zmierzone na organizacji referencyjnej projektem-sondą utworzonym i skasowanym w tym
+celu: pojawienie się nowego projektu **< 30 s**, przejście w `DELETE_REQUESTED` **< 40 s**. Przy kadencji
+godzinnej nie ma to znaczenia; przy bramce synchronicznej byłoby źródłem fałszywych werdyktów.
+
+**Dlaczego z żywej granicy, a nie z `perimeter/projects.yaml`.** Fałszywy dowód „czystego okna" produkuje
+to, co **realnie stoi w granicy**, a nie to, co ktoś zadeklarował. Numer dopisany do granicy poza
+pipeline'em też ma projekt, który może zniknąć; wpis w Gicie bez zastosowanego `apply` nie jest jeszcze
+niczyim członkostwem. To ta sama zasada, dla której detektor okna świeżej sieci czyta `status.resources`
+(DEC-32), a budżet atrybutów liczy się z API, a nie z YAML-a.
+
+**Dlaczego to NIE jest bramka na pull requeście.** Bramka pytająca o każdego członka przy każdym wniosku
+**zablokowałaby własne lekarstwo**: jedyne wyjście z martwego wpisu prowadzi przez `plan` i `apply`, czyli
+przez dokładnie te przebiegi, które taka bramka by zatrzymała. Wejście do granicy pokrywa pre-flight
+(łapie i `DELETE_REQUESTED`, i numer nieistniejący); zostaje jeden przypadek — projekt skasowany **już po**
+wejściu — i on należy do obserwatora, bo jest zdarzeniem w czasie, a nie własnością wniosku.
+
+**Konsekwencje.**
+
+* DEC-38 zapowiadał rekoncyliację pętlą `projects describe` po `project_id` z deklaracji. **Nośnik się
+  zmienia** (Asset Inventory, żywa granica), treść zobowiązania nie: rytm jest teraz godzinny, czyli
+  gęstszy niż wymagane „nie rzadziej niż okno obserwacji `dry-run`". Ręczna pętla zostaje w runbooku jako
+  odczyt kontrolny człowieka, nie jako mechanizm.
+* Alert ma **trzy** warunki, bo są trzy różne zdania: werdykt (`not_active`), ślepota na członku
+  (`unreadable`) i ślepota na detektorze (brak danych). Zlanie ich w jeden warunek dawałoby jedną
+  procedurę dla trzech różnych sytuacji.
+* Producent wymaga, żeby `cloudasset.googleapis.com` było **włączone w projekcie konta planu** — kwota
+  konta serwisowego idzie domyślnie na projekt-właściciela. Nagłówka `X-Goog-User-Project` **nie
+  ustawiamy**: wymaga `serviceusage.services.use`, którego konto planu nie ma, więc zamieniłby działające
+  wywołanie w `403`. Z poświadczeń użytkownika jest odwrotnie — i dlatego komenda w runbooku ma
+  `--billing-project`, a kod go nie ma.
+
+| odrzucone | dlaczego |
+|---|---|
+| `resourcemanager.projects.get` po każdym członku (wariant ze zgłoszenia) | wymaga **nowego nadania na organizacji** dla konta, które dziś ma tylko odczyt polityki i zasobów; koszt rośnie liniowo z liczbą członków przy każdym przebiegu. Rozstrzyga jednak co innego: **nie widzi więcej** — ten sam stan `DELETE_REQUESTED` oddaje jedno wywołanie Asset Inventory dla całej organizacji |
+| osobny workflow „reconcile.yml" chodzący raz na dobę | drugi harmonogram, druga tożsamość, drugi tryb awarii i drugie miejsce, w którym trzeba pamiętać o `condition_absent`. `watch.yml` już czyta żywą granicę co godzinę i już publikuje metryki — nowy sygnał to jedno pytanie więcej i jedna metryka więcej, a przy okazji **dwunastokrotnie gęstsza** detekcja |
+| dwie osobne metryki (`members_dead`, `members_unreadable`) | dwa deskryptory i dwie polityki dla jednego objawu, a przy tym łatwiej rozjeżdżają się w czasie. Etykieta o **zamkniętym** zbiorze wartości daje te same dwie serie, jeden `condition_absent` i jedną procedurę wejściową; ryzyko etykiety (seria znika razem ze zdarzeniem) nie zachodzi, bo obie serie publikują się zawsze, także z zerem |
+| liczyć członków z `perimeter/projects.yaml` | deklaracja opisuje intencję. Fałszywy dowód produkuje to, co jest w granicy naprawdę — łącznie z numerem dopisanym poza pipeline'em, którego w deklaracji nie ma z definicji |
+| policzyć brak stanu jako `ACTIVE`, żeby „nie robić fałszywych alarmów" | to jest ten sam błąd, który ten alert ma tropić, przeniesiony o piętro niżej: cisza brana za spokój. Nieodczytany stan **jest** informacją i ma własną serię, własny warunek i własną procedurę |
+| bramka na pull requeście (odrzucone już w analizie zgłoszenia, zapisane tu, żeby nie wracało) | blokuje **własne lekarstwo** — usunięcie martwego wpisu idzie przez `plan` + `apply`. Do tego koszt rośnie z liczbą członków przy każdym wniosku, a opóźnienie indeksu (< 40 s) dawałoby fałszywe werdykty przy wniosku składanym tuż po utworzeniu projektu |
