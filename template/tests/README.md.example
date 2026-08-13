@@ -31,7 +31,7 @@ odrzuca, przechodzi każdy test pozytywny i nie chroni niczego. `snow_verify.py`
 ma swój fixture — `snow-not-found` domyka punkt 1 („ticket istnieje"), który przez cały czas był **jedynym
 bez pokrycia**: kod tej gałęzi nigdy nie wykonał się w żadnym teście.
 
-## Fixture kontra symulator — czym te pliki NIE są (DEC-45)
+## Fixture kontra symulator — czym te pliki NIE są (DEC-46)
 
 Fixture jest **odpowiedzią**, którą sami napisaliśmy, więc odpowiada na zapytanie, **które sobie
 wyobraziliśmy**, i nie ma jak nam zaprzeczyć. Dokładnie tak przeżył defekt z DEC-43: kod czytał

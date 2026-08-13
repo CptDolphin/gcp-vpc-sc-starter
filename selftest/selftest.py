@@ -147,7 +147,7 @@ def bootstrap() -> None:
         "violations-sink/outputs.tf",
         "tools/attribute_budget.py", "tools/collect_declarations.py", "tools/preflight_check.sh",
         "tools/render_member.py", "tools/projects_file.py", "tools/snow_verify.py",
-        # Symulator Table API + harness dowodowy (DEC-45). Jada RAZEM z fixture'ami: symulator
+        # Symulator Table API + harness dowodowy (DEC-46). Jada RAZEM z fixture'ami: symulator
         # bez harnessu jest kolejnym plikiem, ktory sie z nami zgadza — dopiero harness pokazuje,
         # ze stare, niesprawne zapytanie przez niego NIE przechodzi.
         "tools/snow_symulator.py", "tools/snow_symulator_kontrakt.py",
@@ -160,6 +160,9 @@ def bootstrap() -> None:
         "tools/codeowners_check.py",
         # Kompletnosc rejestru decyzji — druga bramka rozjazdu ze starterem, obok wskaznika (DEC-20).
         "tools/decisions_check.py",
+        # Werdykt „czy apply realnie zmienil granice" — czytany z TRESCI planu po apply, nie z koloru
+        # przebiegu. Zielony `apply` na regule egzekwowanej tego nie dowodzi (DEC-6, DEC-45).
+        "tools/weryfikacja_po_apply.py",
         "tools/perimeter_to_policy.py", "tools/brownfield_import.sh",
         # Sonda EGRESS uruchamiana WEWNATRZ perimetru — jedyny tor mierzacy kierunek wyjscia.
         # `boundary-probe.yml` wola z runnera CI i mierzy WYLACZNIE ingress; "wewnatrz" jest wlasnoscia
@@ -197,7 +200,7 @@ def bootstrap() -> None:
         "tests/snow-self-approved-person.json", "tests/snow-raw-reference.json",
         "tests/snow-requester-sysid.json",
         # Dane udawanej instancji dla symulatora — postac SKLADOWANA (referencja = sam sys_id),
-        # a nie postac odpowiedzi. Dot-walk powstaje dopiero w symulatorze, wg zamowienia (DEC-45).
+        # a nie postac odpowiedzi. Dot-walk powstaje dopiero w symulatorze, wg zamowienia (DEC-46).
         "tests/symulator-instancja.json",
         "tests/vpcsc-violation-dryrun.json",
         # Fikstura detektora martwego czlonka (DEC-42) — wierny ksztalt odpowiedzi Asset Inventory.
@@ -1722,7 +1725,7 @@ def test_kanal_ticketowy() -> None:
                   wyjscie(testowy, klucz) != wyjscie(normalny, klucz),
                   f"{klucz}: {wyjscie(testowy, klucz)!r} == {wyjscie(normalny, klucz)!r}")
 
-    # TRYB SYMULATORA OZNACZA PRZEBIEG TAK SAMO JAK FIXTURE (DEC-45) — i to jest asercja na WYJSCIACH
+    # TRYB SYMULATORA OZNACZA PRZEBIEG TAK SAMO JAK FIXTURE (DEC-46) — i to jest asercja na WYJSCIACH
     # kroku, nie na obecnosci napisu. Symulator jest WIERNIEJSZY od fixture'u, wiec pokusa oznaczenia go
     # slabiej jest realna; slabsze oznaczenie po miesiacu czyta sie jako „to byl prawdziwy przebieg", czyli
     # dokladnie defekt, ktory zamykal DEC-43. Mierzymy tez odmowe przy DWOCH systemach rekordu naraz.
@@ -1901,7 +1904,7 @@ def test_kanal_ticketowy() -> None:
           f"rc={p.returncode}: {p.stderr[-200:]}")
 
     # ══════════════════════════════════════════════════════════════════════════════════════════════
-    # SYMULATOR (DEC-45) — dowod, ze kanal jest mierzony przeciw czemus, co LAMIE nasze zalozenia.
+    # SYMULATOR (DEC-46) — dowod, ze kanal jest mierzony przeciw czemus, co LAMIE nasze zalozenia.
     #
     # Harness stoi w `template/`, wiec jedzie do wdrozenia i tam jest bramka tresci. Tutaj wolamy go
     # RAZ, bo to on niesie pare anty-tautologiczna (stare zapytanie odrzucone, dzisiejsze przepuszczone
@@ -5425,6 +5428,27 @@ def test_workflows() -> None:
     check("apply: job deklaruje environment perimeter-apply", "environment: perimeter-apply" in apply_yml)
     check("apply: bramki OPA uruchamiane PONOWNIE przed apply",
           "conftest test" in apply_yml and apply_yml.index("conftest test") < apply_yml.index("terraform -chdir=terraform apply"))
+
+    # WERYFIKACJA STANU PO APPLY (DEC-45). Zielony `apply` na regule egzekwowanej NIE dowodzi, że zapis
+    # wszedł — zmierzone (5 z 9 przebiegów z dwoma zielonymi apply skończyło się brakiem zmiany w API).
+    # Utrata tego kroku jest cicha w najgorszy możliwy sposób: przebieg dalej świeci na zielono, tylko
+    # przestaje cokolwiek znaczyć. Asercje idą po WŁAŚCIWOŚCIACH, nie po nazwie kroku.
+    check("apply: po `terraform apply` biegnie plan weryfikujący z -detailed-exitcode",
+          "-detailed-exitcode" in apply_yml
+          and apply_yml.index("terraform -chdir=terraform apply") < apply_yml.index("-detailed-exitcode"),
+          "brak planu weryfikującego PO apply — zielony przebieg przestaje dowodzić zapisu (DEC-45)")
+    check("apply: werdykt weryfikacji wystawia narzędzie (tresc planu), nie sam kod wyjscia",
+          "weryfikacja_po_apply.py" in apply_yml and "--plan-po" in apply_yml)
+    # Wrapper `setup-terraform` zamienia kod 2 na 0 — z nim ta bramka byłaby cichym no-opem. Ta asercja
+    # stoi OBOK asercji o samym kroku, bo dwie rzeczy muszą być prawdziwe naraz, a druga jest niewidoczna.
+    check("apply: weryfikacja stoi na kodach wyjscia, wiec wrapper terraforma MUSI byc wylaczony",
+          "terraform_wrapper: false" in apply_yml)
+    # Ten sam job = ten sam zamek `concurrency`. Weryfikacja wyniesiona do `needs: apply` zwalniałaby
+    # zamek między zapisem a odczytem, czyli otwierała okno, które ma wykrywać.
+    apply_kroki = yaml.safe_load(apply_yml)["jobs"]["apply"]["steps"]
+    check("apply: weryfikacja biegnie w TYM SAMYM jobie co apply (pod tym samym zamkiem)",
+          any("weryfikacja_po_apply.py" in str(k.get("run", "")) for k in apply_kroki),
+          str([k.get("name") for k in apply_kroki]))
 
     intake = (ROOT / ".github/workflows/intake.yml").read_text()
     check("intake: ticket weryfikowany przez API, nie z payloadu", "snow_verify.py" in intake)

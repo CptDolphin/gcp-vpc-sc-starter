@@ -69,7 +69,7 @@ on:
           wobec `fixture`: fixture podstawia gotową ODPOWIEDŹ (więc zawsze pasuje do zapytania, także
           do niesprawnego), a symulator odpowiada na ZAPYTANIE wg kontraktu Table API — więc pytanie
           niesprawne dostaje odpowiedź niesprawną. `snow_ticket` działa normalnie i wskazuje rekord
-          w `tests/symulator-instancja.json`. Przebieg znaczy się tak samo jak fixture'owy (DEC-45).
+          w `tests/symulator-instancja.json`. Przebieg znaczy się tak samo jak fixture'owy (DEC-46).
         required: false
         default: ""
 

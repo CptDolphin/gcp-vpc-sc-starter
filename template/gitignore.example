@@ -2,7 +2,15 @@
 # a state dodatkowo metadane backendu.
 *.tfplan
 *.tfplan.binary
+tfplan.binary
 plan.json
+# Artefakty kroku „weryfikacja stanu po apply" (`apply.yml`, DEC-45): plan wykonany PO apply, jego JSON
+# i log. Ten sam powód, co przy `plan.json` wyżej — plan niesie pełną treść granicy, razem z tożsamościami
+# i zakresami IP. Wzorzec `*.tfplan.binary` ich NIE łapie — i nie łapie także samego `tfplan.binary`, bo
+# wymaga literalnej kropki przed `tfplan` (`*` wolno rozwinąć do pustego, kropki już nie). Stąd nazwy wprost.
+weryfikacja.binary
+weryfikacja.json
+weryfikacja.log
 declarations.json
 violations.json
 violations.md

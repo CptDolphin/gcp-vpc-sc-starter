@@ -508,7 +508,7 @@ od DEC-43, sam mówi o sobie, czym jest.
 
 §8 opisuje kontrakt, którego nikt nie zmierzył, i zostaje **źródłem prawdy**. Ta sekcja opisuje narzędzie,
 które ten kontrakt **implementuje**, żeby dało się o niego uderzyć: `tools/snow_symulator.py` — serwer HTTP
-na pętli zwrotnej, mówiący językiem Table API. Instancji ServiceNow nie będzie (decyzja: DEC-45), więc kanał
+na pętli zwrotnej, mówiący językiem Table API. Instancji ServiceNow nie będzie (decyzja: DEC-46), więc kanał
 jest weryfikowany przeciw czemuś, co potrafi mu **zaprzeczyć**.
 
 ### 9.1 Na czym polega różnica — i dlaczego to nie jest „fixture w innym opakowaniu"

@@ -528,7 +528,7 @@ runs:
       shell: bash
       run: python3 tools/attribute_budget.py --input declarations.json --format markdown | tee -a "$GITHUB_STEP_SUMMARY"
 
-    # KONTRAKT KANAŁU TICKETOWEGO ZMIERZONY NA SYMULATORZE, A NIE NA FIXTURZE (DEC-45).
+    # KONTRAKT KANAŁU TICKETOWEGO ZMIERZONY NA SYMULATORZE, A NIE NA FIXTURZE (DEC-46).
     #
     # DLACZEGO TO JEST BRAMKA, A NIE „TEST GDZIEŚ OBOK". `snow_verify.py`, `snow_symulator.py` i fixture'y
     # żyją TAKŻE w tym repozytorium i można je tu zmienić bezpośrednio — a wtedy jedyną rzeczą pilnującą
