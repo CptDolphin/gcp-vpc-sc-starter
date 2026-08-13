@@ -3,6 +3,32 @@
 Etapami, bo przy czerwonym CI ma być wiadomo **która** bramka padła. Każdy etap kończy się stanem, w którym
 repo jest spójne i nic nie jest zepsute.
 
+<a id="trzy-stacki-terraforma--kolejnosc-i-kto-wykonuje"></a>
+
+## Trzy stacki Terraforma — kolejność i kto wykonuje
+
+To repozytorium ma **trzy niezależne stany** Terraforma i **dwie różne tożsamości** apply. Podział nie jest
+porządkowy — biegnie po uprawnieniach, których pipeline mieć nie może. Przy odtworzeniu od zera kolejność
+poniżej jest jedyną, która działa; **`depends_on` przez granicę stanów nie istnieje**, więc pilnuje jej ten
+dokument, nie Terraform.
+
+| # | Katalog | Co stawia | **KTO wykonuje `apply`** | Tożsamość / uprawnienie | Co się stanie, gdy pominiesz |
+|---|---|---|---|---|---|
+| 1 | `iam-bootstrap/` | konta `plan`/`apply`/`watch`, rola własna perimetru i monitoringu, pula WIF, IAM Deny, temat Pub/Sub kanału maszynowego | **CZŁOWIEK** | org-admin (ADC), nadaje uprawnienia — więc nie może ich sobie nadać sam | nie ma czym uruchomić kroków 2 i 3; `plan` w CI pada na uwierzytelnieniu |
+| 2 | `violations-sink/` | kubełki logów, sinki **org-level** (`include_children`), widoki + granty `logging.viewAccessor` | **CZŁOWIEK** | org-level `roles/logging.configWriter` | granica **stoi i działa**, ale obserwator nie ma czego czytać: raport naruszeń i detektor okna świeżej sieci milczą. Alerty są uzbrojone i po `watchdog_absent_seconds` zgłaszają to **martwym-człowiekiem** (DEC-35) — nie zgłosi tego nic wcześniej |
+| 3 | `terraform/` | sam perimetr, access levele, reguły, kontrakt, **deskryptory metryk i polityki alertów** | **PIPELINE** (`apply.yml`) | `sa-vpcsc-apply` przez WIF; **bez** `logging.configWriter` i bez dostępu do kubełków | nie ma granicy |
+
+**Dlaczego 2 jest przed 3, skoro 3 już od niego nie zależy.** Do 2026-08-13 zależał **twardo**: polityka
+alertu okna świeżej sieci stała na metryce, której deskryptor nie powstawał w żadnym stacku, więc apply
+kroku 3 padał błędem `404 Cannot find metric(s)` dopóty, dopóki krok 2 nie ruszył producenta. Poprawka
+(DEC-35) przeniosła deskryptory tam, gdzie stoją polityki, więc **krok 3 przechodzi dziś na czystym stanie
+bez kroku 2**. Kolejność zostaje jako zalecana, bo bez niej pierwsze godziny po odtworzeniu są ślepe —
+ale jej złamanie nie jest już awarią apply, tylko **widocznym brakiem**.
+
+**Czego ta kolejność NIE dotyczy.** Kroki 1 i 2 są dla siebie nawzajem obojętne poza tym, że
+`violations-sink/` nadaje granty kontom utworzonym w `iam-bootstrap/` — czyli 1 przed 2. Krok 3 wolno
+powtarzać dowolnie często; kroki 1 i 2 rusza się rzadko i zawsze ręcznie.
+
 ## Etap 0 — rozpakowanie i placeholdery
 
 ```bash

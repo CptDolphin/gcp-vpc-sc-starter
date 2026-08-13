@@ -376,6 +376,57 @@ resource "google_monitoring_metric_descriptor" "zmiany_poza_pipelinem" {
   unit         = "1"
 }
 
+# --- DESKRYPTORY OKNA ŚWIEŻEJ SIECI (DEC-32) -------------------------------------------------------
+#
+# TE DWA STOJĄ TU Z TEGO SAMEGO POWODU CO OSIEM WYŻEJ — ale zostały dołożone o jeden pull request
+# później i ta różnica wywróciła odtworzenie po awarii. ZMIERZONE (apply `31679291426`, 2026-08-13):
+# `Plan: 19 to add, 0 to change, 0 to destroy`, a na polityce okna
+#
+#   Error 404: Cannot find metric(s) that match type = "custom.googleapis.com/vpcsc/network_window_workload".
+#   If a metric was created recently, it could take up to 10 minutes to become available.
+#
+# KOMUNIKAT KIERUJE W ZŁĄ STRONĘ i to jest połowa defektu: mówi o PROPAGACJI świeżo utworzonej metryki,
+# a tej metryki nie było w ogóle. Odczyt z API tuż po awarii pokazał OSIEM deskryptorów
+# `custom.googleapis.com/vpcsc/*` i ani jednego z tej pary. Bez deskryptora metryka własna powstaje
+# dopiero przy PIERWSZYM zapisie punktu — czyli po pierwszym przebiegu obserwatora, który sam potrzebuje
+# widoku z kubełka stawianego przez `violations-sink/`, czyli stack applikowany przez CZŁOWIEKA z org-level
+# `roles/logging.configWriter`. Odtworzenie od zera w kolejności „repo perimetru najpierw" padało więc
+# ZAWSZE, a `depends_on` przez granicę dwóch stanów Terraforma nie istnieje.
+#
+# NIEZMIENNIK, KTÓRY Z TEGO ZOSTAJE (DEC-35): polityka alertu i deskryptor jej metryki należą do TEGO
+# SAMEGO stacku. Producent odpowiada za PUNKTY, nigdy za ISTNIENIE metryki. Bramka: selftest §alerty.
+#
+# DRUGI SKUTEK, GROŹNIEJSZY OD CZERWONEGO APPLY: bez deskryptora martwy-człowiek tej polityki
+# (`condition_absent` w `monitoring.tf`) był MARTWY SAM. Metryka, do której nigdy nic nie napisano, nie
+# jest „nieobecna" — jest NIEZNANA, a warunek na nieobecność nie odpala (ta sama własność, którą trzy
+# akapity wyżej opisujemy jako powód deklarowania deskryptorów). Obserwator świadomie NIE publikuje zera,
+# gdy nie ma czego policzyć (fail-closed), więc dokładnie ten przypadek, dla którego ten martwy-człowiek
+# powstał — detektor bez źródła — dawał ciszę wyglądającą na „nikt nie łamie kolejności".
+
+resource "google_monitoring_metric_descriptor" "sieci_egzekwowane" {
+  count = local.sieci_count
+
+  project      = local.monitoring.project_id
+  type         = local.metryka.sieci_egzekwowane
+  display_name = "VPC-SC: sieci VPC utworzone w członkach egzekwowanych"
+  description  = "Liczba sieci VPC utworzonych w oknie obserwatora w projektach należących do konfiguracji EGZEKWOWANEJ. Kontekst dla licznika poniżej — ŚWIADOMIE bez polityki alertu, bo tworzenie sieci jest czynnością legalną i częstą."
+  metric_kind  = "GAUGE"
+  value_type   = "INT64"
+  unit         = "1"
+}
+
+resource "google_monitoring_metric_descriptor" "sieci_z_obciazeniem" {
+  count = local.sieci_count
+
+  project      = local.monitoring.project_id
+  type         = local.metryka.sieci_z_obciazeniem
+  display_name = "VPC-SC: obciążenie w sieci młodszej niż okno dojrzewania"
+  description  = "Do ilu z tych sieci wstawiono maszynę PRZED upływem okna dojrzewania (złamanie kolejności z DEC-32). BRAK punktu, a nie zero, znaczy „detektor nie miał czego policzyć” — przejmuje to martwy-człowiek polityki."
+  metric_kind  = "GAUGE"
+  value_type   = "INT64"
+  unit         = "1"
+}
+
 # --- PROPAGACJA DESKRYPTORÓW ---------------------------------------------------------------------
 #
 # ZMIERZONE NA PIERWSZYM APPLY, nie przewidziane: dwie polityki odbiły się od API komunikatem
@@ -412,6 +463,11 @@ resource "time_sleep" "deskryptory_widoczne" {
     google_monitoring_metric_descriptor.naruszenia_enforced,
     google_monitoring_metric_descriptor.naruszenia_dry_run,
     google_monitoring_metric_descriptor.zmiany_poza_pipelinem,
+    # Para okna świeżej sieci. Ma tu być z tego samego powodu co pozostałe, a nie „bo pasuje": to jej
+    # brak wywrócił odtworzenie od zera (`31679291426`) — polityka okna czeka na `time_sleep`, więc bez
+    # tych dwóch pozycji czekałaby na propagację deskryptorów, których nikt nie tworzy.
+    google_monitoring_metric_descriptor.sieci_egzekwowane,
+    google_monitoring_metric_descriptor.sieci_z_obciazeniem,
   ]
 }
 
