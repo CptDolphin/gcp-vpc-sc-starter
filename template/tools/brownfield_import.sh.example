@@ -60,13 +60,16 @@ if [ "$diff_rc" -ge 2 ]; then
 fi
 
 if [ "$diff_rc" -ne 0 ]; then
-  cat >&2 <<'STOP'
+  # Podpowiedź cytuje ARGUMENTY, z którymi skrypt został wywołany (stąd heredoc bez cudzysłowów).
+  # Wcześniej stała tu nazwa perimetru z NASZEGO wdrożenia — na cudzej organizacji podpowiadała opis
+  # niewłaściwego obiektu, czyli kierowała operatora dokładnie tam, gdzie nie chciał patrzeć.
+  cat >&2 <<STOP
 
 STOP — policy.yaml NIE opisuje rzeczywistości.
 
 Nie importuj. Najpierw przenieś różnice DO PLIKU (kierunek: rzeczywistość → repo):
 
-    python3 tools/perimeter_to_policy.py --policy-id <ID> --perimeter <NAZWA> > /tmp/live.yaml
+    python3 tools/perimeter_to_policy.py --policy-id $POLICY_ID --perimeter $PERIMETER > /tmp/live.yaml
     # przepisz restricted_services i perimeter.name z /tmp/live.yaml do perimeter/policy.yaml
 
 Potem uruchom ten skrypt ponownie. Różnica, którą zignorujesz teraz, wróci jako apply zmieniający zakres
