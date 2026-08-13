@@ -2768,6 +2768,13 @@ nie jest dowodem, bo rola bywa zgodna z deklaracją i jednocześnie niewystarcza
 | **warunkowe Deny na `accessLevels.delete` z listą chronionych poziomów** | lista wymagałaby aktualizacji przy każdej zmianie katalogu, a każda aktualizacja — `roles/iam.denyAdmin`. Ochrona utrzymywana ręcznie w warstwie, do której nikt nie chce sięgać, zgnije po pierwszym pośpiechu |
 | **zmiana identyfikatora polityki Deny na `vpcsc-ci-no-create-no-destroy`** | `name` jest niezmienne — zmiana to destroy+create, czyli okno bez guardrailu, wykonane rolą nadawaną na chwilę. Nazwa lekko myląca jest tańsza od okna bez ochrony; rozjazd nadrabia `display_name` i komentarz przy zasobie |
 
+**Pułapka zmierzona przy apply tej decyzji, warta osobnego zdania: `display_name` polityki Deny ma limit
+**63 BAJTÓW**, nie znaków.** Napis o 73 znakach został odrzucony jako `length (75)` — różnicę zrobił jeden
+em-dash (3 bajty w UTF-8); polskie znaki diakrytyczne kosztują po 2. Tryb awarii jest paskudny, bo apply
+jest **częściowo skuteczny**: rola aktualizuje się poprawnie w tym samym przebiegu, a polityka nie —
+stan zostaje rozjechany (rola nowa, Deny stare) i widać to dopiero w kolejnym planie. Stąd w materiale
+`display_name` jest czysto ASCII: liczba znaków równa się tam liczbie bajtów.
+
 **Residual, nazwany wprost.** `accessLevels.delete` sięga — bo zakres ACM jest org-level, wymuszony przez
 Google — każdego **nierefereowanego** poziomu w polityce organizacji, także należącego do perimetru, którego
 to repozytorium nie zarządza, i także poziomu `break_glass`. Bramka OPA widzi wyłącznie referencje z TEJ
