@@ -129,7 +129,7 @@ def bootstrap() -> None:
         "policy/perimeter.rego", "policy/perimeter_test.rego",
         "schemas/member.schema.json", "schemas/projects.schema.json",
         "schemas/policy.schema.json", "schemas/profile.schema.json",
-        "schemas/access-level.schema.json",
+        "schemas/access-level.schema.json", "schemas/contributors.schema.json",
         "terraform/locals.tf", "terraform/members.tf", "terraform/outputs.tf",
         "terraform/perimeter.tf", "terraform/rules.tf", "terraform/versions.tf",
         "terraform/contract.tf", "terraform/tests/renderer.tftest.hcl", "terraform/monitoring.tf",
@@ -5558,10 +5558,42 @@ def test_schemas() -> None:
              ("schemas/profile.schema.json", sorted(str(p.relative_to(ROOT)) for p in (ROOT / "perimeter/profiles").glob("*.yaml"))),
              ("schemas/projects.schema.json", ["perimeter/projects.yaml"]),
              ("schemas/access-level.schema.json", sorted(str(p.relative_to(ROOT)) for p in (ROOT / "perimeter/access-levels").glob("*.yaml"))),
+             ("schemas/contributors.schema.json", ["perimeter/contributors.yaml"]),
              ("schemas/alerting.schema.json", ["perimeter/alerting.yaml"])]
     for schema, files in pairs:
         p = sh(["check-jsonschema", "--schemafile", schema, *files], cwd=ROOT)
         check(f"schema {pathlib.Path(schema).stem} akceptuje przyklady", p.returncode == 0, p.stdout[-500:])
+
+    # NEGATYWY DO SCHEMATU CONTRIBUTORS. Ten plik AUTORYZUJE — mowi, ktore repozytorium moze wnioskowac
+    # o ktory projekt — a jego bledy sa CICHE: regula OPA odczytuje brakujace pole jako puste, wiec
+    # literowka w kluczu daje puste uprawnienie zamiast odrzucenia. Kazdy przypadek nizej jest realnym
+    # ksztaltem pomylki, nie losowa mutacja.
+    contributors = yaml.safe_load((ROOT / "perimeter/contributors.yaml").read_text())
+
+    def _contributors_odrzuca(nazwa: str, mutacja) -> None:
+        import copy
+        zly = copy.deepcopy(contributors)
+        mutacja(zly["contributors"][0])
+        sciezka = ROOT / "contributors-zly.yaml"
+        sciezka.write_text(yaml.safe_dump(zly, allow_unicode=True))
+        try:
+            w = sh(["check-jsonschema", "--schemafile", "schemas/contributors.schema.json", sciezka.name], cwd=ROOT)
+            check(f"schema contributors ODRZUCA: {nazwa}", w.returncode != 0, w.stdout[-300:])
+        finally:
+            sciezka.unlink(missing_ok=True)
+
+    _contributors_odrzuca("literowka w kluczu (allowed_project bez `s`)",
+                          lambda c: c.__setitem__("allowed_project", c.pop("allowed_projects")))
+    _contributors_odrzuca("skrocony klucz (repo zamiast repository)",
+                          lambda c: c.__setitem__("repo", c.pop("repository")))
+    # WILDCARD: zakaz byl do 2026-08-13 wylacznie ZWYCZAJEM zapisanym w komentarzu pliku, a komentarz
+    # niczego nie odrzuca. `ORG/*` autoryzowaloby repozytorium do kazdego projektu w organizacji.
+    _contributors_odrzuca("wildcard w nazwie repozytorium",
+                          lambda c: c.__setitem__("repository", "ORG/*"))
+    # PUSTA LISTA nie autoryzuje niczego, a WYGLADA jak autoryzacja — wpis istnieje, wiec przeglad
+    # widzi „to repo jest skonfigurowane".
+    _contributors_odrzuca("pusta lista allowed_projects",
+                          lambda c: c.__setitem__("allowed_projects", []))
 
     # NEGATYWY DO SCHEMATU ALERTINGU. Oba przypadki są ciche na wdrożeniu: ukośnik na końcu bazy URL daje
     # `//7-alerty.md`, czyli 404 z alertu o 3:00, a brak jednego z kanałów daje politykę bez odbiorcy —

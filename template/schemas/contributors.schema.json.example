@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/vpc-sc/contributors.schema.json",
+  "title": "Contributor repositories",
+  "description": "Mapowanie: repozytorium zespołu → projekty, o które WOLNO mu wnioskować. To jest plik AUTORYZACYJNY — jedyne miejsce, w którym zapisano, o co dane repozytorium może prosić, i jedyna rzecz, której kanał „repo zespołu\" nie może o sobie orzec. Dlatego literówka w kluczu nie może być cicha: reguła OPA odczytuje brakujące pole jako puste, więc `allowed_project` zamiast `allowed_projects` daje pustą listę dozwolonych zamiast błędu. Ten schemat istnieje po to, żeby taki plik nie przeszedł.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "contributors"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "contributors": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "repository",
+          "division",
+          "allowed_projects",
+          "owner_group"
+        ],
+        "properties": {
+          "repository": {
+            "type": "string",
+            "description": "Pełna nazwa `<org>/<repo>` repozytorium GitHuba, z którego przychodzi zgłoszenie. WILDCARDY SĄ ZAKAZANE i zakaz jest tu EGZEKWOWANY, a nie tylko opisany: wzorzec dopuszcza wyłącznie znaki nazw GitHuba, więc `ORG/*` albo `ORG/team-?` nie przejdzie. Do dziś zakaz był zwyczajem zapisanym w komentarzu pliku — a komentarz niczego nie odrzuca.",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}$"
+          },
+          "division": {
+            "type": "string",
+            "description": "Dywizja przypisana do tego repozytorium. Musi zgadzać się z polem `division` we wniosku — rozjazd odrzuca reguła OPA `onboarding`, bo zgłaszanie w cudzym imieniu wyklucza się po TEJ stronie, nie po stronie wnioskodawcy.",
+            "pattern": "^[a-z0-9][a-z0-9-]{1,40}$"
+          },
+          "allowed_projects": {
+            "type": "array",
+            "description": "Lista JAWNA projektów, o które to repozytorium może wnioskować. Pusta lista jest zakazana: wpis bez ani jednego projektu nie autoryzuje niczego, a wygląda jak autoryzacja.",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9-]{4,28}[a-z0-9]$"
+            }
+          },
+          "owner_group": {
+            "type": "string",
+            "description": "Kontakt do eskalacji, gdy zgłoszenie z tego repozytorium wygląda podejrzanie.",
+            "format": "email",
+            "pattern": "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$"
+          }
+        }
+      }
+    }
+  }
+}
