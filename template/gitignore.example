@@ -20,7 +20,7 @@ violations.md
 # `create-pull-request` (kanał wejściowy) stage'uje CAŁE drzewo robocze, a nie plik, który sam zmienił.
 # Respektuje przy tym `.gitignore`, więc ten plik jest jedyną rzeczą stojącą między artefaktem
 # przebiegu a pull requestem z deklaracją członka. Zmierzone na wdrożeniu (#2037): PR onboardujący
-# `rwlab-vpcsc-t-div` niósł obok 17 linii deklaracji także `stan/contract.json` i skompilowany
+# `prj-example-division` niósł obok 17 linii deklaracji także `stan/contract.json` i skompilowany
 # `.pyc`, a wszystkie pięć checków było zielonych — bo żaden z nich nie patrzy na to, JAKIE pliki
 # wchodzą. Ten sam mechanizm wcześniej wprowadził `.pyc` na `main`.
 #

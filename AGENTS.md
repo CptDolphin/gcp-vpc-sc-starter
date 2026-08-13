@@ -81,9 +81,27 @@ a nie HCL.
 | `@your-org/*` | realne zespoły GitHuba w `CODEOWNERS` |
 | zakresy IP w `access-levels/corp.yaml` | korporacyjne zakresy — w szablonie są adresy TEST-NET z RFC 5737. **To jedyny placeholder pilnowany przez bramkę:** dopóki stoją tam adresy dokumentacyjne, poziom musi nieść `armed: false` z powodem, a konfiguracja EGZEKWOWANA nie może go referować bez wygasającego `unarmed_accepted_until` (DEC-19). Po podmianie na własne: `armed: true` + `source_of_truth` + `reviewed` |
 
-Nazwy przykładowe (`example-division`, `prj-example-*`, `000000000000`, `RITM0000001`, `example.com`) są
-**jawnie fikcyjne i spójne w całym repo**. Jeśli zobaczysz nazwę wypadającą z tej konwencji, to jest błąd —
-guard `test_samodzielnosc` w selfteście pilnuje tego przy każdym przebiegu.
+Nazwy przykładowe (`example-division`, `prj-example-*`, `bkt-example-*`, `grp-example-*@example.com`,
+`000000000000`, `RITM0000001`) są **jawnie fikcyjne i spójne w całym repo**. Jeśli zobaczysz nazwę
+wypadającą z tej konwencji, to jest błąd — guard `test_samodzielnosc` w selfteście pilnuje tego przy
+każdym przebiegu, a `selftest/skan_samodzielnosci.py` wpina się dodatkowo jako osobna bramka
+(`samodzielnosc.yml`) i da się go uruchomić ręcznie: `python3 selftest/skan_samodzielnosci.py .`.
+
+**Konwencja jest EGZEKWOWANA, nie tylko opisana.** Skan pyta o kształt w kontekście, a nie o listę
+wartości zakazanych — dlatego łapie też identyfikatory wdrożeń, o których nic nie wie:
+
+| Klasa identyfikatora | Co ma stać w materiale | Co zapali bramkę |
+|---|---|---|
+| identyfikator projektu / dywizji | `prj-example-*`, `example-division` | token spoza konwencji, jeśli niesie prefiks znany denyliście skrótów |
+| numer projektu / organizacji / polityki dostępu | `000000000000`, `123456789012`, `210987654321` | 12 cyfr spoza listy oraz **dowolnej długości** numer w ścieżce `projects/`, `organizations/`, `folders/`, `accessPolicies/`, `billingAccounts/` |
+| kubełek | `gs://bkt-example-*` | każda nazwa w `gs://` bez członu `example` |
+| adres konta, grupy, właściciela | `…@example.com` | każda inna domena poza `*.gserviceaccount.com` (część adresu konta usługowego) i `*.github.com` (bot platformy) |
+| numer zgłoszenia | `RITM0000001` | `RITM` + siedem cyfr spoza `RITM0000xxx` |
+
+Nazwy własne konkretnych organizacji siedzą w denyliście jako **skróty SHA-256**, nigdy dosłownie:
+denylista z nazwą publikowałaby dokładnie to, co usuwa. Powód, dla którego to nie wystarcza, i warianty
+odrzucone po pomiarze (reguła „token wygląda na `project-id`" — 529 fałszywych trafień; reguła „losowy
+sufiks" — dziura na sufiksie bez cyfry) opisuje docstring `skan_samodzielnosci.py`.
 
 ## Rzeczy, które wyglądają na błąd, a są decyzją
 
