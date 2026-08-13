@@ -147,6 +147,10 @@ def bootstrap() -> None:
         "violations-sink/outputs.tf",
         "tools/attribute_budget.py", "tools/collect_declarations.py", "tools/preflight_check.sh",
         "tools/render_member.py", "tools/projects_file.py", "tools/snow_verify.py",
+        # Symulator Table API + harness dowodowy (DEC-46). Jada RAZEM z fixture'ami: symulator
+        # bez harnessu jest kolejnym plikiem, ktory sie z nami zgadza — dopiero harness pokazuje,
+        # ze stare, niesprawne zapytanie przez niego NIE przechodzi.
+        "tools/snow_symulator.py", "tools/snow_symulator_kontrakt.py",
         "tools/violations_report.py",
         "tools/deny_check.sh",
         "tools/bootstrap_github.sh", "docs/access-request.md",
@@ -200,6 +204,9 @@ def bootstrap() -> None:
         # wyprodukowac) i tozsamosc wnioskodawcy jako sys_id (porownanie nigdy by nie odrzucilo).
         "tests/snow-self-approved-person.json", "tests/snow-raw-reference.json",
         "tests/snow-requester-sysid.json",
+        # Dane udawanej instancji dla symulatora — postac SKLADOWANA (referencja = sam sys_id),
+        # a nie postac odpowiedzi. Dot-walk powstaje dopiero w symulatorze, wg zamowienia (DEC-46).
+        "tests/symulator-instancja.json",
         "tests/vpcsc-violation-dryrun.json",
         # Fikstura detektora martwego czlonka (DEC-42) — wierny ksztalt odpowiedzi Asset Inventory.
         "tests/asset-projekty.json",
@@ -1704,12 +1711,16 @@ def test_kanal_ticketowy() -> None:
     # przebiegu, ktory ServiceNow nie zapytal. Asercje ida na WYJSCIACH kroku (co realnie wyprodukowal),
     # a nie na obecnosci napisu w pliku: napis w komentarzu zazielenilby test, nie zmieniajac PR-a.
     normalny, testowy = wyjscia.get("", ""), wyjscia.get("snow-approved", "")
+
+    # Poza `if`-em, bo czyta je TAKZE blok trybu symulatora nizej — funkcja zdefiniowana warunkowo
+    # znika razem z warunkiem i zamienia brak danych w `NameError` zamiast w pominiete asercje.
+    def wyjscie(tekst, klucz):
+        for linia in tekst.splitlines():
+            if linia.startswith(klucz + "="):
+                return linia[len(klucz) + 1:]
+        return None
+
     if normalny and testowy:
-        def wyjscie(tekst, klucz):
-            for linia in tekst.splitlines():
-                if linia.startswith(klucz + "="):
-                    return linia[len(klucz) + 1:]
-            return None
         check("intake fixture — tryb rozstrzygniety jawnym wyjsciem, nie domyslem",
               wyjscie(normalny, "tryb") == "normalny" and wyjscie(testowy, "tryb") == "testowy",
               f"{wyjscie(normalny, 'tryb')!r} / {wyjscie(testowy, 'tryb')!r}")
@@ -1718,6 +1729,45 @@ def test_kanal_ticketowy() -> None:
             check(f"intake fixture — {opis} przebiegu testowego ROZNI SIE od wniosku",
                   wyjscie(testowy, klucz) != wyjscie(normalny, klucz),
                   f"{klucz}: {wyjscie(testowy, klucz)!r} == {wyjscie(normalny, klucz)!r}")
+
+    # TRYB SYMULATORA OZNACZA PRZEBIEG TAK SAMO JAK FIXTURE (DEC-46) — i to jest asercja na WYJSCIACH
+    # kroku, nie na obecnosci napisu. Symulator jest WIERNIEJSZY od fixture'u, wiec pokusa oznaczenia go
+    # slabiej jest realna; slabsze oznaczenie po miesiacu czyta sie jako „to byl prawdziwy przebieg", czyli
+    # dokladnie defekt, ktory zamykal DEC-43. Mierzymy tez odmowe przy DWOCH systemach rekordu naraz.
+    if krok_fixture:
+        skrypt = ROOT / "krok-fixture.sh"
+        (ROOT / "gh_out").write_text("")
+        srodowisko = dict(os.environ, FIXTURE="", SYMULATOR="tak", DIVISION="dyw",
+                          PROJECT_ID="prj-x-test", GITHUB_OUTPUT=str(ROOT / "gh_out"),
+                          GITHUB_STEP_SUMMARY=str(ROOT / "gh_sum"))
+        r = sh(["bash", str(skrypt)], cwd=ROOT, env=srodowisko)
+        symulowany = (ROOT / "gh_out").read_text() if r.returncode == 0 else ""
+        check("intake symulator — krok konczy sie zielono i rozstrzyga tryb jawnym wyjsciem",
+              r.returncode == 0 and wyjscie(symulowany, "tryb") == "symulator",
+              f"rc={r.returncode}: {r.stdout[-300:]}")
+        if symulowany and normalny:
+            for klucz, opis in (("galaz", "nazwa galezi"), ("tytul", "tytul pull requesta"),
+                                ("etykiety", "etykiety"), ("zrodlo", "zdanie o pochodzeniu werdyktu")):
+                check(f"intake symulator — {opis} ROZNI SIE od wniosku",
+                      wyjscie(symulowany, klucz) != wyjscie(normalny, klucz),
+                      f"{klucz}: {wyjscie(symulowany, klucz)!r}")
+            check("intake symulator — etykiety BEZ `onboarding` (poza zasiegiem bota intake-rebase.yml)",
+                  "onboarding" not in (wyjscie(symulowany, "etykiety") or ""),
+                  str(wyjscie(symulowany, "etykiety")))
+            check("intake symulator — tytul niesie prefiks [TRYB TESTOWY]",
+                  (wyjscie(symulowany, "tytul") or "").startswith("[TRYB TESTOWY]"),
+                  str(wyjscie(symulowany, "tytul")))
+            check("intake symulator — opis PR-a zaczyna sie banerem ostrzegawczym",
+                  "[!WARNING]" in symulowany, symulowany[-400:])
+        # DWA SYSTEMY REKORDU NARAZ = ZERO SYSTEMOW REKORDU: o werdykcie decydowalaby kolejnosc `if`-ow,
+        # a opis PR-a mowilby o jednym z nich, czyli o czyms, czego przebieg nie pytal.
+        (ROOT / "gh_out").write_text("")
+        r = sh(["bash", str(skrypt)], cwd=ROOT,
+               env=dict(os.environ, FIXTURE="snow-approved", SYMULATOR="tak", DIVISION="dyw",
+                        PROJECT_ID="prj-x-test", GITHUB_OUTPUT=str(ROOT / "gh_out"),
+                        GITHUB_STEP_SUMMARY=str(ROOT / "gh_sum")))
+        check("intake — fixture i symulator NARAZ konczy sie odmowa, nie cichym wyborem jednego",
+              r.returncode != 0, f"rc={r.returncode}: {r.stdout[-300:]}")
         check("intake fixture — tytul przebiegu testowego niesie znacznik, nie sam inny sufiks",
               "TRYB TESTOWY" in (wyjscie(testowy, "tytul") or ""), wyjscie(testowy, "tytul"))
         # Etykieta `onboarding` decyduje o zasiegu bota przepisujacego zgloszenia (`intake-rebase.yml`
@@ -1840,7 +1890,7 @@ def test_kanal_ticketowy() -> None:
     spec = importlib.util.spec_from_file_location("snow_verify_kontrakt", ROOT / "tools/snow_verify.py")
     modul = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(modul)
-    url = modul.url_odczytu("instancja", "RITM0000001")
+    url = modul.url_odczytu("https://instancja.service-now.com", "RITM0000001")
     zamowione = set(urllib.parse.parse_qs(urllib.parse.urlparse(url).query)["sysparm_fields"][0].split(","))
     czytane = set(re.findall(r'row\.get\(\s*"([^"]+)"', (ROOT / "tools/snow_verify.py").read_text()))
     check("snow_verify.py: kazde czytane pole jest JAWNIE zamowione w sysparm_fields",
@@ -1857,6 +1907,69 @@ def test_kanal_ticketowy() -> None:
     check("snow_verify.py bez konfiguracji SNOW: odmowa z komunikatem, nie traceback",
           p.returncode == 2 and "ODRZUCONE" in p.stderr and "Traceback" not in p.stderr,
           f"rc={p.returncode}: {p.stderr[-200:]}")
+
+    # ══════════════════════════════════════════════════════════════════════════════════════════════
+    # SYMULATOR (DEC-46) — dowod, ze kanal jest mierzony przeciw czemus, co LAMIE nasze zalozenia.
+    #
+    # Harness stoi w `template/`, wiec jedzie do wdrozenia i tam jest bramka tresci. Tutaj wolamy go
+    # RAZ, bo to on niesie pare anty-tautologiczna (stare zapytanie odrzucone, dzisiejsze przepuszczone
+    # na TYM SAMYM serwerze i rekordzie) — powtarzanie jego asercji w selfteście dawaloby druga kopie,
+    # ktora sie rozjedzie. Selftest pilnuje natomiast rzeczy, ktorych harness nie widzi: ze jest wolany
+    # jako bramka i ze tryb symulatora oznacza przebieg tak samo, jak fixture.
+    # ══════════════════════════════════════════════════════════════════════════════════════════════
+    p = sh([sys.executable, "tools/snow_symulator_kontrakt.py"], cwd=ROOT)
+    check("snow_symulator_kontrakt.py: caly kontrakt kanalu zielony na symulatorze",
+          p.returncode == 0, (p.stdout + p.stderr)[-1500:])
+    check("…w tym DOWOD WIERNOSCI: stare zapytanie (bez sysparm_fields) przez symulator NIE PRZECHODZI",
+          "OK   D1d" in p.stdout and "OK   D1f" in p.stdout, p.stdout[:1200])
+
+    # SNOW_INSTANCE MA DWA DOPUSZCZALNE KSZTALTY I NIC POZA NIMI. Wartosc wchodzila wprost do URL-a,
+    # wiec napis z ukosnikiem przestawial CEL zapytania — a to jest korzen zaufania calego kanalu.
+    # Para: nazwa instancji buduje adres dostawcy, petla zwrotna zostaje soba, reszta = odmowa.
+    spec = importlib.util.spec_from_file_location("snow_verify_instancja", ROOT / "tools/snow_verify.py")
+    sv = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(sv)
+    for wartosc, oczekiwana_baza, opis in [
+        ("example-instancja", "https://example-instancja.service-now.com", "nazwa instancji"),
+        ("http://127.0.0.1:8080", "http://127.0.0.1:8080", "petla zwrotna (symulator)"),
+    ]:
+        baza, prefiks, blad = sv.baza_z_instancji(wartosc)
+        check(f"snow_verify.py SNOW_INSTANCE — {opis} przyjete", not blad and baza == oczekiwana_baza,
+              f"{baza!r} {blad!r}")
+    for wartosc, opis in [
+        ("evil.example.com/api/now/table/x?q=", "adres z ukosnikiem i zapytaniem"),
+        ("http://192.0.2.10:8080", "adres http POZA petla zwrotna"),
+        ("https://example-instancja.service-now.com", "gotowy adres https zamiast nazwy"),
+        ("", "wartosc pusta"),
+    ]:
+        _, _, blad = sv.baza_z_instancji(wartosc)
+        check(f"snow_verify.py SNOW_INSTANCE — ODMAWIA: {opis}", bool(blad), f"blad={blad!r}")
+    check("snow_verify.py: werdykt z symulatora NIESIE to w prefiksie, tak jak werdykt z fixture'u",
+          sv.baza_z_instancji("http://127.0.0.1:8080")[1].startswith("[SYMULATOR:"),
+          sv.baza_z_instancji("http://127.0.0.1:8080")[1])
+
+    # NUMER TICKETU JEDZIE DO ZAKODOWANEGO ZAPYTANIA, nie tylko do URL-a: `^`/`^OR` sa tam OPERATORAMI,
+    # a `urlencode` ich nie unieszkodliwia. Para: numer poprawny przechodzi walidacje, numer z operatorem
+    # konczy sie rc=2 ZANIM cokolwiek wyjdzie w swiat.
+    p = sh([sys.executable, "tools/snow_verify.py", "--ticket", "RITM0000001^ORnumber=RITM0000002",
+            "--expect-project", "prj-x-test", "--approver", APPROVER,
+            "--offline-fixture", "tests/snow-approved.json"], cwd=ROOT)
+    check("snow_verify.py ODRZUCA numer ticketu z operatorem zakodowanego zapytania (rc=2)",
+          p.returncode == 2 and "OPERATORAMI" in p.stderr, f"rc={p.returncode}: {p.stderr[-200:]}")
+
+    # SZOSTA KONTROLA — para anty-tautologiczna na samym fixturze: ten sam plik, dwa numery ticketu.
+    p = sh([sys.executable, "tools/snow_verify.py", "--ticket", "RITM0000002", "--expect-project",
+            "prj-x-test", "--approver", APPROVER,
+            "--offline-fixture", "tests/snow-approved.json"], cwd=ROOT)
+    check("snow_verify.py ODRZUCA odpowiedz o INNYM numerze ticketu (kontrola 2)",
+          p.returncode != 0 and "NIE jest ten ticket" in p.stderr, f"rc={p.returncode}: {p.stderr[-200:]}")
+
+    # BRAMKA, NIE TEST OBOK. Harness zyje w `template/`, wiec jedzie do wdrozenia — ale gdyby nie byl
+    # tam WOLANY, pilnowalby tylko drzewa startera. `bramki-tresci` woła i `validate.yml`, i `apply.yml`,
+    # wiec nie omija go push prosto na galaz domyslna (DEC-16).
+    bramki = (ROOT / ".github/actions/bramki-tresci/action.yml").read_text()
+    check("bramki-tresci: kontrakt kanalu ticketowego jest BRAMKA na obu torach, nie testem obok",
+          "snow_symulator_kontrakt.py" in bramki, bramki[-400:])
 
 
 # ------------------------------------------------------ poswiadczenie kanalu wejsciowego (DEC-22)

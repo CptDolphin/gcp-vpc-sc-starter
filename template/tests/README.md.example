@@ -15,6 +15,7 @@ jest nieprawdziwa, a plik, którego nikt nie widzi, nie jest dokumentacją forma
 | `snow-self-approved-person.json` | grupa **poprawna** (sieciowa), ale wnioskodawca == zatwierdzający | **PADA** — samo-zatwierdzenie po OSOBIE; do piątej kontroli ten wiersz przechodził komplet checków |
 | `snow-raw-reference.json` | kształt, który Table API zwraca dla zapytania **bez** `sysparm_fields`: referencja jako `{link, value}`, zero kluczy z kropką | **PADA** — brak grupy i brak wnioskodawcy; dowód, dlaczego zapytanie musi zamawiać pola dot-walk |
 | `snow-requester-sysid.json` | wnioskodawca podany jako `sys_id`, nie login | **PADA** — porównanie z adresem zatwierdzającego nigdy by nie odrzuciło, więc kontrola mówi to wprost zamiast przepuścić |
+| `symulator-instancja.json` | dane udawanej instancji dla `tools/snow_symulator.py` — rekordy w postaci SKLADOWANEJ (referencja = sam `sys_id`), a nie w postaci odpowiedzi | wejscie dla symulatora; `RITM0000001` = pozytyw, `RITM0000002`…`RITM0000005` = cztery negatywy, `RITM0000009` celowo NIE ISTNIEJE (piaty) |
 | `dispatch-example.json` | komplet wejść `workflow_dispatch` kanału ticketowego | wejście dla `gh workflow run intake.yml -f …` |
 | `vpcsc-violation-dryrun.json` | 4 naruszenia dry-run w kształcie zwracanym przez `gcloud logging read` | `violations_report.py` przypisuje **3** członkowi, 4. trafia do „spoza listy członków" |
 
@@ -29,6 +30,20 @@ Osiem z dziewięciu plików `snow-*` opisuje przypadki **negatywne** i to jest s
 odrzuca, przechodzi każdy test pozytywny i nie chroni niczego. `snow_verify.py` sprawdza pięć rzeczy i każda
 ma swój fixture — `snow-not-found` domyka punkt 1 („ticket istnieje"), który przez cały czas był **jedynym
 bez pokrycia**: kod tej gałęzi nigdy nie wykonał się w żadnym teście.
+
+## Fixture kontra symulator — czym te pliki NIE są (DEC-46)
+
+Fixture jest **odpowiedzią**, którą sami napisaliśmy, więc odpowiada na zapytanie, **które sobie
+wyobraziliśmy**, i nie ma jak nam zaprzeczyć. Dokładnie tak przeżył defekt z DEC-43: kod czytał
+`assignment_group.name`, a zamawiał samo `sysparm_query` — na żywej instancji odrzuciłby KAŻDY ticket,
+a sześć fixtur świeciło zielono. `symulator-instancja.json` jest inną klasą pliku: nie odpowiedzią, tylko
+**danymi**, z których `tools/snow_symulator.py` buduje odpowiedź **regułą platformy** — więc zapytanie
+niesprawne dostaje przez niego odpowiedź niesprawną. Dowód wierności i granice symulacji:
+`docs/5-servicenow-intake.md` §9, harness `tools/snow_symulator_kontrakt.py`.
+
+Ślad tej różnicy widać w samych fixturach: **sześć z nich nie miało pola `number`**, choć zapytanie je
+zamawia. Nie były złe — były niekompletne **względem własnego zapytania**, i nikt tego nie zobaczył, dopóki
+nikt nie zbudował odpowiedzi Z zapytania.
 
 ## Te pliki są KONTRAKTEM, nie odpowiedzią systemu rekordu (DEC-43)
 

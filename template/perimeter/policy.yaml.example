@@ -229,26 +229,36 @@ baseline_ingress:
       - service: aiplatform.googleapis.com
         methods: ["*"]
 
-  # Tożsamość PIPELINE'U, który produkuje DOWÓD dla bramki promocji. To nie jest „jeszcze jeden skaner":
-  # bez tej reguły system nie umie promować NIKOGO, a dowiaduje się o tym dopiero przy pierwszej promocji.
+  # UWAGA: TA REGUŁA MA DZIŚ INNEGO KONSUMENTA NIŻ W DNIU POWSTANIA. Nie jest martwa — zmieniło się to,
+  # KTO z niej korzysta. Rozróżnienie jest istotne, bo „zbędna" i „ma teraz inne uzasadnienie" prowadzą do
+  # przeciwnych decyzji, a stare uzasadnienie zostawione pod regułą kiedyś skłoni kogoś do jej usunięcia.
   #
-  # ZMIERZONE na żywej organizacji (2026-08-10, 34 wpisy audytowe jednego członka w oknie 14 dni).
-  # `violations-report.yml` uwierzytelnia się jako konto PLANU i czyta audit-log KAŻDEGO projektu
-  # członkowskiego (`gcloud logging read --project=<członek>`) — bo wpis o naruszeniu VPC-SC ląduje w logu
-  # projektu będącego WŁAŚCICIELEM zasobu, nie w logu organizacji. A `logging.googleapis.com` jest w
-  # restricted_services, więc ten odczyt sam jest wywołaniem chronionej usługi spoza granicy. Skutki są dwa
-  # i oba są ciche:
+  # KONSUMENT DZIŚ: KONTROLA POZYTYWNA SONDY GRANICY (`boundary-probe.yml`, sonda `chroniona-z-regula`).
+  # To jedyna sonda, która przy `expect=blocked` MA PRZEJŚĆ na chronionej usłudze — czyli jedyny dowód,
+  # że reguła baseline kogoś WPUSZCZA, a nie tylko że granica odmawia. Bez niej „wszystko odmówione" jest
+  # nieodróżnialne od zepsutego środowiska. Sonda woła `gcloud logging read` w WYZNACZONYM projekcie
+  # sondującym i przechodzi wyłącznie wtedy, gdy zajdą DWA warunki naraz: ta reguła przepuszcza metodę
+  # (VPC-SC) ORAZ tożsamość ma tam prawo odczytu logów (IAM, nadanie per-projekt z `iam-bootstrap` 3f).
+  # Usunięcie tej reguły zabiera warunek pierwszy, czyli rozbraja kontrolę pozytywną.
   #
-  #   * W DRY-RUN każdy przebieg raportu dopisuje członkowi naruszenie od `sa-vpcsc-plan`
-  #     (`LoggingServiceV2.ListLogEntries`) — narzędzie brudzi dokładnie ten dowód, który zbiera. Bramka
-  #     `promotion_gate` wymaga ZERA naruszeń w oknie, więc okno nie ma jak się wyczyścić, dopóki raport
-  #     chodzi. Zmierzone: 1 z 34 naruszeń członka pochodziło od konta planu, reszta od ludzi.
-  #   * PO PROMOCJI ten sam odczyt zostaje ODMÓWIONY, a workflow ma `|| exit 1` (i słusznie: `gcloud logging
-  #     read` przy odmowie wypisuje `[]` na stdout). Czyli pierwsza udana promocja zabiera dowód wszystkim
-  #     następnym — a awaria wygląda przy tym na problem z uprawnieniami IAM, nie na skutek promocji.
+  # KONSUMENT DAWNIEJ (historia, nie stan): raport naruszeń czytał audit-log KAŻDEGO projektu
+  # członkowskiego, bo wpis o naruszeniu VPC-SC ląduje w logu projektu będącego WŁAŚCICIELEM zasobu.
+  # Zmierzone wtedy na żywej organizacji (34 wpisy jednego członka w oknie 14 dni) i warte zapamiętania,
+  # bo pokazuje dwa ciche tryby awarii tamtej konstrukcji:
+  #   * w DRY-RUN każdy przebieg raportu dopisywał członkowi naruszenie od konta planu — narzędzie brudziło
+  #     dokładnie ten dowód, który zbierało (1 z 34 naruszeń pochodziło od niego, reszta od ludzi);
+  #   * PO PROMOCJI ten sam odczyt zostawał ODMÓWIONY, więc pierwsza udana promocja zabierała dowód
+  #     wszystkim następnym — a awaria wyglądała na problem z IAM, nie na skutek promocji.
+  # Raport czyta dziś JEDEN WIDOK w kubełku sinka org-level, w projekcie administracyjnym, który członkiem
+  # NIE jest — więc przez granicę w ogóle nie przechodzi i tej reguły nie potrzebuje.
   #
-  # DLACZEGO baseline, a nie profil: profil trzeba wybrać, a ten przepływ dotyczy każdego członka z definicji
-  # — jest częścią maszynerii perimetru, nie aplikacji dywizji. Ta sama argumentacja co przy skanerze.
+  # CO Z TEGO WYNIKA DLA ZAKRESU: reguła obejmuje wszystkich członków, ale realnie korzysta z niej JEDEN
+  # projekt sondujący. Zawężenie jej do tego jednego projektu jest możliwe i byłoby dalszym utwardzeniem —
+  # świadomie tego nie robimy w tym kroku, bo reguła baseline z definicji opisuje maszynerię perimetru,
+  # a nie pojedynczy projekt, i bo zawężenie wymaga własnego pomiaru. Zapisane jako znany, celowy naddatek.
+  #
+  # DLACZEGO baseline, a nie profil: profil trzeba wybrać, a ten przepływ dotyczy maszynerii perimetru,
+  # nie aplikacji dywizji. Ta sama argumentacja co przy skanerze.
   #
   # DLACZEGO tak wąsko: JEDNA metoda odczytu logów, zero zapisów, zero innych usług. Konto `apply` tej reguły
   # NIE dostaje i nie potrzebuje — pracuje na obiekcie org-level (Access Context Manager nie jest usługą
