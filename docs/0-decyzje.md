@@ -2633,6 +2633,73 @@ nie zamienia brownfieldu w greenfield i nie próbuje odgadnąć, czy cudzy szkie
 
 ---
 
+## DEC-37 — Uprawnienie CI rozstrzyga CZĘSTOTLIWOŚĆ, nie groźność nazwy: `accessLevels.delete` TAK, `servicePerimeters.create` NIE
+
+**Decyzja.** Rola własna `vpcScPerimeterWriter` dostaje **`accesscontextmanager.accessLevels.delete`**.
+Nie dostaje — i nie dostanie — **`accesscontextmanager.servicePerimeters.create`**; to uprawnienie zostaje
+dodatkowo wpisane do polityki IAM Deny `vpcsc-ci-no-destroy`, a odtworzenie perimetru ma udokumentowany krok
+człowieka (`3-runbook-promocja-i-break-glass.md`, część D: komenda, tożsamość, zmierzony czas). Bramkami
+są dwie asercje selftestu o **przeciwnych** kierunkach: rola **MA** mieć `accessLevels.delete`, rola **NIE MA**
+mieć `servicePerimeters.create/delete`, a Deny **MA** obejmować `servicePerimeters.create`.
+
+**Dlaczego dwa różne werdykty na jedno napięcie.** Oba braki wyglądały tak samo — `403` z tej samej rodziny
+uprawnień, oba „świadomie pominięte" z komentarzem w tym samym pliku. Rozstrzyga jednak nie nazwa operacji,
+tylko **czy jej brak trafia w rutynę**:
+
+| | `accessLevels.delete` | `servicePerimeters.create` |
+|---|---|---|
+| Częstotliwość | każdy offboarding dywizji z własnym poziomem | raz w życiu granicy |
+| Tryb awarii bez niego | `403` w **POŁOWIE** apply: członek i reguła już zdjęte z granicy, poziom nie — stan częściowo zastosowany, każdy kolejny apply staje w tym samym miejscu | `403` na **PIERWSZYM** zasobie: nic nie powstaje, stan czysty, komunikat jednoznaczny |
+| Obejście | brak — katalog rośnie, a limit access leveli to **500 na ORGANIZACJĘ** | jest i kosztuje **6 s** człowieka w ~3-minutowym odzysku |
+| Kto pilnuje kształtu | bramka OPA (DEC-33) + API (`you must first remove the reference`) | nic — nowy perimetr jest niewidoczny dla `drift`, sondy granicy, metryki obserwatora i raportu naruszeń |
+| Czy rola ma już coś groźniejszego | **tak**: `accessLevels.update`. Przepisanie `corp_network` na `0.0.0.0/0` poszerza granicę dla każdej reguły, cicho i bez zniknięcia obiektu | `servicePerimeters.update` — ale na obiekcie pod ciągłą obserwacją |
+
+Kontrola zamieniająca **rutynę** w interwencję człowieka jest spłacana obejściami. Kontrola wymagająca
+człowieka **raz na katastrofę** nie jest — bo nie ma czego obchodzić. To jest cała różnica między tymi
+dwoma wierszami.
+
+**Pomiar, który to rozstrzygnął** (Policy Troubleshooter v3 na żywej organizacji — bo `403` z braku roli
+i `403` z Deny są w API nieodróżnialne — patrz DEC-29 i komentarz sekcji 5 w `iam-bootstrap/main.tf`):
+
+| krotka (principal × zasób × uprawnienie) | allow | deny | wynik |
+|---|---|---|---|
+| `apply` × polityka × `accessLevels.delete` | `NOT_GRANTED` | **`NOT_DENIED`** | `CANNOT_ACCESS` — **jedna** warstwa |
+| `apply` × polityka × `servicePerimeters.create` | `NOT_GRANTED` | **`NOT_DENIED`** | `CANNOT_ACCESS` — **jedna** warstwa |
+| `apply` × perimetr × `servicePerimeters.delete` | `NOT_GRANTED` | `DENIED` | `CANNOT_ACCESS` — **dwie** warstwy |
+| `apply` × polityka × `accessLevels.create` / `.update` | `GRANTED` | `NOT_DENIED` | `CAN_ACCESS` — kontrola pozytywna |
+
+Trzeci wiersz jest tu punktem odniesienia, a nie ozdobą: pokazuje, jak wygląda zdanie o granicy **utrzymane
+w warstwie, którą przeżywa podmiana roli**. Dwa pierwsze wiersze pokazują, że dwa inne zdania o granicy
+stały wyłącznie na pominięciu w liście uprawnień — czyli znikały przy pierwszym „dajmy na chwilę
+`policyEditor`, żeby odblokować release". Stąd `create` wchodzi do Deny **razem** z decyzją, że zostaje
+zabronione; bez tego decyzja byłaby deklaracją o dokładnie tej trwałości, którą Deny miało naprawiać.
+
+**Para anty-tautologiczna na żywej granicy** (jedna sesja, kontrola pozytywna w tej samej minucie — sam `plan`
+nie jest dowodem, bo rola bywa zgodna z deklaracją i jednocześnie niewystarczająca):
+
+| czas | wywołanie tożsamością `apply` | wynik |
+|---|---|---|
+| T+0 s | `levels create probe_2031` | **utworzony** — kontrola pozytywna, ścieżka zapisu działa |
+| T+45 s | `levels delete probe_2031` | `PERMISSION_DENIED` |
+| T+50 s | `perimeters create zz_probe_2050` | `PERMISSION_DENIED` |
+| T+55 s | `levels update probe_2031` | **zmieniony** — kontrola pozytywna, impersonacja nadal żywa |
+
+**Co odrzucono i dlaczego.**
+
+| wariant | dlaczego nie |
+|---|---|
+| **osobna tożsamość „do odzysku"** z `servicePerimeters.create` | drugi komplet grantów, ról i wiązań WIF, który rozjeżdża się cicho i ujawnia to w incydencie — czyli w jedynej chwili bez czasu na diagnozę IAM. To ten sam argument, dla którego break-glass używa **tego samego** konta co apply, tylko innego environmentu |
+| **uprawnienie warunkowe (IAM Condition) na `create`** | niewyrażalne: przy tworzeniu zasobem jest **polityka dostępu**, a nie perimetr, którego jeszcze nie ma. Warunek na `resource.name` musiałby nazwać obiekt nieistniejący, więc albo pasuje do wszystkiego, albo do niczego |
+| **krok `workflow_dispatch` z inną tożsamością** | to poprzedni wariant plus przycisk. Nie usuwa też człowieka z pętli: w realnym scenariuszu ktoś z org-adminem i tak musiał wcześniej skasować albo stwierdzić utratę perimetru |
+| **`accessLevels.delete` do warstwy Deny „dla symetrii"** | Deny obejmujące rutynę zablokowałoby jedyną drogę wdrożenia, a każda zmiana zdania wymagałaby ponownego nadania `roles/iam.denyAdmin` — czyli zamiany rutyny w interwencję, i to na warstwie, której nadanie samo jest ryzykiem |
+| **warunkowe Deny na `accessLevels.delete` z listą chronionych poziomów** | lista wymagałaby aktualizacji przy każdej zmianie katalogu, a każda aktualizacja — `roles/iam.denyAdmin`. Ochrona utrzymywana ręcznie w warstwie, do której nikt nie chce sięgać, zgnije po pierwszym pośpiechu |
+| **zmiana identyfikatora polityki Deny na `vpcsc-ci-no-create-no-destroy`** | `name` jest niezmienne — zmiana to destroy+create, czyli okno bez guardrailu, wykonane rolą nadawaną na chwilę. Nazwa lekko myląca jest tańsza od okna bez ochrony; rozjazd nadrabia `display_name` i komentarz przy zasobie |
+
+**Residual, nazwany wprost.** `accessLevels.delete` sięga — bo zakres ACM jest org-level, wymuszony przez
+Google — każdego **nierefereowanego** poziomu w polityce organizacji, także należącego do perimetru, którego
+to repozytorium nie zarządza, i także poziomu `break_glass`. Bramka OPA widzi wyłącznie referencje z TEJ
+konfiguracji. Poziomy tego repo są odtwarzalne z `perimeter/access-levels/` jednym apply (rola ma `create`);
+cudze — nie są. Warstwa Deny tego nie zawęża i świadomie nie próbuje (wiersze wyżej).
 ## DEC-38 — Offboarding kończy się na granicy; cykl życia projektu nie należy do tego repozytorium
 
 **Decyzja.** Procedura offboardingu (`docs/3-runbook-promocja-i-break-glass.md` §C) kończy się na usunięciu

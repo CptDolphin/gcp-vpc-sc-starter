@@ -169,12 +169,26 @@ uprawnienia:
   accesscontextmanager.accessLevels.list
   accesscontextmanager.accessLevels.create    # nowy poziom dostępu (np. nowy zakres korpo-IP)
   accesscontextmanager.accessLevels.update    # zmiana istniejącego poziomu
+  accesscontextmanager.accessLevels.delete    # OSTATNI krok offboardingu dywizji z własnym poziomem
 ŚWIADOMIE POMINIĘTE:
-  accesscontextmanager.servicePerimeters.create   # perimetr już istnieje
+  accesscontextmanager.servicePerimeters.create   # granicy nie tworzy tożsamość automatyczna (DEC-37)
   accesscontextmanager.servicePerimeters.delete   # kasowanie = break-glass człowieka, nie CI
-  accesscontextmanager.accessLevels.delete        # usunięcie poziomu odcina wszystkich, którzy go używają
   accesscontextmanager.policies.create/delete/setIamPolicy  # polityka org-level nie jest naszym obiektem
 ```
+
+**Dlaczego `accessLevels.delete` JEST, a `servicePerimeters.create` NIE JEST — mimo że oba brzmią groźnie**
+(DEC-37; obie luki zmierzone na żywej organizacji, nie wyprowadzone z zasad):
+
+| | `accessLevels.delete` | `servicePerimeters.create` |
+|---|---|---|
+| Jak często potrzebne | **każdy** offboarding dywizji z własnym poziomem | **raz w życiu granicy** — po jej utracie |
+| Co się dzieje bez niego | apply pada w POŁOWIE → stan częściowo zastosowany na żywej granicy | pipeline pada na PIERWSZYM zasobie → nic nie powstaje, stan czysty |
+| Czy jest obejście | nie ma — katalog poziomów rośnie w nieskończoność (limit **500 na ORGANIZACJĘ**) | jest i jest tani: **6 s** człowieka w ~3-minutowym odzysku (część D runbooka) |
+| Co pilnuje kształtu | bramka OPA (DEC-33) + API (`you must first remove the reference`) | nic — nowy perimetr nie jest obserwowany przez `drift`, sondę ani raport naruszeń |
+| Ta sama rola ma już | `accessLevels.update` — **groźniejsze**: przepisanie poziomu na `0.0.0.0/0` poszerza granicę cicho | `servicePerimeters.update` — ale na obiekcie pod ciągłą obserwacją |
+
+Kontrola, która zamienia **rutynę** w interwencję człowieka, jest spłacana obejściami. Kontrola, która
+wymaga człowieka **raz na katastrofę**, nie jest — bo nie ma czego obchodzić. Stąd różne werdykty.
 
 **Zdanie do requestu:** *„Prosimy o rolę custom, a nie `policyEditor`, żeby pipeline nie miał fizycznej
 możliwości skasowania perimetru ani polityki. Zakres org-level jest wymuszony przez Google (uprawnienia ACM
@@ -205,8 +219,9 @@ daje na całym projekcie także tworzenie **sinków** i kubełków logów, czyli
 o którą nikt nie prosił. Bierzemy dwa typy zasobów i nic poza nimi — ta sama zasada, co przy
 `vpcScPerimeterWriter`. `delete` jest tu natomiast **obecne**, w przeciwieństwie do perimetru: metryka
 i alert są odtwarzalne z kodu jednym apply, a część zmian `metric_descriptor` provider realizuje jako
-replace; perimetru odtworzyć się nie da, bo `servicePerimeters.create` świadomie nie należy do żadnej roli
-tego pipeline'u.
+replace; perimetru pipeline nie odtworzy, bo `servicePerimeters.create` świadomie nie należy do żadnej
+roli tego pipeline'u i od DEC-37 jest dodatkowo zabronione w warstwie Deny — odtworzenie ma krok człowieka
+opisany w `3-runbook-promocja-i-break-glass.md`, część D.
 | (opcjonalnie) `roles/logging.viewer` | organizacja | raport naruszeń dry-run czyta audit-logi (`protoPayload.metadata.dryRun=true`) | nie da się udowodnić, że okno obserwacji było czyste — a bez tego promocja do enforced jest zgadywaniem. Można też nadać osobnej tożsamości raportującej |
 
 ### 3.3 IAM Deny — pas bezpieczeństwa ponad rolą
@@ -217,12 +232,28 @@ Osobna polityka Deny na organizacji, dla obu SA CI:
 deniedPrincipals: sa-vpcsc-apply@..., sa-vpcsc-plan@...
 deniedPermissions:
   accesscontextmanager.servicePerimeters.delete
+  accesscontextmanager.servicePerimeters.create   # od DEC-37
   accesscontextmanager.policies.delete
 ```
 
 **DLACZEGO mimo custom roli:** role bywają podmieniane w pośpiechu („dajmy na chwilę policyEditor, żeby
 odblokować release"). Deny przeżywa taką podmianę — jest oceniane przed rolami i nie da się go obejść
 nadaniem szerszej roli. To ta sama logika, którą stosujemy do nieodwracalnych operacji na kluczach KMS.
+
+**Dlaczego `create` dołożone dopiero teraz** (DEC-37): nikt go kontu CI nie nadał — i o to chodzi.
+Przed tą zmianą tworzenie perimetru blokowało **wyłącznie** pominięcie w roli, czyli dokładnie ta warstwa,
+którą podmiana roli znosi. Zmierzone Policy Troubleshooter v3 na żywej organizacji, przed zmianą:
+
+```
+sa-vpcsc-apply x accessPolicies/<POLICY> x servicePerimeters.create
+  allow: ALLOW_ACCESS_STATE_NOT_GRANTED
+  deny : DENY_ACCESS_STATE_NOT_DENIED      <-- warstwa Deny MILCZAŁA
+```
+
+Zdanie „granicy nie tworzy tożsamość automatyczna" jest decyzją architektoniczną, a nie skutkiem ubocznym
+listy uprawnień — należy więc do warstwy, która przeżywa eskalację. **`accessLevels.delete` świadomie tu
+NIE trafiło**: to rutyna pipeline'u (offboarding), a Deny obejmujące rutynę zablokowałoby jedyną drogę
+wdrożenia i wymagałoby `roles/iam.denyAdmin` przy każdej zmianie zdania.
 
 ---
 
@@ -421,7 +452,7 @@ Prosimy o (środowisko: <org GCP>, repozytorium: ORG/gcp-vpc-sc):
    - roles/storage.objectAdmin                      [prefiks bucketa stanu] — blokada stanu TF
 
 2. SA sa-vpcsc-apply@<proj>.iam.gserviceaccount.com
-   - custom rola vpcScPerimeterWriter               [ORGANIZACJA]  — servicePerimeters.update + accessLevels.create/update
+   - custom rola vpcScPerimeterWriter               [ORGANIZACJA]  — servicePerimeters.update + accessLevels.create/update/delete
                                                                      (BEZ create/delete perimetru — patrz uzasadnienie)
    - roles/storage.objectAdmin                      [prefiks bucketa stanu] — zapis stanu TF
    - custom rola vpcScMonitoringWriter              [PROJEKT monitoringu] — logMetrics.* + alertPolicies.*

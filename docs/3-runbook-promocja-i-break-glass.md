@@ -1,7 +1,11 @@
-# Runbook — promocja członka do enforced i procedura awaryjna
+# Runbook — promocja członka do enforced i procedury awaryjne
 
-Dwie procedury o przeciwnych kierunkach: pierwsza włącza ochronę, druga ją zdejmuje w incydencie. Obie mają
-ten sam wymóg: **dowód, nie deklaracja**.
+Procedury o przeciwnych kierunkach: **A** włącza ochronę, **B** zdejmuje ją w incydencie, **C** wyprowadza
+członka, **D** odbudowuje granicę, której już nie ma. Wszystkie mają ten sam wymóg: **dowód, nie deklaracja**.
+
+**Część D ma jedyny w tym systemie krok, którego pipeline nie wykona** — utworzenie perimetru jest
+zastrzeżone dla człowieka (DEC-37). Jeśli szukasz „dlaczego apply pada na `Error creating ServicePerimeter:
+403`", idź od razu tam.
 
 ---
 
@@ -637,3 +641,108 @@ a nie kodem stosowanym przez nasz pipeline.
 - [ ] raport naruszeń: klucz członka zniknął, wpisy widać w sekcji „spoza listy członków"
 - [ ] **projektu nie kasowaliśmy** — a jeśli ma zniknąć, poszło to do zespołu właścicielskiego projektów
       i nie jest częścią tej zmiany
+---
+
+## D. Odtworzenie perimetru po utracie (DR) — krok, którego pipeline NIE wykona
+
+**Kiedy ta część.** Perimetr przestał istnieć: `perimeters describe <PERIMETR>` odpowiada `NOT_FOUND`, albo
+przebieg `apply` melduje
+
+```
+Plan: 19 to add, 0 to change, 0 to destroy.
+Error: Error creating ServicePerimeter: googleapi: Error 403: The caller does not have permission
+```
+
+To nie jest awaria pipeline'u do naprawienia ponowieniem. **Konto CI nie ma i nie będzie miało prawa
+utworzyć perimetru** — patrz niżej „Dlaczego". Ponawianie przebiegu daje ten sam błąd w nieskończoność.
+
+### D.0 Czego ta część NIE dotyczy
+
+* Perimetr **istnieje**, ale blokuje legalny ruch → część **B** (break-glass), nie ta.
+* Perimetr istnieje, a rozjechał się jego **kształt** → zwykły PR + `apply`; CI ma `servicePerimeters.update`.
+* Członek ma wyjść z granicy → część **C** (offboarding).
+
+Ta część zaczyna się wyłącznie tam, gdzie **obiekt perimetru zniknął**.
+
+### D.1 Warunki wstępne — sprawdź je ZANIM zaczniesz, nie w trakcie
+
+| Co | Konkret | Jak sprawdzić |
+|---|---|---|
+| Tożsamość **człowieka** (nie CI) | rola nosząca `accesscontextmanager.servicePerimeters.create` na organizacji — u nas `roles/accesscontextmanager.policyAdmin` | `gcloud organizations get-iam-policy <ORG_ID>` |
+| Zapis do stanu Terraform | prefiks `vpc-sc/perimeter` w buckecie stanu (u nas przez `roles/owner` na projekcie bucketa → `projectOwner:` w ACL) | `gcloud storage buckets get-iam-policy gs://<BUCKET>` |
+| ADC lokalnie | `gcloud auth application-default login` — **nie** impersonacja konta CI: ono właśnie nie może tego zrobić | `gcloud auth application-default print-access-token` |
+| Wersja Terraform | ta z `.tool-versions` repozytorium | `terraform version` |
+
+Człowiek **nie jest objęty** polityką IAM Deny `vpcsc-ci-no-destroy` — jej `deniedPrincipals` to wyłącznie
+dwa konta serwisowe CI. Droga odtworzeniowa stoi więc otworem dokładnie dla tej jednej tożsamości.
+
+### D.2 Kroki
+
+```bash
+# 1. (tylko w ćwiczeniu DR) usunięcie perimetru — w realnym incydencie ten krok już się wydarzył
+gcloud access-context-manager perimeters delete <PERIMETR> --policy=<POLICY_ID>
+
+# 2. KROK CZŁOWIEKA — sam szkielet perimetru, lokalnie, z ADC człowieka
+cd terraform/
+terraform init
+terraform apply -target=google_access_context_manager_service_perimeter.this
+
+# 3. reszta pipeline'em: members, reguły, access levele, monitoring, kontrakt
+#    (workflow `apply.yml` na gałęzi domyślnej — normalna droga, bez wyjątków)
+```
+
+**Krok 2 jest jedynym, którego nie da się przenieść do CI**, i jest jedynym powodem, dla którego DR tej
+granicy ma w ogóle człowieka w pętli.
+
+### D.3 Ile to trwa (zmierzone, nie szacowane)
+
+| Odcinek | Ile | Kto | Skąd |
+|---|---:|---|---|
+| `perimeters delete` | **2 s** | człowiek | ćwiczenie DR |
+| `terraform apply -target=…service_perimeter.this` | **6 s** | **CZŁOWIEK** | ćwiczenie DR; niezależny pomiar na materiale szablonu: 12 s |
+| `apply.yml` — pozostałe 18 zasobów | **130 s** | pipeline | ten sam przebieg |
+| **Razem** | **~3 min** | | z czego krok wymagający człowieka: **6 s** |
+
+Wniosek, który ma paść w rozmowie o RTO: **udział człowieka to sekundy, nie minuty.** Odzysk nie jest
+wolniejszy dlatego, że ktoś musi go zacząć — jest wolniejszy o tyle, ile trwa dotarcie tej osoby do
+klawiatury, a ta osoba i tak jest już w incydencie (ktoś musiał zauważyć, że granicy nie ma).
+
+### D.4 Bramka promocji w czasie odzysku — zachowanie poprawne, wyglądające jak przeszkoda
+
+Po utracie perimetru **żywy `status` jest pusty**. Bramka promocji porównuje deklarację z żywym stanem, więc
+odbudowę każdego członka konfiguracji egzekwowanej czyta jako **promocję dry-run → enforced** i żąda jawnej
+zgody — mimo że nikt niczego nie promuje, a jedynie przywraca stan sprzed minuty.
+
+**To jest zachowanie prawidłowe i nie należy go obchodzić.** Bramka pyta o PRZEJŚCIE, a jej wejściem jest
+świat żywy, nie pamięć o świecie sprzed awarii — inaczej dałoby się przemycić promocję, kasując perimetr.
+W incydencie kosztuje to jedno świadome potwierdzenie; alternatywa („bramka ufa, że to odbudowa") kosztuje
+całą własność, dla której bramka istnieje.
+
+Zapisz to w zgłoszeniu incydentu jako krok, nie jako niespodziankę.
+
+### D.5 Weryfikacja po odbudowie
+
+Porównaj **kształt**, nie sam fakt istnienia obiektu:
+
+```bash
+gcloud access-context-manager perimeters describe <PERIMETR> --policy=<POLICY_ID> --format=json \
+  | jq '{status_res: (.status.resources|length), status_ing: (.status.ingressPolicies|length),
+         spec_res: (.spec.resources|length), spec_ing: (.spec.ingressPolicies|length),
+         spec_eg: (.spec.egressPolicies|length)}'
+```
+
+Liczby muszą się zgadzać z migawką sprzed utraty. „Perimetr istnieje" nie jest weryfikacją — po
+odtworzeniu samego szkieletu istnieje też perimetr **pusty**, czyli nic nie chroniący.
+
+### D.6 Dlaczego zostawiamy tu człowieka (a nie dokładamy uprawnienia)
+
+Pełne uzasadnienie: **DEC-37**. W skrócie, bo w incydencie nikt nie czyta rejestru decyzji:
+
+* `servicePerimeters.create` byłoby uprawnieniem **stałym**, używanym **raz na katastrofę**;
+* nowy perimetr utworzony poza procedurą jest **niewidoczny** dla wszystkiego, co tę granicę obserwuje —
+  `drift`, sonda granicy, metryka obserwatora i raport naruszeń pytają o **konkretny** perimetr z konfiguracji;
+* koszt kontroli to zmierzone **6 s** — czyli kontrola, której nikt nie ma powodu obchodzić.
+
+Odwrotny werdykt zapadł tam, gdzie brak uprawnienia trafiał w **rutynę**: `accessLevels.delete` **dołożono**,
+bo bez niego każdy offboarding dywizji z własnym poziomem kończył się stanem częściowo zastosowanym.
+Różnicę robi częstotliwość i to, czy istnieje obejście — nie to, jak groźnie brzmi nazwa uprawnienia.
