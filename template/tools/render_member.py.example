@@ -13,6 +13,8 @@ Uzycie (patrz .github/workflows/intake.yml):
 import argparse
 import datetime
 import json
+import os
+import pathlib
 import sys
 
 import projects_file
@@ -32,6 +34,31 @@ def main() -> int:
     ap.add_argument("--today", default=datetime.date.today().isoformat())
     ap.add_argument("--root", default=".", help="korzen repozytorium perimetru (domyslnie biezacy katalog)")
     args = ap.parse_args()
+
+    # WYWOLANIE ZAPISANE, ZEBY DALO SIE JE POWTORZYC NA INNEJ BAZIE. Kanaly wejsciowe przenosza wniosek
+    # na galaz domyslna odczytana tuz przed pushem (`tools/swieza_baza.py`) — a gdy w tym oknie zmienil
+    # sie takze plik czlonkow, przeniesienie GOTOWEJ kopii skasowaloby cudzy wpis. Wniosek trzeba wtedy
+    # wyrenderowac JESZCZE RAZ, na swiezym pliku.
+    #
+    # ARGUMENTY BIERZEMY Z `args`, NIE Z `sys.argv`, i to nie jest kosmetyka: `--today` ma wartosc
+    # DOMYSLNA liczona z zegara, wiec powtorzenie po polnocy dalo by inne `dry_run_since` i `review_by`
+    # niz wywolanie, ktore przeszlo bramki. Zapis znormalizowany utrwala to, co realnie zostalo uzyte.
+    #
+    # Zapis jest sterowany zmienna srodowiskowa, bo poza kanalem wejscia (ręczne wywolanie, testy) nie ma
+    # go po co robic — a skrypt, ktory zawsze pisze do pliku obok, jest skryptem z efektem ubocznym.
+    zapis_argv = os.environ.get("RENDER_ARGV_ZAPIS")
+    if zapis_argv:
+        pathlib.Path(zapis_argv).write_text(json.dumps([
+            "--division", args.division,
+            "--project-id", args.project_id,
+            "--project-number", str(args.project_number),
+            "--owner-group", args.owner_group,
+            "--change-ref", args.change_ref,
+            "--approved-by", args.approved_by,
+            "--profiles-json", args.profiles_json,
+            "--today", args.today,
+            "--root", args.root,
+        ]), encoding="utf-8")
 
     today = datetime.date.fromisoformat(args.today)
     member = {

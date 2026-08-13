@@ -172,6 +172,10 @@ def bootstrap() -> None:
         # Narzedzia bramek w JEDNYM miejscu (pin + suma + ponawianie + werdykt „bramki NIE wykonaly sie").
         # Wczesniej ten sam `curl` stal w szesciu plikach, w zadnym z weryfikacja pobrania (DEC-28).
         ".github/actions/narzedzia/action.yml", "tools/continue_on_error_check.py",
+        # Galaz zgloszenia budowana z `main` odczytanego TUZ PRZED pushem: bez tego push galezi ze
+        # starszej bazy leci `remote rejected … without workflows permission`, mimo ze commit dotyka
+        # wylacznie pliku czlonkow (GitHub porownuje galaz z galezia DOMYSLNA, nie z jej wlasna baza).
+        "tools/swieza_baza.py",
         ".tflint.hcl", ".github/dependabot.yml", "tests/README.md",
         "tests/snow-approved.json", "tests/snow-not-approved.json", "tests/snow-self-approved.json",
         "tests/snow-wrong-project.json", "tests/dispatch-example.json",
@@ -6552,6 +6556,205 @@ def test_werdykt_i_narzedzia() -> None:
         akcja_bramek.write_text(kopia_akcji)
 
 
+
+# ----------------------------------------------------- swieza baza kanalow wejsciowych (wyscig o push)
+CUDZY_WPIS = """
+- schema_version: 1
+  division: cudza
+  project_id: prj-cudzy-test
+  project_number: '999999999999'
+  owner_group: cudzy@example.com
+  change_ref: snow:RITM0000009
+  approved_by: cudzy@example.com
+  stage: dry-run
+  dry_run_since: '2026-08-13'
+  review_by: '2027-02-09'
+  profiles:
+  - name: vertex-online-serving
+    params: {}
+"""
+
+
+def _repo_wyscigu():
+    """Bare `origin` + PLYTKI klon — dokladnie taki uklad, jaki zostawia `actions/checkout` w kanale."""
+    korzen = pathlib.Path(tempfile.mkdtemp(prefix="vpcsc-wyscig-"))
+    origin, praca, zrodlo = korzen / "origin.git", korzen / "praca", korzen / "zrodlo"
+    sh(["git", "init", "--bare", "-b", "main", str(origin)])
+    sh(["git", "init", "-b", "main", str(zrodlo)])
+    for k, v in (("user.email", "t@example.com"), ("user.name", "t")):
+        sh(["git", "-C", str(zrodlo), "config", k, v])
+    (zrodlo / "tools").mkdir()
+    for nazwa in ("swieza_baza.py", "render_member.py", "projects_file.py"):
+        shutil.copy(ROOT / "tools" / nazwa, zrodlo / "tools" / nazwa)
+    (zrodlo / "perimeter").mkdir()
+    shutil.copy(ROOT / "perimeter/projects.yaml", zrodlo / "perimeter/projects.yaml")
+    (zrodlo / ".github/workflows").mkdir(parents=True)
+    (zrodlo / ".github/workflows/probny.yml").write_text("name: probny\non: workflow_dispatch\njobs: {}\n")
+    sh(["git", "-C", str(zrodlo), "add", "-A"])
+    sh(["git", "-C", str(zrodlo), "commit", "-m", "baza"])
+    sh(["git", "-C", str(zrodlo), "push", str(origin), "main"])
+    sh(["git", "clone", "--depth=1", str(origin), str(praca)])
+    for k, v in (("user.email", "t@example.com"), ("user.name", "t")):
+        sh(["git", "-C", str(praca), "config", k, v])
+    return korzen, origin, praca, zrodlo
+
+
+def _przelot_wyscigu(*, workflow: bool, dopisek: str | None, projekt="prj-moj-test", numer="111111111111"):
+    """Render wniosku → cudzy merge na `main` → przeniesienie. Zwraca stan swiata PO."""
+    korzen, origin, praca, zrodlo = _repo_wyscigu()
+    baza = sh(["git", "-C", str(praca), "rev-parse", "HEAD"]).stdout.strip()
+    argv_plik, wyjscie, podsum = korzen / "render-argv.json", korzen / "gh_out", korzen / "gh_sum"
+    wyjscie.touch()
+    podsum.touch()
+    srodowisko = dict(os.environ, RENDER_ARGV_ZAPIS=str(argv_plik), GITHUB_OUTPUT=str(wyjscie),
+                      GITHUB_STEP_SUMMARY=str(podsum))
+    sh([sys.executable, "tools/render_member.py", "--division", "moja", "--project-id", projekt,
+        "--project-number", numer, "--owner-group", "moj@example.com",
+        "--change-ref", "snow:RITM0000001", "--approved-by", "moj@example.com",
+        "--profiles-json", '[{"name":"vertex-online-serving","params":{}}]', "--today", "2026-08-13"],
+       cwd=str(praca), env=srodowisko)
+    wyrenderowany = (praca / "perimeter/projects.yaml").read_text()
+
+    if workflow or dopisek:
+        if workflow:
+            (zrodlo / ".github/workflows/probny.yml").write_text(
+                "name: probny\non: workflow_dispatch\njobs: {}\n# zmiana z cudzego merge'a\n")
+        if dopisek:
+            with open(zrodlo / "perimeter/projects.yaml", "a") as fh:
+                fh.write(dopisek)
+        sh(["git", "-C", str(zrodlo), "add", "-A"])
+        sh(["git", "-C", str(zrodlo), "commit", "-m", "cudzy merge"])
+        sh(["git", "-C", str(zrodlo), "push", str(origin), "main"])
+
+    p = sh([sys.executable, "tools/swieza_baza.py", "--galaz", "main", "--baza", baza,
+            "--argv-render", str(argv_plik)], cwd=str(praca), env=srodowisko)
+    stan = {
+        "rc": p.returncode,
+        "out": p.stdout + p.stderr,
+        "outputs": dict(l.split("=", 1) for l in wyjscie.read_text().splitlines() if "=" in l),
+        "czlonkowie": (praca / "perimeter/projects.yaml").read_text(),
+        "workflow": (praca / ".github/workflows/probny.yml").read_text(),
+        "head": sh(["git", "-C", str(praca), "rev-parse", "HEAD"]).stdout.strip(),
+        "swiezy": sh(["git", "-C", str(zrodlo), "rev-parse", "main"]).stdout.strip(),
+        "wyrenderowany": wyrenderowany,
+        "korzen": korzen,
+    }
+    return stan
+
+
+def test_swieza_baza() -> None:
+    """Czy galaz zgloszenia powstaje z `main` odczytanego TUZ PRZED pushem — i czy nie kasuje cudzego wpisu.
+
+    Badany tryb awarii jest ZMIERZONY: kanal zbudowal galaz z `main` sprzed bramek, w tym oknie na `main`
+    wszedl merge dotykajacy `.github/workflows/**`, i push poszedl `remote rejected … without workflows
+    permission`. Mechanizm nie jest taki, jak mowi komunikat — GitHub porownuje wypychana galaz z galezia
+    DOMYSLNA, wiec starsza baza wyglada na modyfikacje workflowa. `add-paths` tego nie zamyka.
+    """
+    print("\n== swieza baza kanalow wejsciowych (wyscig o push) ==")
+
+    # --- 1. TRZY STANY SWIATA NA PRAWDZIWYM GICIE. Asercje o zachowaniu, nie o ksztalcie pliku.
+    a = _przelot_wyscigu(workflow=False, dopisek=None)
+    check("swieza baza: `main` sie nie ruszyl -> nic do przeniesienia",
+          a["rc"] == 0 and a["outputs"].get("przesunieta") == "false"
+          and a["outputs"].get("przerenderowano") == "false", f"{a['rc']} {a['outputs']} {a['out'][:200]}")
+
+    b = _przelot_wyscigu(workflow=True, dopisek=None)
+    check("swieza baza: merge ruszyl TYLKO workflow -> galaz siada na SWIEZYM `main`",
+          b["rc"] == 0 and b["head"] == b["swiezy"] and "zmiana z cudzego merge" in b["workflow"],
+          f"{b['rc']} head={b['head'][:8]} swiezy={b['swiezy'][:8]} {b['out'][:200]}")
+    check("swieza baza: przy nieruszonym pliku czlonkow wniosek jest PRZENIESIONY bajt w bajt",
+          b["outputs"].get("przerenderowano") == "false"
+          and b["czlonkowie"] == b["wyrenderowany"], f"{b['outputs']}")
+
+    c = _przelot_wyscigu(workflow=True, dopisek=CUDZY_WPIS)
+    check("swieza baza: merge ruszyl TAKZE plik czlonkow -> wniosek RENDEROWANY PONOWNIE",
+          c["rc"] == 0 and c["outputs"].get("przerenderowano") == "true" and c["head"] == c["swiezy"],
+          f"{c['rc']} {c['outputs']} {c['out'][:300]}")
+    check("swieza baza: po ponownym renderze SA OBA wpisy (cudzy onboarding NIE zniknal)",
+          "prj-moj-test" in c["czlonkowie"] and "prj-cudzy-test" in c["czlonkowie"],
+          c["czlonkowie"][-400:])
+
+    # --- 2. ANTY-TAUTOLOGIA. Bez rozroznienia „przenies / przerenderuj" ten sam przelot KASUJE cudzy
+    # wpis — i robi to bez sladu w diffie zgloszenia, bo diff liczy sie wobec nowej bazy. Wykonujemy
+    # naiwne przeniesienie na tym samym stanie swiata i pokazujemy, ze wtedy wpisu NIE MA.
+    naiwne = c["wyrenderowany"]
+    check("ANTY-TAUTOLOGIA: naiwne przeniesienie gotowego pliku SKASOWALOBY cudzy wpis",
+          "prj-cudzy-test" not in naiwne and "prj-moj-test" in naiwne, naiwne[-200:])
+
+    # --- 3. KOLIZJA NA SWIEZYM PLIKU = ODRZUCENIE TRESCI, nie awaria transportu. Wniosek przestal byc
+    # onboardingiem w trakcie wlasnego przebiegu (ten sam projekt wszedl inna droga) — i werdykt ma to
+    # powiedziec swoim glosem, bo powtorzenie zgloszenia niczego nie zmieni.
+    kolizja = CUDZY_WPIS.replace("prj-cudzy-test", "prj-moj-test").replace("999999999999", "111111111111")
+    d = _przelot_wyscigu(workflow=True, dopisek=kolizja)
+    check("swieza baza: kolizja przy ponownym renderze konczy sie kodem TRESCI (2), nie transportu (1)",
+          d["rc"] == 2, f"rc={d['rc']} {d['out'][:300]}")
+    check("swieza baza: kolizja melduje sie jako ODRZUCENIE TRESCI",
+          "ODRZUCONY PRZEZ BRAMKE TRESCI" in d["out"], d["out"][:300])
+    for stan in (a, b, c, d):
+        shutil.rmtree(stan["korzen"], ignore_errors=True)
+
+    # --- 4. OBA KANALY, I W TYM SAMYM MIEJSCU TORU. Krok przed bramkami zostawialby okno o rzad
+    # wielkosci szersze; krok za `create-pull-request` nie robilby nic.
+    for plik, otwarcie in ((".github/workflows/intake.yml", "open the pull request"),
+                           (".github/workflows/external-intake.yml", "open the pull request")):
+        wf = yaml.safe_load((ROOT / plik).read_text())
+        nazwy = kroki(wf)
+        i_baza = next((i for i, n in enumerate(nazwy) if n.startswith("swieza baza")), None)
+        i_bramka = next((i for i, n in enumerate(nazwy) if n == "ownership and onboarding rules"), None)
+        i_pr = next((i for i, n in enumerate(nazwy) if n == otwarcie), None)
+        check(f"{plik}: krok swiezej bazy stoi ZA bramkami tresci i PRZED otwarciem PR-a",
+              None not in (i_baza, i_bramka, i_pr) and i_bramka < i_baza < i_pr, str(nazwy))
+
+        # POWTORZENIE BRAMEK PO PRZERENDEROWANIU wykonuje DOKLADNIE te same komendy, co bramki wyzej.
+        # Komendy porownujemy wyliczone Z PLIKU, a nie wpisane w test: kopia bramki, ktora sie rozjedzie,
+        # jest gorsza od jej braku, a rozjazd widac wylacznie tutaj.
+        def komendy(krok):
+            return [l.strip() for l in str(krok.get("run", "")).splitlines()
+                    if l.strip() and not l.strip().startswith(("#", "trap "))]
+        kroki_joba = list(yaml.safe_load((ROOT / plik).read_text())["jobs"].values())[0]["steps"]
+        pierwsze = [k for k in kroki_joba if k.get("name") in ("schema", "ownership and onboarding rules")]
+        powtorka = next((k for k in kroki_joba if str(k.get("name", "")).startswith("bramki tresci po")), None)
+        check(f"{plik}: krok powtorzenia bramek istnieje i odpala sie na `przerenderowano`",
+              powtorka is not None
+              and "steps.swieza_baza.outputs.przerenderowano == 'true'" in str((powtorka or {}).get("if", "")),
+              str((powtorka or {}).get("if")))
+        if powtorka is not None:
+            oczekiwane = [c for k in pierwsze for c in komendy(k)]
+            check(f"{plik}: powtorzenie bramek wykonuje TE SAME komendy co bramki przed pushem",
+                  komendy(powtorka) == oczekiwane,
+                  f"powtorka={komendy(powtorka)}\n         oczekiwane={oczekiwane}")
+
+    # --- 5. NAPRAWA NIE POSZERZA UPRAWNIEN. Odmowa GitHuba jest tu POPRAWNA: kanal wejscia nie ma prawa
+    # dotykac plikow workflow perimetru. `workflows: write` zamknelby objaw, oddajac dokladnie te wladze,
+    # ktorej cala konstrukcja kanalu odmawia — wiec jego brak jest asercja, nie przeoczeniem.
+    for plik in (".github/workflows/intake.yml", ".github/workflows/external-intake.yml"):
+        wf = yaml.safe_load((ROOT / plik).read_text())
+        upr = wf.get("permissions") or {}
+        check(f"{plik}: token kanalu NIE dostaje `workflows`", "workflows" not in upr, str(upr))
+
+    # --- 6. SPRZATANIE ROZROZNIA „nie ma czego kasowac" od „kasowanie padlo". Odmowa PRZED powstaniem
+    # galezi dawala `Reference does not exist (HTTP 422)` — czerwien bez konsekwencji, ktora MASKOWALA
+    # prawdziwa przyczyne w podsumowaniu przebiegu.
+    for plik in (".github/workflows/intake.yml", ".github/workflows/external-intake.yml"):
+        krok = next((k for k in list(yaml.safe_load((ROOT / plik).read_text())["jobs"].values())[0]["steps"]
+                     if str(k.get("name", "")).startswith("dlaczego pull request nie powstal")), None)
+        check(f"{plik}: krok werdyktu po nieudanym PR-ze istnieje", krok is not None)
+        if krok is None:
+            continue
+        tresc = str(krok.get("run", ""))
+        check(f"{plik}: sprzatanie kasuje TYLKO wtedy, gdy galaz istnieje",
+              "nie ma czego sprzatac" in tresc and 'galaz=brak' in tresc, tresc[:200])
+        check(f"{plik}: nieudane kasowanie ma WLASNA adnotacje (nie milknie i nie udaje sukcesu)",
+              "SPRZATNIECIE GALEZI NIE POWIODLO SIE" in tresc)
+        # WERDYKT NIE STOI NA KODZIE WYJSCIA. Trzy rozne stany swiata -> trzy rozne tytuly adnotacji;
+        # `conclusion: failure` jest we wszystkich taki sam.
+        tytuly = set(re.findall(r"::error title=([^:]+)::", tresc))
+        check(f"{plik}: werdykt rozroznia wyscig transportu od pozostalych awarii (>=3 tytuly)",
+              len(tytuly) >= 3 and any("WYSCIG TRANSPORTU" in t for t in tytuly), str(sorted(tytuly)))
+        check(f"{plik}: werdykt mowi WPROST, ze wniosek nie zostal odrzucony",
+              "WNIOSEK NIE ZOSTAŁ ODRZUCONY" in tresc)
+
+
 def main() -> int:
     bootstrap()
     test_samodzielnosc()
@@ -6565,6 +6768,7 @@ def main() -> int:
     test_przyklad_repo_dywizji()
     test_kanal_dywizji()
     test_kanal_ticketowy()
+    test_swieza_baza()
     test_poswiadczenie_kanalu()
     test_monitoring()
     test_kanaly_check()
