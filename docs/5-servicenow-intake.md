@@ -282,7 +282,14 @@ Zasada wspólna dla wszystkich wierszy: **awaria kończy się brakiem zmiany**, 
 
 ## 6. Jak to przetestować BEZ ServiceNow
 
-Trzy poziomy, każdy uruchamialny lokalnie:
+Trzy poziomy, każdy uruchamialny lokalnie — **plus czwarty, opisany w §9**: kanał przeciw
+`tools/snow_symulator.py`, czyli przeciw serwerowi implementującemu kontrakt Table API zamiast fixture'owi
+podstawiającemu gotową odpowiedź. Różnica jest istotna dokładnie tu, w sekcji o testowaniu: fixture
+odpowiada tak samo dobrze na zapytanie sprawne i niesprawne (bo nie zna zapytania), więc **poziomy a–c
+nie wykryją defektu po stronie ZAPYTANIA** — a właśnie taki defekt przeżył sześć fixtur (§8, DEC-43).
+Zanim uznasz kanał za sprawdzony, przeczytaj **§9.4 „czego symulator NIE dowodzi”**.
+
+Trzy poziomy fixture'owe:
 
 **a) Weryfikacja ticketu na fixture** — bez sieci, bez instancji SNOW:
 
