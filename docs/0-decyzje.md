@@ -2344,3 +2344,55 @@ wywołania nie wykonał; test na tym kształcie pokazuje 2 przypisania przed zmi
   danych: zgodność 733/733, więc kontrola nic by dziś nie złapała, a na wpisie obcego projektu w fixturze
   (gdzie anonimizacja podstawiła numer członka) fałszywie by krzyczała. Rekord zostaje autorytatywny,
   `resourceName` używamy tam, gdzie rekordu nie ma.
+
+---
+
+## DEC-33 — Kasowanie access levelu rozstrzyga REFEROWANIE, nie sam fakt usunięcia
+
+**Decyzja.** Bramka `vpcsc.perimeter` przestaje traktować perimetr i access level jako jeden obiekt.
+Usunięcie **perimetru** zostaje zabronione bezwarunkowo (nie istnieje wniosek dywizji, którego skutkiem
+jest „granica znika"). Usunięcie **access levelu** jest odrzucane wtedy i tylko wtedy, gdy po tej samej
+zmianie poziom **nadal jest referowany** — przez regułę ingress albo przez `required_access_levels`
+innego poziomu. Poziom osierocony przez offboarding przechodzi zwykłym pull requestem. Brak nazwy
+usuwanego poziomu w plan-JSON = odrzucenie (fail-closed).
+
+**Dlaczego.** Zrównanie obu obiektów tworzyło układ, w którym dwa niezmienniki tego samego repozytorium
+mówiły coś przeciwnego, a rozbieżność trafiała **wyłącznie w offboarding** — czyli w moment, w którym
+nikt nie chce debugować granicy:
+
+* `rules.tf` ma `depends_on` na access level **po to**, żeby `destroy` szedł w kolejności reguła → poziom;
+  bez niego API odrzuca (`you must first remove the reference`). Repozytorium deklaruje więc, że ta
+  ścieżka istnieje i ma działać, i pilnuje tego asercją czytającą `terraform graph`;
+* a bramka nie wpuszczała jej **ani razu** przez jedyną drogę, którą granica się zmienia — pull request,
+  a potem `apply` (obie ścieżki uruchamiają ten sam zestaw reguł, DEC-16).
+
+Zmierzone na żywej organizacji 2026-08-13: pull request wyprowadzający członka razem z jego własnym
+access levelem dał `Plan: 0 to add, 1 to change, 3 to destroy` — plan poprawny — i został odrzucony przez
+tę bramkę, nie przez API. Kontrola na tym samym plan-JSON: stara reguła 10/11, nowa 13/13; jedyna
+różnica to ten jeden deny.
+
+Drugi powód jest pojemnościowy i narastał po cichu: **limit access leveli jest na ORGANIZACJĘ (500)**,
+nie na politykę i nie na perimetr. Bramka zabraniająca kasowania czegokolwiek sprawiała, że katalog
+poziomów mógł wyłącznie rosnąć — a każda dywizja, która przychodzi z własnymi zakresami, zostawia po
+odejściu poziom nieautoryzujący nikogo. Wyciek liczony w latach, ale org-plane i wspólny dla wszystkich
+perimetrów w organizacji.
+
+Gałąź access levelu tej bramki **nie miała ani jednego testu** — jedyny przypadek dotyczył perimetru.
+Dlatego zrównanie przeżyło w szablonie tak długo: nic nie opisywało, co ma się stać z poziomem,
+którego nikt już nie używa.
+
+**Co odrzucono i dlaczego.**
+
+| wariant | dlaczego nie |
+|---|---|
+| zostawić zakaz i kasować poziomy ścieżką break-glass | `break-glass.yml` wyprowadza członka z konfiguracji **egzekwowanej** i access levelu nie dotyka (DEC-29). Trzeba by dopisać drugą procedurę awaryjną do operacji, która nie jest awarią — a droga awaryjna używana rutynowo przestaje być awaryjna |
+| zostawić zakaz i zaakceptować rosnący katalog | limit jest **org-plane**; poziom bez reguły to obiekt, który w konsoli wygląda jak kontrola. Śmieci w katalogu poziomów to nie jest dług kosmetyczny, tylko fałszywy inwentarz zabezpieczeń |
+| pozwolić na kasowanie każdego poziomu (odwrócenie zakazu) | wtedy pull request kasujący poziom **używany** przechodziłby bramkę i wywracał `apply` w połowie, na żywej polityce. Bramka istnieje po to, żeby ten błąd kosztował czerwony PR, a nie przerwany apply |
+| liczyć referencje także z inline'owych `ingress_policies` na szkielecie perimetru | szkielet ma na nich `ignore_changes`, więc `planned_values` niesie tam wartość **odświeżoną z API**, czyli stan SPRZED zmiany (zmierzone: `spec[0].ingress_policies` = 8 reguł, w tym ta, którą ten sam plan usuwa). Reguła oparta na nich odrzucałaby KAŻDY poprawny offboarding — pytałaby o świat po zmianie, patrząc na świat przed nią |
+| wyjąć spod bramki wymianę poziomu (`delete` + `create`) | między zniszczeniem a utworzeniem jest okno, w którym poziom nie istnieje, a reguły nadal go wskazują — ten sam błąd API, tylko trudniejszy do zauważenia w planie |
+
+**Residual, nazwany wprost.** Bramka widzi wyłącznie referencje z **tej** konfiguracji. Reguła dopisana
+z konsoli, reguła innego perimetru w tej samej polityce albo polityka inline'owa na cudzym szkielecie
+są dla niej niewidzialne. Wyłapie je API przy apply — komunikatem `you must first remove the reference`,
+który wskazuje obiekt. Degradacja jest głośna i konkretna, więc świadomie nie budujemy tu drugiego
+źródła prawdy czytającego całą politykę.
