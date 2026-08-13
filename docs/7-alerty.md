@@ -20,6 +20,7 @@ DZIŚ i czy widziano go, jak strzela.
 | [budżet atrybutów](#budzet-atrybutow) | `watch.yml` ← żywa granica (ACM) | tak |
 | [dryf granicy](#dryf-granicy) | `watch.yml` ← `terraform plan` | tak |
 | [członek po terminie](#czlonek-po-terminie) | `watch.yml` ← `projects.yaml` | tak |
+| [martwy członek granicy](#martwy-czlonek) | `watch.yml` ← żywa granica (ACM) + **Asset Inventory** | tak — na realnym projekcie w `DELETE_REQUESTED` |
 | [heartbeat poza GCP](#dms-zewnetrzny) | `watch.yml` → dostawca spoza GCP | tak |
 
 **Wszystkie jadą jednym producentem — i to jest świadome, nie przypadkowe.** Poprzedni układ
@@ -41,7 +42,7 @@ ostatnia warstwa nie jest w GCP w ogóle.
 **Kanały.** Dwa, celowo rozdzielone (`perimeter/alerting.yaml`):
 
 * **pojemność** — budżet atrybutów, członkowie po terminie, `apply`, który nie doszedł;
-* **bezpieczeństwo** — dryf, zmiana poza pipeline'em, odmowa w trybie egzekwowanym.
+* **bezpieczeństwo** — dryf, zmiana poza pipeline'em, odmowa w trybie egzekwowanym, martwy członek granicy.
 
 Alert o obejściu procesu w tej samej skrzynce co comiesięczne „zbliżasz się do 70%" kończy się zawsze
 tak samo: odbiorca uczy się ignorować całą kategorię.
@@ -342,10 +343,82 @@ Usunięcie członka z konfiguracji egzekwowanej **zdejmuje z niego ochronę** �
 i idzie tą samą ścieżką review co onboarding.
 
 Jedna rzecz z §C, która dotyczy **tego** alertu: wpis może być po terminie także dlatego, że **projektu już
-nie ma**. Kasowanie projektu należy do zespołu właścicielskiego projektów i dzieje się bez powiadomienia,
-a martwego członka nie widzi żaden z mechanizmów tego repozytorium — jego naruszenia spadają do zera, czyli
-wyglądają jak „czyste okno" dla bramki promocji. Ten alert **też tego nie złapie**: mierzy `review_by`,
-nie żywotność projektu. Wykrycie zapewnia rekoncyliacja opisana w §C, a nie ten kanał.
+nie ma**. Ten alert tego **nie złapie** — mierzy `review_by`, nie żywotność projektu, a martwy członek
+zwykle ma termin przeglądu daleko w przyszłości. Od tego jest osobny kanał: [martwy członek
+granicy](#martwy-czlonek). Te dwa sygnały czyta się razem, ale **nie zastępują się**: wygaśnięcie jest
+długiem procesu, a martwy projekt — fałszowaniem dowodu.
+
+---
+
+<a id="martwy-czlonek"></a>
+
+## martwy członek granicy — projekt przestał istnieć, wpis został
+
+**Alert:** `VPC-SC: członek granicy bez potwierdzonego stanu ACTIVE` (WARNING, kanał **bezpieczeństwa**).
+
+**Kto to odczuwa:** security i każdy, kto podejmuje decyzję o promocji. Skutek natychmiastowy jest
+kosmetyczny — granica trzyma numer, którego nie ma. Skutek opóźniony jest groźny: **naruszenia martwego
+członka spadają do zera, a zero to dowód „czystego okna", którego wymaga bramka promocji.** Skoro projekty
+kasuje inny zespół i nie mówi o tym, obcy zespół produkuje w ten sposób fałszywy dowód gotowości.
+
+**Czego ten alert NIE dubluje — i dlaczego musiał powstać.** Zmierzone na żywej organizacji po skasowaniu
+projektu będącego członkiem:
+
+| warstwa | co powiedziała |
+|---|---|
+| `terraform plan` | `No changes. Your infrastructure matches the configuration.` |
+| `terraform apply` | `0 added, 0 changed, 0 destroyed` |
+| `drift_resources` | `0` |
+| `expiry-sweep` | zielony, krok offboardingu **pominięty** (czyta wyłącznie `review_by`) |
+| pre-flight | „projekt istnieje, numer zgodny" — bo dotyczy wejścia, a nie trwania |
+
+Wszystkie te odpowiedzi są **prawdziwe**: Git i granica zgadzają się co do numeru, którego nie ma, więc
+dryf jest zerowy i uczciwy jednocześnie. To jest jedyna warstwa, która pyta o coś innego — czy numer
+w granicy ma jeszcze za sobą projekt.
+
+**Który warunek się otworzył — to są dwie różne procedury:**
+
+* **`not_active` > 0** — stan **odczytany** i inny niż `ACTIVE` (zwykle `DELETE_REQUESTED`). To jest
+  werdykt. Wchodzimy w offboarding (`3-runbook-promocja-i-break-glass.md` §C) **tego samego dnia**: wpis
+  nadal zdejmuje ochronę z niczego i fałszuje dowód promocyjny;
+* **`unreadable` > 0** — stanu **nie odczytano**. Przyczyny są nierozróżnialne z tego miejsca (projekt
+  skasowany twardo i wypadł z indeksu, opóźnienie indeksowania, zawężony zakres, odebrane uprawnienie),
+  i detektor ich **nie zgaduje**. Jedno jest pewne: to **nie jest** potwierdzenie, że członek żyje.
+  Rozstrzyga odczyt po ID, komendą niżej;
+* **„detektor żywotności członków milczy"** — nie ma punktów w oknie watchdoga. Producent świadomie nie
+  publikuje zera, gdy nie ma czego policzyć, więc ten warunek jest jedynym, który odróżnia jego awarię od
+  spokoju. Sprawdź ostatni przebieg `watch.yml` i grant `roles/cloudasset.viewer` konta planu.
+
+**Odczyt z ręki — dokładnie to samo źródło, z którego liczy się metryka:**
+
+```bash
+gcloud asset search-all-resources --scope=organizations/<ORG_ID> \
+  --asset-types=cloudresourcemanager.googleapis.com/Project \
+  --billing-project=<PROJEKT_ADM> \
+  --format='table(additionalAttributes.projectId, project, state)'
+```
+
+> [!NOTE]
+> `--billing-project` jest tu potrzebny, bo to są poświadczenia **użytkownika**. Producent go **nie
+> ustawia** i nie może: nagłówek `X-Goog-User-Project` wymaga `serviceusage.services.use`, którego konto
+> planu nie ma — kwota konta serwisowego idzie domyślnie na jego własny projekt.
+
+**Dwa fałszywe sygnały, oba zmierzone.** `gcloud projects list` **domyślnie nie pokazuje** projektu
+skasowanego, więc „nie ma go na liście" wygląda identycznie jak „nigdy go nie było" — pytaj o `state`,
+nie o obecność. Oraz: przez ~60 s po skasowaniu wywołania na projekcie **nadal przechodzą**, więc
+pojedyncze zielone sprawdzenie tuż po zdarzeniu nie znaczy nic.
+
+**Opóźnienie indeksu — nazwane, nie przemilczane.** Asset Inventory to indeks, nie odczyt z Resource
+Managera. Zmierzone na tej organizacji (projekt-sonda utworzony i skasowany specjalnie do pomiaru):
+utworzenie widoczne **poniżej 30 s**, przejście w `DELETE_REQUESTED` widoczne **poniżej 40 s**. Przy
+kadencji godzinnej jest to nieistotne. Przy bramce na pull requeście byłoby źródłem fałszywych werdyktów —
+i jest to jeden z powodów, dla których bramki tam nie ma (drugi, cięższy: zablokowałaby własne lekarstwo,
+bo wyjście z martwego wpisu prowadzi przez `plan` + `apply`).
+
+**Powrót do ciszy.** Alert zamyka się sam po zniknięciu przyczyny (`auto_close` = 7 dni), ale przyczyna
+znika **wyłącznie** przez usunięcie wpisu z granicy albo `undelete` projektu w oknie 30 dni. `undelete`
+nie przywraca billingu i nie jest „cofnięciem offboardingu" — powrót do granicy idzie normalnym
+onboardingiem z pre-flightem (`3-runbook-promocja-i-break-glass.md` §C).
 
 ---
 

@@ -98,7 +98,7 @@ done
 | Rola | Zakres | Do jakiej operacji | Bez niej |
 |---|---|---|---|
 | `roles/accesscontextmanager.policyReader` | **organizacja** | `accessPolicies.get/list`, `servicePerimeters.get/list`, `accessLevels.get/list` — Terraform musi odczytać aktualny stan perimetru, żeby policzyć różnicę. **Ta sama rola niesie `resourcemanager.projects.get/list`**, czyli checki 1 i 2 pre-flightu (projekt istnieje, numer zgodny, brak kolizji perimetrów) | `terraform plan` pada na 403 przy odświeżaniu stanu; PR nie pokazuje, co zmienia; pre-flight nie ma czym sprawdzić kandydata |
-| `roles/cloudasset.viewer` | organizacja | **sonda granicy** (`boundary-probe.yml`): `gcloud asset search-all-resources` to wywołanie usługi **spoza** `restricted_services`, czyli kontrola pozytywna, która ma przejść ZAWSZE. Bez niej „przeszło" i „nie miało prawa zapytać" stają się nieodróżnialne. **Ta rola NIE jest używana przez pre-flight** — mimo że tak stało tu przez długi czas; skrypt czyta Resource Managera i ACM, a nie Cloud Asset Inventory (zmierzone). Nie zdejmuj jej „bo pre-flight jej nie potrzebuje": zdejmiesz kontrolę pozytywną sondy | sonda traci kontrolę pozytywną i każdy jej negatyw staje się niefalsyfikowalny |
+| `roles/cloudasset.viewer` | organizacja | **DWAJ konsumenci, żaden oczywisty.** (1) **sonda granicy** (`boundary-probe.yml`): `gcloud asset search-all-resources` to wywołanie usługi **spoza** `restricted_services`, czyli kontrola pozytywna, która ma przejść ZAWSZE — bez niej „przeszło" i „nie miało prawa zapytać" stają się nieodróżnialne. (2) **detektor martwego członka** (`watch.yml`, DEC-42): to samo uprawnienie oddaje `state` **wszystkich** projektów organizacji jednym wywołaniem, więc obserwator widzi, że projekt członka przestał istnieć — czego nie widzi żadna inna warstwa. Alternatywą było `resourcemanager.projects.get`, czyli **nowe** nadanie na organizacji i koszt rosnący z liczbą członków. **Ta rola NIE jest używana przez pre-flight** — mimo że tak stało tu przez długi czas; skrypt czyta Resource Managera i ACM, a nie Cloud Asset Inventory (zmierzone). Nie zdejmuj jej „bo pre-flight jej nie potrzebuje" | sonda traci kontrolę pozytywną i każdy jej negatyw staje się niefalsyfikowalny; detektor martwego członka przestaje publikować punkty, a martwy członek wraca do bycia niewidzialnym (łapie to `condition_absent` polityki, więc głośno) |
 | `roles/compute.networkViewer` | organizacja (lub foldery dywizji) | pre-flight: odczyt podsieci — czy mają włączony **Private Google Access** | onboarding „przechodzi", a workload i tak nie dogada się z API przez restricted VIP; objawia się jako awaria aplikacji tygodnie później |
 | `roles/dns.reader` | organizacja (lub foldery dywizji) | pre-flight: czy istnieje prywatna strefa DNS kierująca `*.googleapis.com` na restricted VIP (i osobno `*.notebooks.googleusercontent.com` na `private.googleapis.com` dla Workbencha) | jw. — plus klasyczna pułapka Workbencha z własnym kernelem, którą łapie tylko ten check |
 | `roles/storage.objectAdmin` | **tylko prefiks bucketa stanu**, nie cały bucket | backend GCS bierze **blokadę stanu** (tworzy i kasuje obiekt `.tflock`), więc sam odczyt nie wystarcza | `terraform plan` pada na braku uprawnień do locka; obejście `-lock=false` odbiera ochronę przed równoległym zapisem stanu |
@@ -444,7 +444,13 @@ Prosimy o (środowisko: <org GCP>, repozytorium: ORG/gcp-vpc-sc):
 
 1. SA sa-vpcsc-plan@<proj>.iam.gserviceaccount.com
    - roles/accesscontextmanager.policyReader        [ORGANIZACJA]  — odczyt perimetru do terraform plan
-   - roles/cloudasset.viewer                        [ORGANIZACJA]  — pre-flight: istnienie projektu, kolizja perimetrów
+   - roles/cloudasset.viewer                        [ORGANIZACJA]  — kontrola pozytywna sondy granicy
+                                                                     + detektor martwego członka (stan
+                                                                     cyklu życia projektów, DEC-42).
+                                                                     WYMAGA też włączonego
+                                                                     cloudasset.googleapis.com w projekcie
+                                                                     konta plan (kwota SA idzie na jego
+                                                                     projekt-właściciela)
    - roles/compute.networkViewer, roles/dns.reader  [ORG lub foldery] — pre-flight: Private Google Access
                                                                        + prywatna strefa DNS kierująca
                                                                        googleapis.com na restricted VIP
