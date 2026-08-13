@@ -330,12 +330,19 @@ alert mierzy STAN, więc świeci również wtedy, gdy zepsuł się sam sweeper.
 
 * **projekt nadal potrzebny** → nowy `review_by` z odniesieniem do ticketu w `change_ref`. To jest
   odnowienie zgody, a nie formalność — ktoś musi potwierdzić, że dostęp dalej ma sens;
-* **projekt zbędny** → offboarding. Uwaga na kolejność przy konfiguracji egzekwowanej: **najpierw**
-  wyprowadź członka z perimetru (PR + apply), **potem** kasuj projekt. Odwrotnie zostaje w konfiguracji
-  martwy numer projektu.
+* **projekt zbędny** → offboarding. Pełna procedura z kolejnością, dowodem po każdym kroku i wyjściem
+  z częściowo zastosowanego `apply`: [`3-runbook-promocja-i-break-glass.md`](3-runbook-promocja-i-break-glass.md) §C.
+  Kolejność **nie jest tu powtórzona celowo** — mieszkała wcześniej w tym pliku, czyli nie tam, gdzie
+  wykonuje się procedurę, i osoba otwierająca §C jej nie widziała.
 
 Usunięcie członka z konfiguracji egzekwowanej **zdejmuje z niego ochronę** — to jest zmiana bezpieczeństwa
 i idzie tą samą ścieżką review co onboarding.
+
+Jedna rzecz z §C, która dotyczy **tego** alertu: wpis może być po terminie także dlatego, że **projektu już
+nie ma**. Kasowanie projektu należy do zespołu właścicielskiego projektów i dzieje się bez powiadomienia,
+a martwego członka nie widzi żaden z mechanizmów tego repozytorium — jego naruszenia spadają do zera, czyli
+wyglądają jak „czyste okno" dla bramki promocji. Ten alert **też tego nie złapie**: mierzy `review_by`,
+nie żywotność projektu. Wykrycie zapewnia rekoncyliacja opisana w §C, a nie ten kanał.
 
 ---
 
