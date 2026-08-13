@@ -22,8 +22,9 @@ state_bucket        = "bkt-tf-state-vpcsc"  # versioning + soft-delete, BEZ rete
 # state_prefix         = "vpc-sc/perimeter" # musi zgadzać się z prefix w terraform/versions.tf repo perimetru
 # wif_pool_id          = "github-actions"
 # wif_provider_id      = "github"
-# grant_logging_viewer = true               # false = brak raportu naruszeń ORAZ (przy włączonym monitoringu)
-#                                           #         czerwony plan: to ta sama rola daje logMetrics.get
+# grant_sink_reader    = true               # false = guard raportu naruszeń nie odczyta konfiguracji sinka,
+#                                           #         a wtedy „zero naruszeń" jest nieodróżnialne od
+#                                           #         niedostarczającego sinka i przepuszcza promocję
 
 # Warstwa IAM Deny — jedyne miejsce w tym stacku, gdzie ODCZYT i ZAPIS mają różnych właścicieli.
 #
