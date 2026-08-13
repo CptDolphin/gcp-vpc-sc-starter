@@ -261,9 +261,27 @@ resource "google_access_context_manager_service_perimeter" "this" {
   status {
     restricted_services = local.restricted_services
 
-    vpc_accessible_services {
-      enable_restriction = local.policy.vpc_accessible_services.enable_restriction
-      allowed_services   = local.accessible_services
+    # BLOK RENDEROWANY WARUNKOWO — ta sama klasa defektu co `dynamic "conditions"` w access levelu wyżej:
+    # blok statyczny wysyła do API kształt, którego API nie przechowuje, więc plan nigdy nie schodzi do zera.
+    #
+    # ZMIERZONE (A6, przejęcie brownfieldowe na żywym ACM): przy `enable_restriction: false` i pustej
+    # liście usług API zapisuje to jako BRAK pola `vpcAccessibleServices` — a Terraform w kolejnym planie
+    # znów chce je dopisać. `plan` po UDANYM `apply` pokazywał `1 to change` W NIESKOŃCZONOŚĆ, czyli
+    # `No changes` było nieosiągalne, a detektor dryfu miał wieczny fałszywy alarm.
+    #
+    # DLACZEGO TO UDERZA WŁAŚNIE W BROWNFIELD: perimetr postawiony ręcznie zwykle NIE ogranicza usług
+    # dostępnych od wewnątrz, więc `perimeter_to_policy.py` przepisuje z rzeczywistości dokładnie
+    # `enable_restriction: false` — czyli wartość, która ten defekt wyzwala. Greenfield (nasze `true`)
+    # nigdy go nie zobaczył.
+    dynamic "vpc_accessible_services" {
+      for_each = anytrue([
+        local.policy.vpc_accessible_services.enable_restriction,
+        length(local.accessible_services) > 0,
+      ]) ? [1] : []
+      content {
+        enable_restriction = local.policy.vpc_accessible_services.enable_restriction
+        allowed_services   = local.accessible_services
+      }
     }
   }
 
@@ -271,9 +289,27 @@ resource "google_access_context_manager_service_perimeter" "this" {
   spec {
     restricted_services = local.restricted_services
 
-    vpc_accessible_services {
-      enable_restriction = local.policy.vpc_accessible_services.enable_restriction
-      allowed_services   = local.accessible_services
+    # BLOK RENDEROWANY WARUNKOWO — ta sama klasa defektu co `dynamic "conditions"` w access levelu wyżej:
+    # blok statyczny wysyła do API kształt, którego API nie przechowuje, więc plan nigdy nie schodzi do zera.
+    #
+    # ZMIERZONE (A6, przejęcie brownfieldowe na żywym ACM): przy `enable_restriction: false` i pustej
+    # liście usług API zapisuje to jako BRAK pola `vpcAccessibleServices` — a Terraform w kolejnym planie
+    # znów chce je dopisać. `plan` po UDANYM `apply` pokazywał `1 to change` W NIESKOŃCZONOŚĆ, czyli
+    # `No changes` było nieosiągalne, a detektor dryfu miał wieczny fałszywy alarm.
+    #
+    # DLACZEGO TO UDERZA WŁAŚNIE W BROWNFIELD: perimetr postawiony ręcznie zwykle NIE ogranicza usług
+    # dostępnych od wewnątrz, więc `perimeter_to_policy.py` przepisuje z rzeczywistości dokładnie
+    # `enable_restriction: false` — czyli wartość, która ten defekt wyzwala. Greenfield (nasze `true`)
+    # nigdy go nie zobaczył.
+    dynamic "vpc_accessible_services" {
+      for_each = anytrue([
+        local.policy.vpc_accessible_services.enable_restriction,
+        length(local.accessible_services) > 0,
+      ]) ? [1] : []
+      content {
+        enable_restriction = local.policy.vpc_accessible_services.enable_restriction
+        allowed_services   = local.accessible_services
+      }
     }
   }
 
