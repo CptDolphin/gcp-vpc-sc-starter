@@ -88,12 +88,17 @@ nazwy zasobów po obu stronach granicy, tokeny troubleshootera. To jest mapa teg
 właściciel dywizji wiedział, który workload przestanie działać po promocji; ukrycie tego pola zamieniłoby
 dowód w statystykę.
 
-**Dług do domknięcia osobnym zadaniem:** `iam-bootstrap` nadal daje kontu `plan` org-level
-`roles/logging.viewer` (`grant_logging_viewer`). Po tej zmianie raport go już **nie potrzebuje** — czyta
-widok. Zdjęcie tej roli jest realnym zawężeniem (org-wide odczyt logów → jeden widok), ale ta sama rola
-niesie `logging.logMetrics.get`, bez którego `terraform plan` pada na odświeżeniu metryk z
-`terraform/monitoring.tf`. Wymaga więc podmiany na wąskie uprawnienie w projekcie monitoringu — zmiana
-w `iam-bootstrap`, świadomie poza zakresem tego kroku.
+**Dług DOMKNIĘTY:** `iam-bootstrap` nie daje już kontu `plan` org-level `roles/logging.viewer`. Raport
+czyta widok (`roles/logging.viewAccessor`, nadawany niżej w tym stacku), a jedyne, czego potrzebuje ponad
+to, jest odczyt **konfiguracji** sinka dla guarda „sink istnieje i ma ten sam filtr" — rola własna
+`vpcScSinkReader` z JEDNYM uprawnieniem `logging.sinks.get`. Zakres pozostaje org-level, bo sink org-level
+nie ma innego rodzica, ale `logging.logEntries.list` na organizacji zniknęło całkowicie.
+
+Zapowiadana tu wcześniej przeszkoda (`logging.logMetrics.get` potrzebne `terraform plan` do odświeżenia
+metryk z `terraform/monitoring.tf`) **przestała istnieć** przy okazji innej zmiany: metryki log-based
+zostały z tamtego pliku usunięte, bo strukturalnie nie potrafią policzyć wpisów przyniesionych przez sink.
+Stack perimetru nie zarządza dziś ani jedną `google_logging_metric`, więc podmiana na wąskie uprawnienie
+w projekcie monitoringu okazała się niepotrzebna.
 
 ## Pułapki ZMIERZONE — nie odkrywaj ich ponownie
 
