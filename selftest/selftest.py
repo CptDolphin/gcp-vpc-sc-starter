@@ -14,6 +14,7 @@ Uruchomienie:  python3 selftest/selftest.py
 """
 import datetime
 import hashlib
+import http.server
 import importlib.util
 import json
 import os
@@ -24,6 +25,8 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
+import urllib.parse
 
 try:
     import yaml
@@ -169,6 +172,10 @@ def bootstrap() -> None:
         # Narzedzia bramek w JEDNYM miejscu (pin + suma + ponawianie + werdykt „bramki NIE wykonaly sie").
         # Wczesniej ten sam `curl` stal w szesciu plikach, w zadnym z weryfikacja pobrania (DEC-28).
         ".github/actions/narzedzia/action.yml", "tools/continue_on_error_check.py",
+        # Galaz zgloszenia budowana z `main` odczytanego TUZ PRZED pushem: bez tego push galezi ze
+        # starszej bazy leci `remote rejected … without workflows permission`, mimo ze commit dotyka
+        # wylacznie pliku czlonkow (GitHub porownuje galaz z galezia DOMYSLNA, nie z jej wlasna baza).
+        "tools/swieza_baza.py",
         ".tflint.hcl", ".github/dependabot.yml", "tests/README.md",
         "tests/snow-approved.json", "tests/snow-not-approved.json", "tests/snow-self-approved.json",
         "tests/snow-wrong-project.json", "tests/dispatch-example.json",
@@ -2410,6 +2417,34 @@ def test_alerty() -> None:
     check("maszyna bez czytelnej referencji sieci JEST liczona do okna (fail-closed)",
           pw.policz_okna_sieci([wpis_sieci, bez_sieci], egz, 600)["z_obciazeniem"] == 1)
 
+    # 11e-bis. KSZTALT WPISU ZDJETY Z ZYWEJ ORGANIZACJI, NIE Z DOKUMENTACJI (#2028, przelot 2026-08-13).
+    # Fixture `wpis_maszyny` wyzej niesie `networkInterfaces[].network` — i tego pola realny wpis
+    # `v1.compute.instances.insert` dla sieci CUSTOM-MODE NIE MA. Odczyt z kubelka sinka pokazal wylacznie
+    # `subnetwork`. Asercje ponizej stoja na kopii ZYWEGO wpisu, zeby sciezka, ktora produkcja chodzi
+    # naprawde, miala wlasne pokrycie — poprzednio testowany byl wariant, ktory nie wystepuje.
+    maszyna_zywa = {"logName": "projects/prj-example-alpha/logs/cloudaudit.googleapis.com%2Factivity",
+                    "resource": {"type": "gce_instance", "labels": {"project_id": "prj-example-alpha"}},
+                    "timestamp": "2026-01-01T10:01:23Z",
+                    "operation": {"first": True},
+                    "protoPayload": {"serviceName": "compute.googleapis.com",
+                                     "methodName": "v1.compute.instances.insert",
+                                     "resourceName": "projects/prj-example-alpha/zones/z/instances/s1",
+                                     "request": {"networkInterfaces": [{"subnetwork": (
+                                         "https://compute.googleapis.com/compute/v1/projects/"
+                                         "prj-example-alpha/regions/europe-west1/subnetworks/w1-ew1")}]}}}
+    check("ZYWY ksztalt: wpis maszyny NIE niesie referencji sieci (tylko podsiec)",
+          pw.sieci_maszyny(maszyna_zywa) == [], str(pw.sieci_maszyny(maszyna_zywa)))
+    check("ZYWY ksztalt: podsiec jest odczytywana i podawana dyzurnemu",
+          pw.podsieci_maszyny(maszyna_zywa) == ["w1-ew1"], str(pw.podsieci_maszyny(maszyna_zywa)))
+    zywe = pw.policz_okna_sieci([wpis_sieci, maszyna_zywa], egz, 600)
+    check("ZYWY ksztalt: para siec+maszyna nadal jest zdarzeniem alertu (przez fail-closed)",
+          zywe["z_obciazeniem"] == 1, str(zywe))
+    trafienie = zywe["szczegoly"][0]["obciazenie"][0]
+    check("ZYWY ksztalt: dopasowanie jest OZNACZONE jako nieodczytane, a nie podane jako fakt",
+          trafienie["siec_odczytana"] is False, str(trafienie))
+    check("ZYWY ksztalt: szczegol niesie podsiec, czyli jedyna referencje do sprawdzenia hipotezy",
+          trafienie["podsiec"] == "w1-ew1", str(trafienie))
+
     # 11f. OKNO DOJRZEWANIA W KONFIGURACJI MUSI ZGADZAC SIE Z PROCEDURA. Mniejsze oskarzaloby o zlamanie
     # zasady kogos, kto ja stosowal; wieksze zglaszaloby jako incydent zachowanie zgodne z runbookiem.
     zrodlo = yaml.safe_load((ROOT / "perimeter/alerting.yaml").read_text()).get("violations_source", {})
@@ -3611,6 +3646,17 @@ def test_codeowners_rozdzielenie() -> None:
     # tym defektem, ktory sama tropi. Sprawdzamy obecnosc jawnej sciezki bledu, nie tresci komunikatu.
     check("guard artefaktow odrzuca nieodczytany indeks (fail-closed)",
           "nie odczytal indeksu gita" in akcja, akcja[-400:])
+
+    # Guard kotwic runbooka — z tego samego powodu, co dwa wyzej, plus jeden wlasny. Selftest sprawdza
+    # kotwice po stronie STARTERA; polityki alertow i `docs/7-alerty.md` zyja takze we wdrozeniu i mozna
+    # je tam zmienic BEZPOSREDNIO. Guard w `bramki-tresci` jest jedyna asercja, ktora to widzi — a jedzie
+    # na obu torach, wiec takze przy pushu na galaz domyslna.
+    check("guard kotwic runbooka jedzie w bramkach tresci (oba tory)",
+          "guard - kotwice runbooka alertow istnieja" in akcja, akcja[-400:])
+    # Zerowe pokrycie MUSI byc czerwone: brak uzytych kotwic znaczy albo utrate `runbook_url` w alertach,
+    # albo zmiane wzorca ich sklejania — czyli guard, ktory przestal cokolwiek widziec i o tym milczy.
+    check("guard kotwic odrzuca ZEROWE pokrycie (nie myli pustki z czystoscia)",
+          "zaden alert nie wskazuje kotwicy runbooka" in akcja, akcja[-400:])
 
 
 # --------------------------------------------------------------------- kompletnosc rejestru decyzji
@@ -5905,12 +5951,22 @@ def test_boundary_probe() -> None:
         return
     kod_werdyktu = textwrap.dedent(kod.group(1))
 
-    def przelot(oczekiwanie: str, sondy: dict, kanarek: str = "brak") -> tuple[int, str]:
+    def przelot(oczekiwanie: str, sondy: dict, kanarek: str = "brak",
+                granica: str = "ISTNIEJE", przynaleznosc: str | None = None) -> tuple[int, str]:
         kat = pathlib.Path(tempfile.mkdtemp(prefix="vpcsc-probe-"))
         (kat / "sondy").mkdir()
         for nazwa, (rc, out) in sondy.items():
             (kat / "sondy" / f"{nazwa}.rc").write_text(str(rc))
             (kat / "sondy" / f"{nazwa}.out").write_text(out)
+        # Domyślnie podstawiamy stan granicy ZGODNY z oczekiwaniem przelotu, żeby dotychczasowe przypadki
+        # mierzyły dalej to, co mierzyły: `open` = projekt jeszcze w dry-run, `blocked` = już w egzekwowanej.
+        if przynaleznosc is None:
+            przynaleznosc = "STATUS" if oczekiwanie == "blocked" else "SPEC"
+        (kat / "stan-granicy.json").write_text(json.dumps({
+            "granica": granica, "przynaleznosc": przynaleznosc, "numer": "123456789012",
+            "perimetr": "example-perimeter", "polityka": "123456789012",
+            "status": [], "spec": [], "blad": "PERMISSION_DENIED: The caller does not have permission",
+        }))
         (kat / "werdykt.py").write_text(kod_werdyktu)
         p = sh([sys.executable, "werdykt.py"], cwd=kat,
                env={**os.environ, "OCZEKIWANIE": oczekiwanie, "PROJEKT": "prj-example-vertex-dev",
@@ -6043,6 +6099,309 @@ def test_boundary_probe() -> None:
     rc, out = przelot("blocked", CZWORKA_OK, kanarek="brak")
     check("kanarek: `brak` nie wymaga sond kanarka (zgodnosc wstecz)",
           rc == 0 and "kanarek-poziom" not in out, out[-700:])
+
+    # --- TRZY STANY GRANICY -----------------------------------------------------------------------
+    # Sonda ma odrozniac „granica blokuje" od „granicy NIE MA" i od „nie udalo sie zmierzyc". Przed ta
+    # zmiana trzeci stan nie istnial: `describe` nieistniejacego perimetru wywracal krok pod `bash -e`,
+    # wiec brak granicy wygladal identycznie jak brak uprawnien. Zmierzone na zywym przebiegu
+    # w cwiczeniu DR — przelot `expect=open` PADL zamiast pokazac, ze ochrona zniknela.
+
+    # 13. GRANICY NIE MA przy `blocked`: wszystkie sondy przechodza (bo nie ma czego blokowac). Bez tej
+    #     asercji taki przelot rozniłby sie od „granica wpuszcza" wylacznie w glowie czytajacego.
+    WSZYSTKO_PRZESZLO = {n: (0, "[]") for n in
+                         ("chroniona-z-regula", "chroniona-bez-reguly", "chroniona-inna-usluga",
+                          "spoza-granicy")}
+    rc, out = przelot("blocked", WSZYSTKO_PRZESZLO, granica="BRAK", przynaleznosc="BEZ_GRANICY")
+    check("granica BRAK przy `blocked` -> werdykt GRANICY NIE MA, a nie krok, ktory padl",
+          rc == 1 and "GRANICY NIE MA" in out, out[-700:])
+
+    # 14. Ten sam zestaw wynikow sond przy ISTNIEJACEJ granicy daje INNY werdykt. To jest para
+    #     anty-tautologiczna dla samego rozroznienia stanow: identyczne wejscie, rozny tytul.
+    rc2, out2 = przelot("blocked", WSZYSTKO_PRZESZLO, granica="ISTNIEJE", przynaleznosc="STATUS")
+    check("granica ISTNIEJE, te same wyniki sond -> INNY werdykt niz przy braku granicy",
+          rc2 == 1 and "GRANICY NIE MA" not in out2, out2[-700:])
+
+    # 15. NIE WIADOMO (403 z ACM) ma WLASNY kod wyjscia i wlasny tytul. `403` to „nie wiadomo", nigdy
+    #     „nie ma" — ten sam trzywerdyktowy wzorzec, co w `tools/deny_check.sh`.
+    rc, out = przelot("blocked", CZWORKA_OK, granica="NIE_WIADOMO", przynaleznosc="NIE_WIADOMO")
+    check("granica NIE_WIADOMO -> WERDYKT NIEROZSTRZYGNIETY i kod wyjscia 2 (nie 1)",
+          rc == 2 and "WERDYKT NIEROZSTRZYGNIETY" in out, out[-700:])
+
+    # 16. PRZYNALEZNOSC JEST ASERTOWANA, nie tylko drukowana. Odmowy zmierzone na projekcie, ktorego nie
+    #     ma w konfiguracji egzekwowanej, nie dowodza promocji TEGO projektu — a dotad wiazal je
+    #     z rzeczywistoscia wylacznie czlowiek czytajacy `status.resources` w logu.
+    rc, out = przelot("blocked", CZWORKA_OK, granica="ISTNIEJE", przynaleznosc="SPEC")
+    check("projekt tylko w `spec` przy `blocked` -> NIE JEST W KONFIGURACJI EGZEKWOWANEJ",
+          rc == 1 and "NIE JEST W KONFIGURACJI EGZEKWOWANEJ" in out, out[-700:])
+
+    # 17. Druga strona tej samej asercji: baseline `open` zmierzony na juz egzekwowanej granicy nie jest
+    #     baselinem. Bez tego „przelot open byl zielony" moglo znaczyc „byl zielony, bo nic nie mierzyl".
+    rc, out = przelot("open", WSZYSTKO_PRZESZLO, granica="ISTNIEJE", przynaleznosc="STATUS")
+    check("baseline `open` na granicy juz egzekwujacej -> zlamany",
+          rc == 1 and "BASELINE" in out, out[-700:])
+
+    # 18. `open` przy nieistniejacej granicy jest POPRAWNY (nie ma czego blokowac), ale musi sie NAZYWAC
+    #     inaczej niz `open` przy granicy, ktora wpuszcza. To jest dokladnie para z „Jak zweryfikowac".
+    rc, out = przelot("open", WSZYSTKO_PRZESZLO, granica="BRAK", przynaleznosc="BEZ_GRANICY")
+    rc2, out2 = przelot("open", WSZYSTKO_PRZESZLO, granica="ISTNIEJE", przynaleznosc="SPEC")
+    check("`open` bez granicy i `open` z granica: oba zielone, ale RAZNE TRESCIA",
+          rc == 0 and rc2 == 0 and "NIE ISTNIEJE" in out and "NIE ISTNIEJE" not in out2,
+          f"bez={out[-300:]} || z={out2[-300:]}")
+
+    # --- KROK ODCZYTU STANU GRANICY: uruchamiany, nie czytany ---------------------------------------
+    # Wyciagamy PIERWSZY heredok (odczyt stanu) i odpalamy go na spreparowanych wyjsciach `gcloud`.
+    # Asercja o ksztalcie („czy w pliku stoi `set +e`") przeszlaby takze wtedy, gdyby klasyfikacja bledu
+    # byla zepsuta — a to ona rozstrzyga o roznicy miedzy „nie ma" a „nie wiem".
+    kod_stanu = re.search(r"python3 - <<'PY'[^\n]*\n(.*?)\n\s*PY\n",
+                          tresc[tresc.index("- name: stan granicy w chwili pomiaru"):], re.S)
+    check("boundary-probe: da sie wyodrebnic kod odczytu stanu granicy", kod_stanu is not None)
+    if kod_stanu:
+        kod_stanu = textwrap.dedent(kod_stanu.group(1))
+
+        def stan(rc_gcloud: int, err: str, opis: str = "", projekt: str = "prj-example-vertex-dev"):
+            kat = pathlib.Path(tempfile.mkdtemp(prefix="vpcsc-stan-"))
+            (kat / "perimeter").mkdir()
+            (kat / "perimeter" / "projects.yaml").write_text(yaml.safe_dump(
+                {"members": [{"project_id": "prj-example-vertex-dev", "project_number": "123456789012"}]}))
+            (kat / "perimetr.err").write_text(err)
+            (kat / "perimetr.json").write_text(opis or "{}")
+            (kat / "stan.py").write_text(kod_stanu)
+            p = sh([sys.executable, "stan.py"], cwd=kat,
+                   env={**os.environ, "RC": str(rc_gcloud), "PROJEKT": projekt,
+                        "NAZWA": "example-perimeter", "POLITYKA": "123456789012",
+                        "GITHUB_STEP_SUMMARY": str(kat / "summary.md")})
+            plik = kat / "stan-granicy.json"
+            return p.returncode, (json.loads(plik.read_text()) if plik.exists() else {}), p.stdout + p.stderr
+
+        # 19. NIEISTNIEJACY PERIMETR: krok ma ZYC i orzec BRAK. Wersja sprzed tej zmiany konczyla sie tu
+        #     bledem i pociagala za soba caly job — sondy nie dostawaly szansy nic zmierzyc.
+        rc, s, out = stan(1, "ERROR: (gcloud.access-context-manager.perimeters.describe) NOT_FOUND: "
+                             "Service perimeter not found.")
+        check("odczyt stanu: NOT_FOUND -> `BRAK` i krok NIE PADA", rc == 0 and s.get("granica") == "BRAK",
+              f"rc={rc} stan={s} {out[-300:]}")
+
+        # 20. 403 to „nie wiadomo", nie „nie ma". Zmierzone na zywym API: numer polityki bez dostepu
+        #     zwraca `PERMISSION_DENIED`, czyli komunikat, ktory nie mowi nic o istnieniu perimetru.
+        rc, s, out = stan(1, "ERROR: (gcloud.access-context-manager.perimeters.describe) "
+                             "PERMISSION_DENIED: The caller does not have permission")
+        check("odczyt stanu: PERMISSION_DENIED -> `NIE_WIADOMO`, nigdy `BRAK`",
+              rc == 0 and s.get("granica") == "NIE_WIADOMO", f"rc={rc} stan={s} {out[-300:]}")
+
+        # 21. Granica istnieje, a sondowany projekt siedzi w `status` — przynaleznosc policzona po NUMERZE
+        #     z deklaracji, bo `status.resources` niesie numery, a wejsciem workflowa jest `project_id`.
+        #     Porownanie napisow bez tego mapowania nie trafiloby NIGDY i asercja bylaby dekoracja.
+        rc, s, out = stan(0, "", json.dumps({"status": {"resources": ["projects/123456789012"]},
+                                             "spec": {"resources": ["projects/210987654321"]}}))
+        check("odczyt stanu: `project_id` mapowany na numer -> przynaleznosc STATUS",
+              rc == 0 and s.get("przynaleznosc") == "STATUS", f"stan={s} {out[-300:]}")
+
+        # 22. Ten sam odczyt dla projektu, ktorego w perimetrze NIE MA. Bez tej strony asercja z 21 byla
+        #     by spelniona takze przez funkcje zwracajaca zawsze „STATUS".
+        rc, s, out = stan(0, "", json.dumps({"status": {"resources": ["projects/210987654321"]},
+                                             "spec": {"resources": []}}))
+        check("odczyt stanu: projekt spoza obu konfiguracji -> `POZA`",
+              rc == 0 and s.get("przynaleznosc") == "POZA", f"stan={s} {out[-300:]}")
+
+        # 23. Nieznany `project_id` (brak w deklaracjach) to „nie wiadomo, czyja to granica" — NIE „POZA".
+        rc, s, out = stan(0, "", json.dumps({"status": {"resources": ["projects/123456789012"]}}),
+                          projekt="prj-example-nieznany")
+        check("odczyt stanu: projekt bez numeru w deklaracjach -> `NIE_WIADOMO`",
+              rc == 0 and s.get("przynaleznosc") == "NIE_WIADOMO", f"stan={s} {out[-300:]}")
+
+    # --- KOD WYJSCIA WERDYKTU MA DOCIERAC DO JOBA ---------------------------------------------------
+    # `python3 … | tee` oddaje kod OSTATNIEGO ogniwa potoku, a domyslna powloka Actions to `bash -e` BEZ
+    # `pipefail`. Bez tej linii `sys.exit(1)` werdyktu nie mial jak zaczerwienic kroku — dokladnie ta sama
+    # przyczyna zjadla juz raz drugie zrodlo dowodu w kroku audytowym. Sprawdzamy KOD, nie komentarz.
+    werdykt_krok = tresc[tresc.index("- name: werdykt"):tresc.index("- name: odmowa w audit-logu")]
+    kod_kroku = [w for w in werdykt_krok.splitlines() if not w.lstrip().startswith("#")]
+    check("boundary-probe: krok werdyktu ma `set -o pipefail` (inaczej `tee` zjada kod wyjscia)",
+          any("set -o pipefail" in w for w in kod_kroku), werdykt_krok[:400])
+
+
+def test_sonda_egress() -> None:
+    """Sonda EGRESS — jedyny pomiar kierunku eksfiltracji, i jedyny, ktorego nie zrobi zaden runner CI.
+
+    TEN TEST ISTNIEJE, BO POPRZEDNIA WERSJA SONDY BYLA ATRAPA I PRZESZLA PRZEZ WSZYSTKIE BRAMKI.
+    Skrypt wykonywal wywolania i DRUKOWAL wynik: bez modelu oczekiwan, bez liczenia niezgodnosci, bez
+    werdyktu, bez niezerowego kodu wyjscia i w nieskonczonej petli, ktora nie miala GDZIE tego kodu oddac.
+    Przy nieistniejacym perimetrze kazda sonda dostawala 200 i skrypt wypisywal `werdykt=PRZESZLO` w kolko
+    — output nieodrozninalny od „regula egress, ktora wlasnie uzbroilem, przepuszcza wywolanie".
+
+    Dlatego ten test NIE pyta, czy plik zawiera wlasciwe slowa. URUCHAMIA sonde jako podproces przeciw
+    wlasnemu serwerowi HTTP, ktory udaje serwer metadanych ORAZ sondowane API — i LICZY trafienia.
+    Runda, ktora tylko drukuje, nie zostawia trafien i nie zda tego testu. Zadna asercja tekstowa nie
+    umiala tego zlapac, bo atrapa i sonda wygladaja w kodzie tak samo, dopoki nikt jej nie wykona.
+    """
+    print("\n== sonda egressu (pomiar kierunku eksfiltracji) ==")
+    plik = ROOT / "tools/sonda_egress_wewnetrzna.py"
+    check("sonda egressu istnieje po rozpakowaniu", plik.exists())
+    if not plik.exists():
+        return
+
+    WEWNATRZ, CEL = "prj-example-vertex-dev", "prj-example-poza-granica"
+    KUB_CEL, KUB_OBCY = "example-bucket-cel", "example-bucket-obcy"
+    PERIMETR = "accessPolicies/123456789012/servicePerimeters/example_perimeter"
+
+    OK = (200, '{"items":[]}')
+    # Tresc odmowy VPC-SC. Werdykt idzie z TRESCI, nie z kodu: 403 zwraca tez wylaczone API i brak roli.
+    def odmowa(powod: str) -> tuple[int, str]:
+        return 403, ('{"error":{"code":403,"message":"Request is prohibited by organization\'s policy. '
+                     f'vpcServiceControlsUniqueIdentifier: AbCdEf123","violationReason":"{powod}"}}}}')
+    SIEC = odmowa("NETWORK_NOT_IN_SAME_SERVICE_PERIMETER")
+    POZIOM = odmowa("NO_MATCHING_ACCESS_LEVEL")
+    # Ta klasa NIE MA `vpcServiceControlsUniqueIdentifier` w niektorych odpowiedziach — klasyfikator musi
+    # ja rozpoznac po samym `violationReason`, inaczej poprawna odmowa wyglada jak „padlo z innego powodu".
+    USLUGA = (403, '{"error":{"code":403,"message":"SERVICE_NOT_ALLOWED_FROM_VPC"}}')
+    BRAK_ROLI = (403, '{"error":{"code":403,"message":"The caller does not have permission"}}')
+    API_OFF = (403, '{"error":{"code":403,"message":"Cloud Storage API has not been used in project '
+                    '000000000000 before or it is disabled."}}')
+
+    def uruchom(scenariusz: dict, **nadpisz) -> tuple[int, str, list]:
+        trafienia: list[str] = []
+        metadane = {"sonda-projekt-wewnatrz": WEWNATRZ, "sonda-projekt-cel": CEL,
+                    "sonda-kubelek-cel": KUB_CEL, "sonda-kubelek-obcy": KUB_OBCY,
+                    "sonda-odstep": "0", "sonda-rundy": "2"}
+        metadane.update(nadpisz)
+
+        def nazwa_sondy(sciezka: str, zapytanie: dict) -> str:
+            if sciezka.startswith("/v1/accessPolicies/"):
+                return "acm"
+            if sciezka == f"/v1/projects/{WEWNATRZ}":
+                return "poza-uslugami"
+            if sciezka == "/storage/v1/b":
+                return "wewnatrz" if (zapytanie.get("project") or [""])[0] == WEWNATRZ else "egress-cel-inna"
+            if sciezka == f"/storage/v1/b/{KUB_CEL}/o":
+                return "egress-cel-metoda"
+            if sciezka == f"/storage/v1/b/{KUB_OBCY}/o":
+                return "izolacja-cel"
+            return "NIEZNANA:" + sciezka
+
+        class Obsluga(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):  # cisza — log serwera zaśmiecałby wynik selftestu
+                pass
+
+            def odpowiedz(self, kod: int, tresc: str):
+                dane = tresc.encode()
+                self.send_response(kod)
+                self.send_header("Content-Length", str(len(dane)))
+                self.end_headers()
+                self.wfile.write(dane)
+
+            def do_GET(self):  # noqa: N802
+                u = urllib.parse.urlparse(self.path)
+                if u.path.startswith("/computeMetadata/v1/instance/attributes/"):
+                    klucz = u.path.rsplit("/", 1)[1]
+                    trafienia.append("metadana:" + klucz)
+                    wartosc = metadane.get(klucz)
+                    return self.odpowiedz(200, wartosc) if wartosc is not None else self.odpowiedz(404, "")
+                if u.path.endswith("/service-accounts/default/token"):
+                    trafienia.append("token")
+                    return self.odpowiedz(200, json.dumps({"access_token": "example-token"}))
+                n = nazwa_sondy(u.path, urllib.parse.parse_qs(u.query))
+                trafienia.append(n)
+                kod, tresc = scenariusz.get(n, (500, f"scenariusz nie opisuje sondy {n}"))
+                return self.odpowiedz(kod, tresc)
+
+        srv = http.server.HTTPServer(("127.0.0.1", 0), Obsluga)
+        port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        for k in ("sonda-baza-storage", "sonda-baza-crm", "sonda-baza-acm"):
+            metadane.setdefault(k, f"http://127.0.0.1:{port}")
+        try:
+            # `timeout` jest asercja sama w sobie: petla bez gornej granicy rund nie ma jak oddac werdyktu.
+            p = sh([sys.executable, str(plik)], timeout=60,
+                   env={**os.environ, "GCE_METADATA_HOST": f"127.0.0.1:{port}"})
+            wynik = (p.returncode, p.stdout + p.stderr)
+        except subprocess.TimeoutExpired:
+            wynik = (-1, "SONDA NIE ZAKONCZYLA SIE — petla bez gornej granicy rund")
+        finally:
+            srv.shutdown()
+        return wynik[0], wynik[1], trafienia
+
+    WEWNATRZ_ZAMKNIETE = {"wewnatrz": OK, "poza-uslugami": USLUGA, "egress-cel-metoda": SIEC,
+                          "egress-cel-inna": SIEC, "izolacja-cel": SIEC, "acm": USLUGA}
+    WEWNATRZ_OTWARTE = {**WEWNATRZ_ZAMKNIETE, "egress-cel-metoda": OK}
+    POZA_GRANICA = {n: OK for n in ("wewnatrz", "poza-uslugami", "egress-cel-metoda",
+                                    "egress-cel-inna", "izolacja-cel", "acm")}
+    OKNO = {**POZA_GRANICA, "wewnatrz": POZIOM}
+
+    # --- 1. CZY SONDA W OGOLE WOLA. Asercja, ktorej brak przepuscil atrape przez wszystkie bramki.
+    rc, out, trafienia = uruchom(WEWNATRZ_ZAMKNIETE, **{"sonda-oczekiwanie": "wewnatrz-zamkniete"})
+    check("sonda egressu WYKONUJE wywolania (nie sam wypis): kazda sonda x kazda runda",
+          all(trafienia.count(n) >= 2 for n in
+              ("wewnatrz", "poza-uslugami", "egress-cel-metoda", "egress-cel-inna", "izolacja-cel")),
+          f"trafienia={ {n: trafienia.count(n) for n in set(trafienia)} }")
+    check("sonda egressu pobiera token przed kazda runda", trafienia.count("token") >= 2)
+    # --- 2. ODCZYT ACM. Odpowiednik kroku „stan granicy w chwili pomiaru" z sondy ingressu: pomiar musi
+    #        umiec powiedziec, o CZYJEJ granicy jest, a nie tylko co przeszlo.
+    check("sonda egressu NIE wola ACM, dopoki nie podano `sonda-perimetr`",
+          trafienia.count("acm") == 0, f"trafienia acm={trafienia.count('acm')}")
+    check("wewnatrz-zamkniete: zgodne -> kod wyjscia 0", rc == 0 and "GRANICA-DZIALA" in out, out[-800:])
+
+    # --- 3. DOKLADNIE JEDNA KOMORKA. Uzbrojenie reguly przelacza `egress-cel-metoda` i NIC WIECEJ.
+    rc, out, _ = uruchom(WEWNATRZ_OTWARTE, **{"sonda-oczekiwanie": "wewnatrz-otwarte"})
+    check("wewnatrz-otwarte: uzbrojona regula przepuszcza mierzona komorke -> 0", rc == 0, out[-800:])
+    rc, out, _ = uruchom(WEWNATRZ_OTWARTE, **{"sonda-oczekiwanie": "wewnatrz-zamkniete"})
+    check("ta sama obserwacja przy oczekiwaniu `zamkniete` -> NIEZGODNE (kod 1)",
+          rc == 1 and "egress-cel-metoda" in out, out[-800:])
+
+    # --- 4. SEDNO ZGLOSZENIA. Maszyna POZA granica: wszystko przechodzi. Poprzednia wersja wypisywala
+    #        wtedy serie `PRZESZLO` bez konca; teraz to jest NAZWANY stan i NIEZEROWY kod wyjscia.
+    rc, out, _ = uruchom(POZA_GRANICA, **{"sonda-oczekiwanie": "wewnatrz-zamkniete"})
+    check("wszystko przeszlo przy oczekiwaniu `wewnatrz` -> GRANICA-NIE-DZIALA, kod 1",
+          rc == 1 and "GRANICA-NIE-DZIALA" in out, out[-800:])
+    # ...i ta sama obserwacja z oczekiwaniem `poza-granica` jest POPRAWNA — kontrola anty-tautologiczna
+    # musi byc osobnym, ZIELONYM przelotem, inaczej „granica dziala" nie ma z czym sie roznic.
+    rc, out, _ = uruchom(POZA_GRANICA, **{"sonda-oczekiwanie": "poza-granica"})
+    check("ta sama obserwacja przy oczekiwaniu `poza-granica` -> zgodne (kod 0)",
+          rc == 0 and "GRANICA-NIE-DZIALA" in out, out[-800:])
+
+    # --- 5. OKNO SWIEZEJ SIECI: wlasny projekt ODMAWIA, a wyjscia PRZECHODZA. Stan scisle GORSZY od
+    #        „poza granica" (cala sciezka eksfiltracji przejezdna) i dlatego nazwany osobno.
+    rc, out, _ = uruchom(OKNO, **{"sonda-oczekiwanie": "wewnatrz-zamkniete"})
+    check("okno swiezej sieci nazwane osobno, nie zwiniete do `poza granica`",
+          rc == 1 and "OKNO-SWIEZEJ-SIECI" in out, out[-800:])
+
+    # --- 6. TRZECI STAN: „nie udalo sie zmierzyc" ma WLASNY kod wyjscia (2) i nigdy nie jest zielony.
+    #        Brak roli i wylaczone API zwracaja to samo `403`, co odmowa granicy — policzenie ich jako
+    #        odmowy zamienia awarie srodowiska w dowod dzialania ochrony.
+    for opis, awaria in (("brak roli IAM", BRAK_ROLI), ("wylaczone API", API_OFF)):
+        rc, out, _ = uruchom({**WEWNATRZ_ZAMKNIETE, "egress-cel-metoda": awaria},
+                             **{"sonda-oczekiwanie": "wewnatrz-zamkniete"})
+        check(f"{opis} -> NIE-ZMIERZONO i kod wyjscia 2 (nie 0, nie 1)",
+              rc == 2 and "NIE-ZMIERZONO" in out, out[-800:])
+
+    # --- 7. Blad transportu tez jest „nie wiadomo", a nie odmowa granicy.
+    rc, out, _ = uruchom(WEWNATRZ_ZAMKNIETE, **{"sonda-oczekiwanie": "wewnatrz-zamkniete",
+                                                "sonda-baza-storage": "http://127.0.0.1:1"})
+    check("blad sieci -> NIE-ZMIERZONO, nigdy ODMOWA", rc == 2 and "NIE-ZMIERZONO" in out, out[-800:])
+
+    # --- 8. ODCZYT ACM: cztery odpowiedzi, cztery rozne zdania. `404` znaczy GRANICY NIE MA i jest
+    #        werdyktem, a nie awaria — dokladnie ta roznica, ktorej brakowalo w sondzie ingressu.
+    rc, out, trafienia = uruchom({**POZA_GRANICA, "acm": (404, '{"error":{"code":404}}')},
+                                 **{"sonda-oczekiwanie": "poza-granica", "sonda-perimetr": PERIMETR})
+    check("sonda egressu REALNIE wola ACM, gdy podano `sonda-perimetr`", trafienia.count("acm") == 1,
+          f"trafienia acm={trafienia.count('acm')}")
+    check("ACM 404 -> `stan=BRAK` (GRANICY NIE MA), przelot sie nie wywraca",
+          rc == 0 and "stan=BRAK" in out, out[-800:])
+    rc, out, _ = uruchom({**WEWNATRZ_ZAMKNIETE, "acm": USLUGA},
+                         **{"sonda-oczekiwanie": "wewnatrz-zamkniete", "sonda-perimetr": PERIMETR})
+    check("odmowa ACM z wnetrza -> `NIEODCZYTYWALNY-Z-WNETRZA`, nie awaria",
+          rc == 0 and "NIEODCZYTYWALNY-Z-WNETRZA" in out, out[-800:])
+    rc, out, _ = uruchom({**POZA_GRANICA, "acm": BRAK_ROLI},
+                         **{"sonda-oczekiwanie": "poza-granica", "sonda-perimetr": PERIMETR})
+    check("403 z ACM -> `NIE-WIADOMO`, nigdy `BRAK`", rc == 0 and "stan=NIE-WIADOMO" in out, out[-800:])
+
+    # --- 9. Tryb bez oczekiwan MUSI sie nazywac. Przelot, ktory niczego nie dowodzi, a wyglada na dowod,
+    #        byl cala trescia tego zgloszenia — wiec `obserwacja` mowi to wprost we wlasnym wypisie.
+    rc, out, _ = uruchom(POZA_GRANICA, **{"sonda-oczekiwanie": "obserwacja"})
+    check("tryb `obserwacja` konczy sie zerem, ale mowi, ze NICZEGO nie dowodzi",
+          rc == 0 and "NICZEGO nie dowodzi" in out, out[-800:])
+
+    # --- 10. Literowka w trybie nie moze byc cicho traktowana jak „obserwacja".
+    rc, out, _ = uruchom(POZA_GRANICA, **{"sonda-oczekiwanie": "wewnatrz-zamkniete-literowka"})
+    check("nieznane `sonda-oczekiwanie` zatrzymuje sonde, zamiast zdegradowac ja do wypisu",
+          rc != 0 and "nieznane" in out, out[-400:])
 
 
 # ------------------------------------------------------- werdykt bramek i dostarczanie narzedzi (DEC-28)
@@ -6236,6 +6595,205 @@ def test_werdykt_i_narzedzia() -> None:
         akcja_bramek.write_text(kopia_akcji)
 
 
+
+# ----------------------------------------------------- swieza baza kanalow wejsciowych (wyscig o push)
+CUDZY_WPIS = """
+- schema_version: 1
+  division: cudza
+  project_id: prj-cudzy-test
+  project_number: '999999999999'
+  owner_group: cudzy@example.com
+  change_ref: snow:RITM0000009
+  approved_by: cudzy@example.com
+  stage: dry-run
+  dry_run_since: '2026-08-13'
+  review_by: '2027-02-09'
+  profiles:
+  - name: vertex-online-serving
+    params: {}
+"""
+
+
+def _repo_wyscigu():
+    """Bare `origin` + PLYTKI klon — dokladnie taki uklad, jaki zostawia `actions/checkout` w kanale."""
+    korzen = pathlib.Path(tempfile.mkdtemp(prefix="vpcsc-wyscig-"))
+    origin, praca, zrodlo = korzen / "origin.git", korzen / "praca", korzen / "zrodlo"
+    sh(["git", "init", "--bare", "-b", "main", str(origin)])
+    sh(["git", "init", "-b", "main", str(zrodlo)])
+    for k, v in (("user.email", "t@example.com"), ("user.name", "t")):
+        sh(["git", "-C", str(zrodlo), "config", k, v])
+    (zrodlo / "tools").mkdir()
+    for nazwa in ("swieza_baza.py", "render_member.py", "projects_file.py"):
+        shutil.copy(ROOT / "tools" / nazwa, zrodlo / "tools" / nazwa)
+    (zrodlo / "perimeter").mkdir()
+    shutil.copy(ROOT / "perimeter/projects.yaml", zrodlo / "perimeter/projects.yaml")
+    (zrodlo / ".github/workflows").mkdir(parents=True)
+    (zrodlo / ".github/workflows/probny.yml").write_text("name: probny\non: workflow_dispatch\njobs: {}\n")
+    sh(["git", "-C", str(zrodlo), "add", "-A"])
+    sh(["git", "-C", str(zrodlo), "commit", "-m", "baza"])
+    sh(["git", "-C", str(zrodlo), "push", str(origin), "main"])
+    sh(["git", "clone", "--depth=1", str(origin), str(praca)])
+    for k, v in (("user.email", "t@example.com"), ("user.name", "t")):
+        sh(["git", "-C", str(praca), "config", k, v])
+    return korzen, origin, praca, zrodlo
+
+
+def _przelot_wyscigu(*, workflow: bool, dopisek: str | None, projekt="prj-moj-test", numer="111111111111"):
+    """Render wniosku → cudzy merge na `main` → przeniesienie. Zwraca stan swiata PO."""
+    korzen, origin, praca, zrodlo = _repo_wyscigu()
+    baza = sh(["git", "-C", str(praca), "rev-parse", "HEAD"]).stdout.strip()
+    argv_plik, wyjscie, podsum = korzen / "render-argv.json", korzen / "gh_out", korzen / "gh_sum"
+    wyjscie.touch()
+    podsum.touch()
+    srodowisko = dict(os.environ, RENDER_ARGV_ZAPIS=str(argv_plik), GITHUB_OUTPUT=str(wyjscie),
+                      GITHUB_STEP_SUMMARY=str(podsum))
+    sh([sys.executable, "tools/render_member.py", "--division", "moja", "--project-id", projekt,
+        "--project-number", numer, "--owner-group", "moj@example.com",
+        "--change-ref", "snow:RITM0000001", "--approved-by", "moj@example.com",
+        "--profiles-json", '[{"name":"vertex-online-serving","params":{}}]', "--today", "2026-08-13"],
+       cwd=str(praca), env=srodowisko)
+    wyrenderowany = (praca / "perimeter/projects.yaml").read_text()
+
+    if workflow or dopisek:
+        if workflow:
+            (zrodlo / ".github/workflows/probny.yml").write_text(
+                "name: probny\non: workflow_dispatch\njobs: {}\n# zmiana z cudzego merge'a\n")
+        if dopisek:
+            with open(zrodlo / "perimeter/projects.yaml", "a") as fh:
+                fh.write(dopisek)
+        sh(["git", "-C", str(zrodlo), "add", "-A"])
+        sh(["git", "-C", str(zrodlo), "commit", "-m", "cudzy merge"])
+        sh(["git", "-C", str(zrodlo), "push", str(origin), "main"])
+
+    p = sh([sys.executable, "tools/swieza_baza.py", "--galaz", "main", "--baza", baza,
+            "--argv-render", str(argv_plik)], cwd=str(praca), env=srodowisko)
+    stan = {
+        "rc": p.returncode,
+        "out": p.stdout + p.stderr,
+        "outputs": dict(l.split("=", 1) for l in wyjscie.read_text().splitlines() if "=" in l),
+        "czlonkowie": (praca / "perimeter/projects.yaml").read_text(),
+        "workflow": (praca / ".github/workflows/probny.yml").read_text(),
+        "head": sh(["git", "-C", str(praca), "rev-parse", "HEAD"]).stdout.strip(),
+        "swiezy": sh(["git", "-C", str(zrodlo), "rev-parse", "main"]).stdout.strip(),
+        "wyrenderowany": wyrenderowany,
+        "korzen": korzen,
+    }
+    return stan
+
+
+def test_swieza_baza() -> None:
+    """Czy galaz zgloszenia powstaje z `main` odczytanego TUZ PRZED pushem — i czy nie kasuje cudzego wpisu.
+
+    Badany tryb awarii jest ZMIERZONY: kanal zbudowal galaz z `main` sprzed bramek, w tym oknie na `main`
+    wszedl merge dotykajacy `.github/workflows/**`, i push poszedl `remote rejected … without workflows
+    permission`. Mechanizm nie jest taki, jak mowi komunikat — GitHub porownuje wypychana galaz z galezia
+    DOMYSLNA, wiec starsza baza wyglada na modyfikacje workflowa. `add-paths` tego nie zamyka.
+    """
+    print("\n== swieza baza kanalow wejsciowych (wyscig o push) ==")
+
+    # --- 1. TRZY STANY SWIATA NA PRAWDZIWYM GICIE. Asercje o zachowaniu, nie o ksztalcie pliku.
+    a = _przelot_wyscigu(workflow=False, dopisek=None)
+    check("swieza baza: `main` sie nie ruszyl -> nic do przeniesienia",
+          a["rc"] == 0 and a["outputs"].get("przesunieta") == "false"
+          and a["outputs"].get("przerenderowano") == "false", f"{a['rc']} {a['outputs']} {a['out'][:200]}")
+
+    b = _przelot_wyscigu(workflow=True, dopisek=None)
+    check("swieza baza: merge ruszyl TYLKO workflow -> galaz siada na SWIEZYM `main`",
+          b["rc"] == 0 and b["head"] == b["swiezy"] and "zmiana z cudzego merge" in b["workflow"],
+          f"{b['rc']} head={b['head'][:8]} swiezy={b['swiezy'][:8]} {b['out'][:200]}")
+    check("swieza baza: przy nieruszonym pliku czlonkow wniosek jest PRZENIESIONY bajt w bajt",
+          b["outputs"].get("przerenderowano") == "false"
+          and b["czlonkowie"] == b["wyrenderowany"], f"{b['outputs']}")
+
+    c = _przelot_wyscigu(workflow=True, dopisek=CUDZY_WPIS)
+    check("swieza baza: merge ruszyl TAKZE plik czlonkow -> wniosek RENDEROWANY PONOWNIE",
+          c["rc"] == 0 and c["outputs"].get("przerenderowano") == "true" and c["head"] == c["swiezy"],
+          f"{c['rc']} {c['outputs']} {c['out'][:300]}")
+    check("swieza baza: po ponownym renderze SA OBA wpisy (cudzy onboarding NIE zniknal)",
+          "prj-moj-test" in c["czlonkowie"] and "prj-cudzy-test" in c["czlonkowie"],
+          c["czlonkowie"][-400:])
+
+    # --- 2. ANTY-TAUTOLOGIA. Bez rozroznienia „przenies / przerenderuj" ten sam przelot KASUJE cudzy
+    # wpis — i robi to bez sladu w diffie zgloszenia, bo diff liczy sie wobec nowej bazy. Wykonujemy
+    # naiwne przeniesienie na tym samym stanie swiata i pokazujemy, ze wtedy wpisu NIE MA.
+    naiwne = c["wyrenderowany"]
+    check("ANTY-TAUTOLOGIA: naiwne przeniesienie gotowego pliku SKASOWALOBY cudzy wpis",
+          "prj-cudzy-test" not in naiwne and "prj-moj-test" in naiwne, naiwne[-200:])
+
+    # --- 3. KOLIZJA NA SWIEZYM PLIKU = ODRZUCENIE TRESCI, nie awaria transportu. Wniosek przestal byc
+    # onboardingiem w trakcie wlasnego przebiegu (ten sam projekt wszedl inna droga) — i werdykt ma to
+    # powiedziec swoim glosem, bo powtorzenie zgloszenia niczego nie zmieni.
+    kolizja = CUDZY_WPIS.replace("prj-cudzy-test", "prj-moj-test").replace("999999999999", "111111111111")
+    d = _przelot_wyscigu(workflow=True, dopisek=kolizja)
+    check("swieza baza: kolizja przy ponownym renderze konczy sie kodem TRESCI (2), nie transportu (1)",
+          d["rc"] == 2, f"rc={d['rc']} {d['out'][:300]}")
+    check("swieza baza: kolizja melduje sie jako ODRZUCENIE TRESCI",
+          "ODRZUCONY PRZEZ BRAMKE TRESCI" in d["out"], d["out"][:300])
+    for stan in (a, b, c, d):
+        shutil.rmtree(stan["korzen"], ignore_errors=True)
+
+    # --- 4. OBA KANALY, I W TYM SAMYM MIEJSCU TORU. Krok przed bramkami zostawialby okno o rzad
+    # wielkosci szersze; krok za `create-pull-request` nie robilby nic.
+    for plik, otwarcie in ((".github/workflows/intake.yml", "open the pull request"),
+                           (".github/workflows/external-intake.yml", "open the pull request")):
+        wf = yaml.safe_load((ROOT / plik).read_text())
+        nazwy = kroki(wf)
+        i_baza = next((i for i, n in enumerate(nazwy) if n.startswith("swieza baza")), None)
+        i_bramka = next((i for i, n in enumerate(nazwy) if n == "ownership and onboarding rules"), None)
+        i_pr = next((i for i, n in enumerate(nazwy) if n == otwarcie), None)
+        check(f"{plik}: krok swiezej bazy stoi ZA bramkami tresci i PRZED otwarciem PR-a",
+              None not in (i_baza, i_bramka, i_pr) and i_bramka < i_baza < i_pr, str(nazwy))
+
+        # POWTORZENIE BRAMEK PO PRZERENDEROWANIU wykonuje DOKLADNIE te same komendy, co bramki wyzej.
+        # Komendy porownujemy wyliczone Z PLIKU, a nie wpisane w test: kopia bramki, ktora sie rozjedzie,
+        # jest gorsza od jej braku, a rozjazd widac wylacznie tutaj.
+        def komendy(krok):
+            return [l.strip() for l in str(krok.get("run", "")).splitlines()
+                    if l.strip() and not l.strip().startswith(("#", "trap "))]
+        kroki_joba = list(yaml.safe_load((ROOT / plik).read_text())["jobs"].values())[0]["steps"]
+        pierwsze = [k for k in kroki_joba if k.get("name") in ("schema", "ownership and onboarding rules")]
+        powtorka = next((k for k in kroki_joba if str(k.get("name", "")).startswith("bramki tresci po")), None)
+        check(f"{plik}: krok powtorzenia bramek istnieje i odpala sie na `przerenderowano`",
+              powtorka is not None
+              and "steps.swieza_baza.outputs.przerenderowano == 'true'" in str((powtorka or {}).get("if", "")),
+              str((powtorka or {}).get("if")))
+        if powtorka is not None:
+            oczekiwane = [c for k in pierwsze for c in komendy(k)]
+            check(f"{plik}: powtorzenie bramek wykonuje TE SAME komendy co bramki przed pushem",
+                  komendy(powtorka) == oczekiwane,
+                  f"powtorka={komendy(powtorka)}\n         oczekiwane={oczekiwane}")
+
+    # --- 5. NAPRAWA NIE POSZERZA UPRAWNIEN. Odmowa GitHuba jest tu POPRAWNA: kanal wejscia nie ma prawa
+    # dotykac plikow workflow perimetru. `workflows: write` zamknelby objaw, oddajac dokladnie te wladze,
+    # ktorej cala konstrukcja kanalu odmawia — wiec jego brak jest asercja, nie przeoczeniem.
+    for plik in (".github/workflows/intake.yml", ".github/workflows/external-intake.yml"):
+        wf = yaml.safe_load((ROOT / plik).read_text())
+        upr = wf.get("permissions") or {}
+        check(f"{plik}: token kanalu NIE dostaje `workflows`", "workflows" not in upr, str(upr))
+
+    # --- 6. SPRZATANIE ROZROZNIA „nie ma czego kasowac" od „kasowanie padlo". Odmowa PRZED powstaniem
+    # galezi dawala `Reference does not exist (HTTP 422)` — czerwien bez konsekwencji, ktora MASKOWALA
+    # prawdziwa przyczyne w podsumowaniu przebiegu.
+    for plik in (".github/workflows/intake.yml", ".github/workflows/external-intake.yml"):
+        krok = next((k for k in list(yaml.safe_load((ROOT / plik).read_text())["jobs"].values())[0]["steps"]
+                     if str(k.get("name", "")).startswith("dlaczego pull request nie powstal")), None)
+        check(f"{plik}: krok werdyktu po nieudanym PR-ze istnieje", krok is not None)
+        if krok is None:
+            continue
+        tresc = str(krok.get("run", ""))
+        check(f"{plik}: sprzatanie kasuje TYLKO wtedy, gdy galaz istnieje",
+              "nie ma czego sprzatac" in tresc and 'galaz=brak' in tresc, tresc[:200])
+        check(f"{plik}: nieudane kasowanie ma WLASNA adnotacje (nie milknie i nie udaje sukcesu)",
+              "SPRZATNIECIE GALEZI NIE POWIODLO SIE" in tresc)
+        # WERDYKT NIE STOI NA KODZIE WYJSCIA. Trzy rozne stany swiata -> trzy rozne tytuly adnotacji;
+        # `conclusion: failure` jest we wszystkich taki sam.
+        tytuly = set(re.findall(r"::error title=([^:]+)::", tresc))
+        check(f"{plik}: werdykt rozroznia wyscig transportu od pozostalych awarii (>=3 tytuly)",
+              len(tytuly) >= 3 and any("WYSCIG TRANSPORTU" in t for t in tytuly), str(sorted(tytuly)))
+        check(f"{plik}: werdykt mowi WPROST, ze wniosek nie zostal odrzucony",
+              "WNIOSEK NIE ZOSTAŁ ODRZUCONY" in tresc)
+
+
 def main() -> int:
     bootstrap()
     test_samodzielnosc()
@@ -6249,6 +6807,7 @@ def main() -> int:
     test_przyklad_repo_dywizji()
     test_kanal_dywizji()
     test_kanal_ticketowy()
+    test_swieza_baza()
     test_poswiadczenie_kanalu()
     test_monitoring()
     test_kanaly_check()
@@ -6273,6 +6832,7 @@ def main() -> int:
     test_werdykt_i_narzedzia()
     test_bramka_promocji()
     test_boundary_probe()
+    test_sonda_egress()
     test_schemas()
 
     ok = sum(1 for _, c, _ in results if c)

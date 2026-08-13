@@ -33,7 +33,7 @@ apply identycznie jak sukces:
 | offboarding członka | `apply` padł w połowie na `403`, granica już bez członka, poziom **został** |
 
 Stąd wspólny kształt ostatniego kroku każdej procedury: **odczyt z żywego API po apply**
-(`perimeters describe`, `levels describe`, przelot sondy), a nie „pipeline zielony". To jest **DEC-39**.
+(`perimeters describe`, `levels describe`, przelot sondy), a nie „pipeline zielony". To jest **DEC-41**.
 
 **Bramka, nie CODEOWNERS.** Bez ochrony gałęzi (funkcja płatna) GitHub nie egzekwuje CODEOWNERS w ogóle.
 Egzekwuje to reguła OPA `vpcsc.onboarding` uruchamiana przez `bramki-tresci` na **obu** torach — pull request

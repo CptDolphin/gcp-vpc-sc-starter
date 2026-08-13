@@ -402,8 +402,12 @@ def projekty_egzekwowane(perimetr: dict, projects_doc: dict) -> tuple[set[str], 
 
 def _siec_z_referencji(ref: str) -> str:
     """`.../projects/p/global/networks/w22a` -> `w22a`. Puste, gdy referencja nie ma tego ksztaltu."""
+    return _nazwa_z_referencji(ref, "/networks/")
+
+
+def _nazwa_z_referencji(ref: str, znacznik: str) -> str:
+    """Ostatni segment po `znacznik`. Puste, gdy referencja nie ma tego ksztaltu."""
     tekst = str(ref or "")
-    znacznik = "/networks/"
     return tekst.rsplit(znacznik, 1)[-1] if znacznik in tekst else ""
 
 
@@ -445,14 +449,49 @@ def sieci_maszyny(wpis: dict) -> list[str]:
     """Nazwy sieci, do ktorych podpieta jest tworzona maszyna. PUSTA LISTA = nie dalo sie odczytac.
 
     Rozroznienie „brak interfejsow" od „nie umiem odczytac" jest tu rozstrzygajace dla kierunku bledu:
-    pusta lista oznacza NIEWIEDZE, a konsument traktuje niewiedze jako dopasowanie (fail-closed). Ksztalt
-    `request` w Admin Activity bywa przyciety, a alert, ktory milczy przy przycietym polu, milczy dokladnie
-    wtedy, gdy zdarzenie jest nietypowe.
+    pusta lista oznacza NIEWIEDZE, a konsument traktuje niewiedze jako dopasowanie (fail-closed).
+
+    ZMIERZONE NA ZYWYM WPISIE 2026-08-13 (#2028) — I TO ZMIENIA STATUS TEJ FUNKCJI. Wpis
+    `v1.compute.instances.insert` z maszyny utworzonej w sieci CUSTOM-MODE **nie niesie pola
+    `networkInterfaces[].network` W OGOLE**. Niesie wylacznie `subnetwork`:
+
+        request.networkInterfaces[0].subnetwork =
+            https://compute.googleapis.com/compute/v1/projects/<p>/regions/<r>/subnetworks/<s>
+        request.networkInterfaces[0].network    =  (pola NIE MA)
+
+    Przeszukanie calego wpisu pod katem nazwy sieci dalo zero trafien: poza `subnetwork` jedynym miejscem
+    z ta informacja jest `authorizationInfo[].resource` — tez wskazujace PODSIEC, nie siec. Do tego wpis
+    `operation.last` niesie `request` zlozony wylacznie z `@type`, wiec jest pusty niezaleznie od trybu
+    sieci (scalanie i tak bierze `operation.first`, wiec to nie szkodzi).
+
+    SKUTEK, KTORY TRZEBA ZNAC CZYTAJAC KONSUMENTA: dla sieci custom-mode ta funkcja zwraca ZAWSZE liste
+    pusta, wiec sciezka fail-closed w `policz_okna_sieci` nie jest — jak zakladal pierwotny komentarz —
+    rzadkim przypadkiem „przycietego `request`", tylko SCIEZKA DOMYSLNA. Funkcja zostaje, bo dla sieci
+    auto-mode (`--network`, bez podsieci) pole `network` wystepuje, a wtedy dopasowanie jest scisle.
     """
     zadanie = (wpis.get("protoPayload") or {}).get("request") or {}
     nazwy = []
     for nic in (zadanie.get("networkInterfaces") or []):
         nazwa = _siec_z_referencji(nic.get("network"))
+        if nazwa:
+            nazwy.append(nazwa)
+    return nazwy
+
+
+def podsieci_maszyny(wpis: dict) -> list[str]:
+    """Nazwy PODSIECI, do ktorych podpieta jest tworzona maszyna. PUSTA LISTA = nie dalo sie odczytac.
+
+    ISTNIEJE, BO `sieci_maszyny` NA ZYWYCH DANYCH NIE ZWRACA NIC (patrz jej docstring). Ta liczba NIE
+    bierze udzialu w dopasowaniu — z samej referencji podsieci nie da sie odczytac, do ktorej SIECI ona
+    nalezy, a strumien sinka nie niesie `v1.compute.subnetworks.insert`, wiec mapy podsiec->siec nie ma
+    z czego zbudowac. Sluzy WYLACZNIE za wskazowke dla dyzurnego: adnotacja przebiegu i tresc alertu
+    podaja nazwe sieci, ktora przy dopasowaniu fail-closed jest HIPOTEZA, a nie odczytem — bez podsieci
+    dyzurny nie ma czym tej hipotezy sprawdzic ani obalic.
+    """
+    zadanie = (wpis.get("protoPayload") or {}).get("request") or {}
+    nazwy = []
+    for nic in (zadanie.get("networkInterfaces") or []):
+        nazwa = _nazwa_z_referencji(nic.get("subnetwork"), "/subnetworks/")
         if nazwa:
             nazwy.append(nazwa)
     return nazwy
@@ -478,6 +517,17 @@ def policz_okna_sieci(wpisy: list[dict], egzekwowane: set[str], okno_s: int) -> 
     To jest swiadomy kierunek bledu — falszywy alarm kosztuje jedno sprawdzenie w widoku sinka, a przeoczone
     okno jest nieodwracalne, bo ruch, ktory przez nie przeszedl, NIE ZOSTAWIA SLADU (41 przekroczen granicy,
     0 wpisow audytowych).
+
+    WARIANT (b) JEST SCIEZKA DOMYSLNA, A NIE WYJATKIEM — ZMIERZONE 2026-08-13 NA ZYWYM WPISIE (#2028).
+    Pierwsza wersja tego komentarza zakladala, ze (b) uruchamia sie rzadko, „gdy `request` bywa przyciety".
+    Odczyt wpisu dostarczonego przez sink pokazal, ze `v1.compute.instances.insert` dla sieci CUSTOM-MODE
+    nie niesie pola `network` W OGOLE (szczegoly w `sieci_maszyny`), wiec dla kazdej takiej maszyny
+    dopasowanie idzie przez (b). PRAKTYCZNE ZNACZENIE: w projekcie, w ktorym w tym samym oknie powstala
+    swieza siec ORAZ powstala maszyna w sieci DOJRZALEJ, alert zapali sie na tej drugiej i wskaze w
+    adnotacji nazwe tej pierwszej. Kierunek bledu pozostaje bezpieczny (nie da sie przeoczyc realnego
+    okna), ale precyzja pary jest mniejsza, niz sugerowala nazwa metryki — i dyzurny MUSI to wiedziec,
+    zanim potraktuje nazwe sieci w alercie jako fakt. Scisle dopasowanie wymaga mapy podsiec->siec, czyli
+    `v1.compute.subnetworks.insert` w filtrze sinka; osobne zgloszenie, bo dotyka sinka org-level.
     """
     sieci = [z for z in scal_operacje(wpisy, COMPUTE_SIEC) if projekt_wpisu(z["wpis"]) in egzekwowane]
     maszyny = [z for z in scal_operacje(wpisy, COMPUTE_MASZYNA) if projekt_wpisu(z["wpis"]) in egzekwowane]
@@ -498,7 +548,11 @@ def policz_okna_sieci(wpisy: list[dict], egzekwowane: set[str], okno_s: int) -> 
             trafione.append({
                 "maszyna": m["zasob"].rsplit("/", 1)[-1],
                 "po_sekundach": round(m["czas"] - s["czas"]),
+                # `False` = dopasowanie poszlo sciezka fail-closed, czyli `siec` obok jest HIPOTEZA.
+                # Na zywych danych to jest przypadek DOMYSLNY dla sieci custom-mode, nie wyjatkowy
+                # (#2028) — dlatego obok leci podsiec, jedyna referencja, ktora wpis realnie niesie.
                 "siec_odczytana": bool(podpiete),
+                "podsiec": ", ".join(podsieci_maszyny(m["wpis"])) or None,
             })
         szczegoly.append({"projekt": projekt, "siec": nazwa,
                           "utworzona": datetime.datetime.fromtimestamp(
@@ -821,8 +875,21 @@ def zmierz(args) -> int:
             for s in okna_sieci["szczegoly"]:
                 if not s["obciazenie"]:
                     continue
-                opis = ", ".join(f"{o['maszyna']} po {o['po_sekundach']} s" for o in s["obciazenie"])
-                print(f"::warning::OKNO BEZ OCHRONY: siec `{s['siec']}` w `{s['projekt']}` (utworzona "
+                # PRZY DOPASOWANIU FAIL-CLOSED NAZWA SIECI JEST HIPOTEZA — i adnotacja MUSI to mowic
+                # wprost. Na zywych danych `network` nie wystepuje we wpisie maszyny (#2028), wiec
+                # „siec X dostala obciazenie" bez tego zastrzezenia bylo zdaniem twierdzacym wiecej, niz
+                # pomiar uprawnia: maszyna mogla stac w sieci dojrzalej. Podajemy PODSIEC, bo to jedyna
+                # referencja, ktora wpis realnie niesie, i to nia dyzurny rozstrzyga w jednej komendzie.
+                czesci = []
+                for o in s["obciazenie"]:
+                    tekst = f"{o['maszyna']} po {o['po_sekundach']} s"
+                    if not o["siec_odczytana"]:
+                        podsiec = o.get("podsiec") or "nieodczytana"
+                        tekst += f" (siec NIEODCZYTANA z wpisu — dopasowanie fail-closed, podsiec: {podsiec})"
+                    czesci.append(tekst)
+                opis = ", ".join(czesci)
+                pewnosc = "" if all(o["siec_odczytana"] for o in s["obciazenie"]) else " [HIPOTEZA]"
+                print(f"::warning::OKNO BEZ OCHRONY{pewnosc}: siec `{s['siec']}` w `{s['projekt']}` (utworzona "
                       f"{s['utworzona']}) dostala obciazenie przed dojrzeniem: {opis}", file=sys.stderr)
     # Data w UTC, nie lokalna: `review_by` jest datą kalendarzową bez strefy, a runner i laptop operatora
     # bywają w różnych strefach — wtedy ta sama konfiguracja daje dwa różne wyniki w oknie kilku godzin.

@@ -99,6 +99,19 @@ on:
         default: "brak"
         type: choice
         options: ["brak", "uzbrojony", "rozbrojony"]
+      # DWA POLA WYŁĄCZNIE DLA KONTROLI ANTY-TAUTOLOGICZNEJ SAMEJ SONDY (nie dla zwykłych przelotów).
+      # Sonda, której nigdy nie widzieliśmy orzekającej „granicy NIE MA" ani „nie wiem", jest sondą,
+      # o której wiemy tylko tyle, że bywa zielona. Nazwa perimetru, którego nie ma, i polityka, do
+      # której nie mamy dostępu, produkują dokładnie te dwa stany — na żywym API, bez atrapy.
+      # Puste = wartości z `perimeter/policy.yaml`, czyli normalny przelot.
+      perimetr:
+        description: "(kontrola) nazwa perimetru — puste = z policy.yaml; nieistniejąca nazwa ma dać werdykt GRANICY NIE MA"
+        required: false
+        default: ""
+      polityka:
+        description: "(kontrola) numer access policy — puste = z policy.yaml; numer bez dostępu ma dać WERDYKT NIEROZSTRZYGNIETY"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -129,22 +142,88 @@ jobs:
       # perimetr w konsoli albo gdyby promocja wciągnęła więcej członków, niż mówił diff, sonda i tak
       # zmierzyłaby prawdę, tylko nikt by nie wiedział, o czym ona jest. Ten krok przypina pomiar do
       # rzeczywistości: KTO jest w konfiguracji egzekwowanej, a kto tylko w dry-run, w chwili sondowania.
+      #
+      # ==========================================================================================
+      # BRAK GRANICY JEST WERDYKTEM, A NIE AWARIĄ KROKU — i dlatego `describe` nie może tu wywrócić joba
+      # ==========================================================================================
+      # Poprzednia wersja wołała `describe` pod domyślnym `bash -e`. Nieistniejący perimetr wywracał krok
+      # i cały job, więc sonda NIE MÓWIŁA wtedy „granicy NIE MA" — mówiła „nie udało się", czyli dokładnie
+      # to samo, co przy braku uprawnień, błędzie sieci i literówce w nazwie. Zmierzone w ćwiczeniu DR:
+      # po skasowaniu perimetru przelot `expect=open` PADŁ, zamiast pokazać, że ochrona zniknęła.
+      # To są przeciwne stany świata i muszą się różnić TREŚCIĄ, nie tylko kolorem przebiegu.
+      #
+      # Trzy stany, trzy różne zdania — zmierzone na żywym ACM, nie wydedukowane:
+      #   rc=0                            -> ISTNIEJE     (czytamy `status.resources` i `spec.resources`)
+      #   `NOT_FOUND: Service perimeter not found`  -> BRAK  (granicy nie ma; to jest ZDANIE, nie awaria)
+      #   `PERMISSION_DENIED` / cokolwiek innego   -> NIE_WIADOMO (nigdy „nie ma")
+      #
+      # DRUGA POŁOWA: KROK ASERTUJE PRZYNALEŻNOŚĆ, a nie tylko drukuje zbiory. Wypisany `status.resources`
+      # wiązał dowód „granica blokuje" z rzeczywistością wyłącznie przez człowieka czytającego log —
+      # a sondowany projekt mógł w tym zbiorze w ogóle nie stać.
+      #
+      # Mapowanie `project_id` -> `project_number` bierzemy z DEKLARACJI repo, nie z `gcloud projects
+      # describe`: tożsamość `plan` ma wyłącznie role org-level i NIE MA `resourcemanager.projects.get`,
+      # a pomiar, który do działania wymaga poszerzenia uprawnień, kupuje bramkę kosztem tego, co chroni.
+      # To jest odczyt NAZWY, nie stanu — zbiór członków nadal pochodzi wyłącznie z API.
       - name: stan granicy w chwili pomiaru
         env:
           PROJEKT: ${{ github.event.inputs.project }}
+          PERIMETR_WEJSCIE: ${{ github.event.inputs.perimetr }}
+          POLITYKA_WEJSCIE: ${{ github.event.inputs.polityka }}
         run: |
-          POLITYKA=$(python3 -c 'import yaml;print(yaml.safe_load(open("perimeter/policy.yaml"))["organization"]["access_policy_name"])')
-          NAZWA=$(python3 -c 'import yaml;print(yaml.safe_load(open("perimeter/policy.yaml"))["perimeter"]["name"])')
-          gcloud access-context-manager perimeters describe "$NAZWA" --policy="$POLITYKA" --format=json > perimetr.json
+          POLITYKA="${POLITYKA_WEJSCIE:-$(python3 -c 'import yaml;print(yaml.safe_load(open("perimeter/policy.yaml"))["organization"]["access_policy_name"])')}"
+          NAZWA="${PERIMETR_WEJSCIE:-$(python3 -c 'import yaml;print(yaml.safe_load(open("perimeter/policy.yaml"))["perimeter"]["name"])')}"
+          set +e
+          gcloud access-context-manager perimeters describe "$NAZWA" --policy="$POLITYKA" \
+            --format=json > perimetr.json 2> perimetr.err
+          RC=$?
+          set -e
+          export RC NAZWA POLITYKA
           python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
-          import json, os, pathlib
-          d = json.loads(pathlib.Path("perimetr.json").read_text())
-          egz = d.get("status", {}).get("resources") or []
-          dry = d.get("spec", {}).get("resources") or []
+          import json, os, pathlib, yaml
+
+          rc = int(os.environ["RC"])
+          projekt, nazwa, polityka = os.environ["PROJEKT"], os.environ["NAZWA"], os.environ["POLITYKA"]
+          blad = pathlib.Path("perimetr.err").read_text().strip() if pathlib.Path("perimetr.err").exists() else ""
+          egz, dry = [], []
+          if rc == 0:
+              d = json.loads(pathlib.Path("perimetr.json").read_text())
+              egz = d.get("status", {}).get("resources") or []
+              dry = d.get("spec", {}).get("resources") or []
+              granica = "ISTNIEJE"
+          elif "NOT_FOUND" in blad:
+              granica = "BRAK"
+          else:
+              granica = "NIE_WIADOMO"
+
+          numer = projekt if projekt.isdigit() else None
+          if numer is None:
+              for m in (yaml.safe_load(pathlib.Path("perimeter/projects.yaml").read_text()) or {}).get("members", []):
+                  if m.get("project_id") == projekt:
+                      numer = str(m.get("project_number"))
+                      break
+          if numer is None:
+              przynaleznosc = "NIE_WIADOMO"      # nie wiemy, o czyjej granicy mówi ten pomiar
+          elif granica != "ISTNIEJE":
+              przynaleznosc = "BEZ_GRANICY"
+          elif f"projects/{numer}" in egz:
+              przynaleznosc = "STATUS"
+          elif f"projects/{numer}" in dry:
+              przynaleznosc = "SPEC"
+          else:
+              przynaleznosc = "POZA"
+
+          pathlib.Path("stan-granicy.json").write_text(json.dumps({
+              "granica": granica, "przynaleznosc": przynaleznosc, "numer": numer,
+              "perimetr": nazwa, "polityka": polityka, "status": egz, "spec": dry, "blad": blad[-400:],
+          }))
           print("### stan granicy odczytany z API\n")
+          print(f"- perimetr: `{nazwa}` w polityce `{polityka}` — **{granica}**")
+          if granica != "ISTNIEJE" and blad:
+              print(f"- odpowiedź API: `{blad.splitlines()[-1][:220]}`")
           print(f"- konfiguracja EGZEKWOWANA (`status.resources`): {egz or 'PUSTA'}")
           print(f"- konfiguracja DRY-RUN (`spec.resources`): {dry or 'PUSTA'}")
-          print(f"- sondowany projekt: `{os.environ['PROJEKT']}`\n")
+          print(f"- sondowany projekt: `{projekt}` (numer `{numer or 'NIEZNANY'}`) — **{przynaleznosc}**\n")
           PY
 
       - name: sondy
@@ -201,8 +280,13 @@ jobs:
           PROJEKT: ${{ github.event.inputs.project }}
           KANAREK: ${{ github.event.inputs.kanarek }}
         run: |
+          # `python3 … | tee` oddaje kod wyjścia OSTATNIEGO ogniwa potoku, czyli `tee` (zawsze 0), a domyślna
+          # powłoka Actions to `bash -e` BEZ `pipefail`. Bez tej linii `sys.exit()` niżej nie miał jak
+          # zaczerwienić kroku: werdykt drukował NIEZGODNOSCI, a job kończył się na zielono. Ta sama
+          # przyczyna zjadła już raz drugie źródło dowodu w kroku audytowym (patrz jego komentarz).
+          set -o pipefail
           python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
-          import os, pathlib, sys
+          import json, os, pathlib, sys
 
           # Marker odmowy VPC-SC w ODPOWIEDZI API. `vpcServiceControlsUniqueIdentifier` jest jedynym polem,
           # które niesie wyłącznie ta jedna przyczyna — komunikat tekstowy bywa przepisywany między wersjami
@@ -261,10 +345,49 @@ jobs:
                   return "BRAK ROLI"              # NIE jest dowodem na granice
               return "PADLO Z INNEGO POWODU"
 
+          # ================================================================================
+          # TRZY STANY GRANICY — czytane z pliku, który zapisał krok „stan granicy w chwili pomiaru"
+          # ================================================================================
+          # „Granica blokuje", „granica nie blokuje" i „nie udało się zmierzyć" to trzy różne zdania
+          # o świecie. Przed tą zmianą trzecie nie istniało: brak perimetru wywracał krok wcześniej,
+          # więc wyglądał tak samo jak brak uprawnień. Tu każde z nich dostaje własny TYTUŁ ADNOTACJI
+          # — nośnik werdyktu czytelny z API bez otwierania logu, bo kolor przebiegu werdyktu nie niesie.
+          #
+          # `nierozstrzygniete` jest listą OSOBNĄ od `bledy` i ma własny kod wyjścia (2 zamiast 1):
+          # „nie wiem" nigdy nie może zostać zwinięte do „nie zgadza się", bo to drugie sugeruje pomiar,
+          # którego nie było.
+          stan = json.loads(pathlib.Path("stan-granicy.json").read_text()) \
+              if pathlib.Path("stan-granicy.json").exists() \
+              else {"granica": "NIE_WIADOMO", "przynaleznosc": "NIE_WIADOMO", "blad": "brak stan-granicy.json"}
+          granica, przynaleznosc = stan["granica"], stan["przynaleznosc"]
+          bledy, nierozstrzygniete = [], []
+
+          if granica == "NIE_WIADOMO":
+              nierozstrzygniete.append(
+                  f"nie udalo sie odczytac perimetru `{stan.get('perimetr')}` w polityce "
+                  f"`{stan.get('polityka')}`: {stan.get('blad', '')[:200]}")
+          elif granica == "BRAK":
+              # GRANICY NIE MA. To jest werdykt o świecie, a nie awaria pomiaru — i przy `blocked`
+              # jest werdyktem NEGATYWNYM: nie ma czego przypisać żadnej odmowie.
+              if oczekiwanie == "blocked":
+                  bledy.append(f"GRANICY NIE MA: perimetr `{stan.get('perimetr')}` nie istnieje, wiec "
+                               f"zadna obserwacja z tego przelotu nie dowodzi ochrony")
+          elif przynaleznosc == "NIE_WIADOMO":
+              nierozstrzygniete.append(
+                  f"nie wiadomo, czy `{os.environ['PROJEKT']}` nalezy do perimetru — brak jego numeru "
+                  f"w `perimeter/projects.yaml`; sondy zmierzyly cos, ale nie wiadomo, czyja to granica")
+          elif oczekiwanie == "blocked" and przynaleznosc != "STATUS":
+              # Bez tej asercji „granica blokuje" wiązał z rzeczywistością wyłącznie człowiek czytający log.
+              bledy.append(f"PROJEKT NIE JEST W KONFIGURACJI EGZEKWOWANEJ (`{przynaleznosc}`) — odmowy "
+                           f"z tego przelotu NIE WOLNO przypisac promocji tego projektu")
+          elif oczekiwanie == "open" and przynaleznosc == "STATUS":
+              bledy.append("BASELINE MIERZONY NA GRANICY, KTORA JUZ EGZEKWUJE — przelot `open` ma ustalic, "
+                           "ze wywolania dzialaja PRZED promocja; tu projekt juz jest w `status.resources`")
+
           print(f"## boundary-probe — {os.environ['PROJEKT']}, oczekiwanie `{oczekiwanie}`\n")
+          print(f"**Granica: {granica} · sondowany projekt: {przynaleznosc}**\n")
           print("| sonda | rc | werdykt | po co |")
           print("|---|---|---|---|")
-          bledy = []
           for nazwa, (ma_przejsc_open, ma_przejsc_blocked, po_co) in PLAN.items():
               out = pathlib.Path(f"sondy/{nazwa}.out")
               rc = int(pathlib.Path(f"sondy/{nazwa}.rc").read_text().strip())
@@ -293,12 +416,32 @@ jobs:
               print("> KANAREK ROZBROJONY: obie sondy `kanarek-*` maja dostac ODMOWE. Ten przelot jest "
                     "KONTROLA ANTY-TAUTOLOGICZNA dla przelotu `uzbrojony` — bez niego „poziom wpuszcza\" "
                     "moglo by znaczyc „ta metoda i tak zawsze przechodzi\".")
+          # NIEROZSTRZYGNIETE MA PIERWSZEŃSTWO. Gdy nie wiemy, w jakim stanie jest granica, lista
+          # niezgodności sond opisuje co najwyżej awarię środowiska — podanie jej jako werdyktu byłoby
+          # udawaniem, że pomiar się odbył.
+          if nierozstrzygniete:
+              print("\n**WERDYKT NIEROZSTRZYGNIETY — nie zmierzono stanu granicy:**")
+              for n in nierozstrzygniete:
+                  print(f"- {n}")
+              print("\n> To NIE jest zdanie `granica nie dziala`. Powtorz przelot po usunieciu przyczyny.")
+              print("::error title=WERDYKT NIEROZSTRZYGNIETY (nie zmierzono stanu granicy)::"
+                    + " · ".join(nierozstrzygniete)[:600])
+              sys.exit(2)
           if bledy:
               print("\n**NIEZGODNOSCI:**")
               for b in bledy:
                   print(f"- {b}")
+              # Tytuł adnotacji nazywa NAJWAŻNIEJSZĄ przyczynę, żeby dało się ją odczytać z API bez logu.
+              tytul = ("GRANICY NIE MA" if granica == "BRAK"
+                       else "PROJEKT NIE JEST W KONFIGURACJI EGZEKWOWANEJ"
+                       if oczekiwanie == "blocked" and przynaleznosc not in ("STATUS", "NIE_WIADOMO")
+                       else "GRANICA ZACHOWUJE SIE INACZEJ NIZ OCZEKIWANO")
+              print(f"::error title={tytul}::" + " · ".join(bledy)[:600])
               sys.exit(1)
-          print("\n**Wszystkie sondy zgodne z oczekiwaniem.**")
+          slowo = ("granica NIE ISTNIEJE — wywolania przeszly, bo nie ma czego blokowac"
+                   if granica == "BRAK" else
+                   f"granica ISTNIEJE, projekt w konfiguracji `{przynaleznosc}`")
+          print(f"\n**Wszystkie sondy zgodne z oczekiwaniem** ({slowo}).")
           PY
 
       # Drugi, NIEZALEŻNY dowód: wpis w audit-logu. Odpowiedź API i log powstają w dwóch różnych miejscach,
@@ -439,4 +582,6 @@ jobs:
           path: |
             sondy/
             odmowy.json
+            stan-granicy.json
+            perimetr.err
           retention-days: 30

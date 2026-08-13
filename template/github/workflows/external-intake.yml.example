@@ -127,6 +127,9 @@ jobs:
           SOURCE_REPO: ${{ inputs.source_repository }}
           PROJECT_ID: ${{ inputs.project_id }}
           CHANGE_REF: ${{ inputs.change_ref }}
+          # Renderer zapisuje TU swoje argumenty, zeby dalo sie powtorzyc dokladnie to samo wywolanie na
+          # innej bazie — patrz krok „swieza baza" nizej i naglowek `tools/swieza_baza.py`.
+          RENDER_ARGV_ZAPIS: ${{ runner.temp }}/render-argv.json
         run: |
           python3 - <<'PY'
           import json, os, re, subprocess, sys
@@ -235,6 +238,63 @@ jobs:
           fi
           conftest test --policy policy --namespace vpcsc.onboarding declarations.json
 
+      # GALAZ MA POWSTAC Z `main` ODCZYTANEGO TERAZ, A NIE Z COMMITA SPRZED BRAMEK. Miedzy checkoutem
+      # a pushem mija kilkadziesiat sekund; merge, ktory w tym oknie ruszy `.github/workflows/**`,
+      # sprawia, ze push galezi zbudowanej ze STARSZEGO `main` zostaje odrzucony jako proba modyfikacji
+      # workflowa — mimo ze commit zgloszenia dotyka wylacznie pliku czlonkow. Pelny mechanizm, powod,
+      # dla ktorego `add-paths` tego NIE zamyka, i powod, dla ktorego `workflows: write` nie jest
+      # naprawa, stoja w naglowku `tools/swieza_baza.py`.
+      #
+      # KROK STOI TUTAJ, ZA BRAMKAMI, A NIE PRZED NIMI, I TO JEST WYBOR: okno wyscigu to czas MIEDZY tym
+      # krokiem a pushem, wiec im pozniej, tym wezej (~1 s zamiast ~10 s przy ustawieniu przed bramkami).
+      # Kosztem jest to, ze przy przerenderowaniu trzeba bramki powtorzyc — krok nizej.
+      #
+      # ZMIERZONE, NIE WYWNIOSKOWANE (#2013). Wyscig jest niedeterministyczny, wiec zostal wywolany
+      # CELOWO: dispatch kanalu ticketowego w trybie testowym, a **6 s pozniej** merge pull requesta
+      # dotykajacego `.github/workflows/**`. Bez tego kroku push galezi poszedl 24 s po dispatchu:
+      #
+      #     ! [remote rejected] onboard/<dywizja>-<projekt> -> onboard/<dywizja>-<projekt>
+      #       (refusing to allow a GitHub App to create or update workflow
+      #        `.github/workflows/external-intake.yml` without `workflows` permission)
+      #
+      # NAZWANY PLIK NIE BYL PRZEZ TEN PRZEBIEG DOTKNIETY W OGOLE — commit zgloszenia zmienial wylacznie
+      # plik czlonkow, a `external-intake.yml` to workflow SASIEDNIEGO kanalu. To jest dowod wprost, ze
+      # kontrola porownuje DRZEWO galezi z galezia domyslna, a nie zawartosc commita — i ze `add-paths`,
+      # ktore ten kanal juz ma, tego nie zamyka.
+      #
+      # Ten sam przebieg pokazal drugi objaw: krok sprzatajacy dostal `gh: Reference does not exist
+      # (HTTP 422)`, bo odmowa nastapila PRZED powstaniem galezi. Jedyna adnotacja, jaka zobaczyl
+      # wnioskodawca, brzmiala `The process '/usr/bin/git' failed with exit code 1` — bez tytulu
+      # i bez werdyktu. Stad krok werdyktu nizej.
+      - name: swieza baza — przenies wniosek na `main` odczytany tuz przed pushem
+        id: swieza_baza
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          BAZA_PRZY_STARCIE: ${{ github.sha }}
+          ARGV_RENDER: ${{ runner.temp }}/render-argv.json
+        run: |
+          python3 tools/swieza_baza.py --galaz "$DEFAULT_BRANCH" --baza "$BAZA_PRZY_STARCIE" \
+            --argv-render "$ARGV_RENDER"
+
+      # BRAMKI TRESCI JESZCZE RAZ — TYLKO GDY DRZEWO SIE ZMIENILO. Ponowny render dopisuje wniosek do
+      # INNEGO pliku czlonkow niz ten, ktory bramki widzialy: doszedl czyjs wpis, wiec i duplikaty,
+      # i budzet atrybutow, i reguly onboardingu licza sie na nowo. Bez tego kroku kanal zatwierdzalby
+      # drzewo, ktorego zadna bramka nie ogladala.
+      #
+      # Komendy sa te same, co wyzej, i to jest KOPIA — pilnowana asercja w selfteście (porownuje
+      # tresc obu krokow), bo kopia bramki, ktora sie rozjedzie, jest gorsza od jej braku.
+      - name: bramki tresci po przerenderowaniu
+        if: steps.swieza_baza.outputs.przerenderowano == 'true'
+        run: |
+          trap 'echo "::error title=WNIOSEK ODRZUCONY PRZEZ BRAMKE TRESCI::Narzedzia powstaly i bramka odrzucila TRESC tego zgloszenia. Powtorzenie niczego nie zmieni - poprawka jest po stronie wniosku."; echo "## ❌ WERDYKT: ODRZUCONY — treść zgłoszenia nie przeszła bramki" >> "$GITHUB_STEP_SUMMARY"' ERR
+          check-jsonschema --schemafile schemas/projects.schema.json perimeter/projects.yaml
+          if [ -f stan/contract.json ]; then
+            python3 tools/collect_declarations.py --contract stan/contract.json > declarations.json
+          else
+            python3 tools/collect_declarations.py > declarations.json
+          fi
+          conftest test --policy policy --namespace vpcsc.onboarding declarations.json
+
       # TOKEN APPA POWSTAJE TUTAJ, NIE PRZYJEZDZA GOTOWY W SEKRECIE. Token instalacji GitHub Appa wygasa
       # po GODZINIE, wiec wklejony do `secrets.*` dziala do konca dnia i milknie nazajutrz — awaria bez
       # zadnej zmiany w kodzie, ktora by ja tlumaczyla, i najgorszy mozliwy tryb awarii dla kanalu, ktory
@@ -325,16 +385,104 @@ jobs:
       # a jednoczesnie gotowa do otwarcia recznie przez kogos, kto nie widzial przebiegu, ktory ja
       # wyprodukowal. Zmierzone na wdrozeniu: galaz `external/example-division-prj-example-vertex-dev` zostala
       # po nieudanym zgloszeniu. Kasujemy to, co utworzyl TEN przebieg, i tylko to.
-      - name: clean up the branch when the pull request was refused
+      - name: dlaczego pull request nie powstal — werdykt i sprzatniecie po sobie
         if: failure() && steps.pr.outcome == 'failure'
         env:
           GH_TOKEN: ${{ github.token }}
           BRANCH: external/${{ steps.render.outputs.division }}-${{ steps.render.outputs.project_id }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          # Baza, z ktorej realnie poszedl push. Pusta = krok „swieza baza" nie doszedl do skutku, wiec
+          # spadamy na commit ze startu przebiegu — werdykt ma sie degradowac, a nie znikac.
+          BAZA_PUSHU: ${{ steps.swieza_baza.outputs.baza || github.sha }}
         run: |
-          otwarte=$(gh pr list --head "$BRANCH" --state open --json number --jq 'length')
-          if [ "$otwarte" != "0" ]; then
-            echo "::notice::galaz $BRANCH ma otwarty pull request — nie usuwam"
-            exit 0
+          # CZY GALAZ W OGOLE POWSTALA. To jest jedyne pytanie, ktore rozdziela dwie CALKIEM rozne
+          # awarie o identycznym kolorze: `create-pull-request` wypycha galaz ZANIM wola API pull
+          # requestow, wiec „galaz jest" znaczy, ze padlo TWORZENIE PR-a, a „galezi nie ma" — ze padl
+          # PUSH. Kod wyjscia kroku jest w obu przypadkach ten sam.
+          if gh api "repos/${GITHUB_REPOSITORY}/git/refs/heads/${BRANCH}" >/dev/null 2>&1; then
+            galaz=jest
+          else
+            galaz=brak
           fi
-          gh api -X DELETE "repos/${GITHUB_REPOSITORY}/git/refs/heads/${BRANCH}" \
-            && echo "::notice::usunieto osierocona galaz $BRANCH"
+
+          # CZY W CZASIE PRZEBIEGU KTOS RUSZYL PLIKI WORKFLOW. To jest podpis wyscigu transportu:
+          # GitHub porownuje wypychana galaz z galezia DOMYSLNA, wiec galaz zbudowana ze starszego
+          # `main` wyglada na modyfikacje workflowa i push leci `remote rejected`.
+          git fetch --no-tags --depth=1 origin \
+            "+refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}" || true
+          ruch=$(git diff --name-only "${BAZA_PUSHU}" "refs/remotes/origin/${DEFAULT_BRANCH}" \
+                   -- .github/workflows 2>/dev/null | tr '\n' ' ')
+
+          {
+            echo "### Zgloszenie NIE utworzylo pull requesta"
+            echo
+            echo "| co sprawdzono | wynik |"
+            echo "|---|---|"
+            echo "| gałąź \`$BRANCH\` po tej stronie | $galaz |"
+            echo "| baza pushu | \`${BAZA_PUSHU}\` |"
+            echo "| pliki workflow zmienione na \`$DEFAULT_BRANCH\` od tej bazy | ${ruch:-brak} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$galaz" = "brak" ] && [ -n "$ruch" ]; then
+            # WYSCIG TRANSPORTU. Bramki tresci przeszly — wniosek jest w porzadku, przegral wyscig
+            # o gałąź. Powtorzenie POMOZE, bo druga proba startuje z bazy zawierajacej tamten merge.
+            echo "::error title=ZGLOSZENIE NIE DOJECHALO - WYSCIG TRANSPORTU::Bramki tresci PRZESZLY. Push galezi przegral z merge'em dotykajacym plikow workflow. Tresc wniosku jest w porzadku - powtorz zgloszenie."
+            {
+              echo
+              echo "## ⚠️ WERDYKT: WNIOSEK NIE ZOSTAŁ ODRZUCONY — przegrał wyścig transportu"
+              echo
+              echo "Bramki treści **przeszły**. Push gałęzi zgłoszenia przegrał z merge'em, który"
+              echo "w czasie tego przebiegu ruszył \`${ruch}\` na \`$DEFAULT_BRANCH\` — GitHub porównuje"
+              echo "wypychaną gałąź z gałęzią domyślną, więc gałąź ze starszej bazy wygląda dla niego na"
+              echo "**modyfikację workflowa**, a token kanału tego prawa nie ma (i nie ma go dostać)."
+              echo
+              echo "**Co zrobić:** złóż zgłoszenie jeszcze raz. Treść jest poprawna — druga próba startuje"
+              echo "z bazy, która już zawiera tamten merge."
+            } >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$galaz" = "jest" ]; then
+            echo "::error title=GALAZ WYPCHNIETA ALE PULL REQUEST ODMOWIONY::Push przeszedl. Odmowa dotyczy UTWORZENIA pull requesta - patrz komentarz przy kroku otwierajacym PR. Powtorzenie nie pomoze bez zmiany po stronie poswiadczenia."
+            {
+              echo
+              echo "## ❌ WERDYKT: WNIOSEK NIE ZOSTAŁ ODRZUCONY — padło utworzenie pull requesta"
+              echo
+              echo "Plik członka został wyrenderowany i przeszedł bramki, ale utworzenie pull requesta"
+              echo "odmówiono. Najczęstsza przyczyna: PR otwiera \`GITHUB_TOKEN\`, a ustawienie repozytorium"
+              echo "\`Allow GitHub Actions to create and approve pull requests\` jest wyłączone. Naprawa"
+              echo "to token instalacji GitHub Appa (\`vars.INTAKE_APP_ID\`), nie włączenie tamtego"
+              echo "przełącznika — patrz komentarz przy kroku otwierającym PR."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            # NIE ZGADUJEMY. Push padl, ale nie na wyscigu o pliki workflow — a „nie wiem" powiedziane
+            # wprost jest tansze niz werdykt, ktory wysyla wnioskodawce w zla strone.
+            echo "::error title=PUSH GALEZI NIE POWIODL SIE - PRZYCZYNA NIEROZPOZNANA::Bramki tresci przeszly i galaz nie powstala. To NIE jest odrzucenie wniosku. Przyczyna nie pasuje do znanego wyscigu o pliki workflow - przeczytaj log kroku otwierajacego PR."
+            {
+              echo
+              echo "## ❌ WERDYKT: WNIOSEK NIE ZOSTAŁ ODRZUCONY — push padł z nierozpoznanego powodu"
+              echo
+              echo "Bramki treści przeszły, gałąź nie powstała, a pliki workflow na \`$DEFAULT_BRANCH\`"
+              echo "się nie zmieniły — czyli **nie** jest to znany wyścig transportu. Log kroku"
+              echo "otwierającego pull request niesie komunikat gita."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # SPRZATNIECIE — ROZDZIELONE OD WERDYKTU. „Nie ma czego kasowac" i „kasowanie padlo" to dwa
+          # rozne zdania o swiecie, a dotad oba konczyly sie czerwonym krokiem: przy odmowie PRZED
+          # powstaniem galezi `gh api -X DELETE` zwracal `Reference does not exist (HTTP 422)` i czerwienil
+          # przebieg bez konsekwencji, MASKUJAC prawdziwa przyczyne w podsumowaniu. Sprzatanie
+          # zaprojektowano pod scenariusz „galaz jest, PR-a nie ma" i tam nadal dziala.
+          if [ "$galaz" = "brak" ]; then
+            echo "::notice::nie ma czego sprzatac — galaz $BRANCH nie powstala"
+          else
+            otwarte=$(gh pr list --head "$BRANCH" --state open --json number --jq 'length')
+            if [ "$otwarte" != "0" ]; then
+              echo "::notice::galaz $BRANCH ma otwarty pull request — nie usuwam"
+            elif gh api -X DELETE "repos/${GITHUB_REPOSITORY}/git/refs/heads/${BRANCH}"; then
+              echo "::notice::usunieto osierocona galaz $BRANCH"
+            else
+              echo "::error title=SPRZATNIECIE GALEZI NIE POWIODLO SIE::Galaz $BRANCH istnieje bez pull requesta i NIE zostala usunieta. Zostaje gotowa do otwarcia recznie przez kogos kto nie widzial tego przebiegu."
+            fi
+          fi
+
+          # Krok konczy sie czerwono, bo wypisal `::error::` — w tym repozytorium kazda adnotacja bledu
+          # stoi obok niezerowego kodu wyjscia (job i tak jest juz czerwony od kroku otwierajacego PR).
+          exit 1

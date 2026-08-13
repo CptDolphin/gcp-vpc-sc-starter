@@ -2631,6 +2631,79 @@ nowych asercji jest czerwonych (6 × osiągalność + greenfield), a dwie premis
 repo nie zarządza (`manage_skeleton: false`), musi istnieć przed pierwszym apply — tak jak dotąd; bramka
 nie zamienia brownfieldu w greenfield i nie próbuje odgadnąć, czy cudzy szkielet stoi.
 
+## DEC-39 — Sonda ma trzy werdykty, nie dwa: „blokuje" · „nie blokuje" · „nie udało się zmierzyć"
+
+**Decyzja.** Obie sondy granicy — ingressowa (`.github/workflows/boundary-probe.yml`) i egressowa
+(`tools/sonda_egress_wewnetrzna.py`) — orzekają w **trzech** stanach i nazywają je w treści werdyktu.
+Brak perimetru przestaje być krokiem, który padł; niemożność odczytu przestaje być „granica nie działa".
+Sonda egressowa dostaje model oczekiwań (`sonda-oczekiwanie`), skończoną liczbę rund i **kod wyjścia**:
+`0` = zgodne, `1` = niezgodne z oczekiwaniem, `2` = nie udało się zmierzyć. Ten sam podział na kody
+obowiązuje w kroku werdyktu sondy ingressowej, a nośnikiem jest **tytuł adnotacji** (DEC-26).
+
+**Dlaczego — dwa różne defekty tej samej klasy, oba zmierzone.**
+
+*Egress.* Skrypt wykonywał wywołania i **drukował** ich wynik. Nie miał modelu oczekiwań, nie liczył
+niezgodności, nie zwracał werdyktu i nie miał niezerowego kodu wyjścia — a pętla była nieskończona, więc
+kodu wyjścia nie było **gdzie** oddać. Przy nieistniejącym perimetrze, przy maszynie w projekcie spoza
+granicy i w oknie świeżej sieci **każda** sonda dostaje `200`, więc skrypt wypisywał `werdykt=PRZESZLO`
+w kółko. Ten output jest co do kształtu **nieodróżnialny** od „reguła egress, którą właśnie uzbroiłem,
+przepuszcza wywołanie". Instrument pomiarowy, który zawsze pokazuje wynik pozytywny, nie mierzy niczego.
+
+*Ingress.* Krok „stan granicy w chwili pomiaru" wołał `perimeters describe` pod domyślnym `bash -e`.
+Nieistniejący perimetr wywracał krok i cały job — sonda mówiła wtedy „nie udało się", czyli dokładnie to
+samo, co przy braku uprawnień, błędzie sieci i literówce w nazwie. Zmierzone na żywym przebiegu:
+`stan granicy w chwili pomiaru` → `failure`, `sondy` → `skipped`, `werdykt` → `skipped`. Przelot, który
+miał pokazać, że ochrona zniknęła, pokazał, że pomiar się nie odbył.
+
+*Trzeci defekt, znaleziony przy okazji i tej samej klasy.* Krok werdyktu kończył się `python3 … | tee`,
+a domyślna powłoka Actions to `bash -e` **bez** `pipefail`, więc `sys.exit(1)` nie miał jak zaczerwienić
+kroku. Zmierzone lokalnie na tym samym konstrukcie: bez `pipefail` powłoka widzi `rc=0`, z `pipefail`
+przerywa. Ta sama przyczyna zjadła już raz drugie źródło dowodu w kroku audytowym.
+
+**Trzy stany, i dlaczego akurat trzy.** `403` z ACM to **„nie wiadomo"**, a nie „nie ma" — ten sam wzorzec,
+co `200/404/403` w `tools/deny_check.sh`. Zwinięcie „nie wiem" do „nie zgadza się" sugeruje pomiar,
+którego nie było; zwinięcie go do „zgadza się" jest fałszywym potwierdzeniem ochrony. Zmierzone na żywym
+API: nieistniejąca **nazwa perimetru** → `NOT_FOUND: Service perimeter not found`, numer **polityki bez
+dostępu** → `PERMISSION_DENIED: The caller does not have permission`. Dwa różne komunikaty, dwa różne
+werdykty — i oba dają się wywołać na żądanie, więc kontrola anty-tautologiczna nie potrzebuje atrapy.
+
+**Czwarty stan sondy egressowej: `OKNO-SWIEZEJ-SIECI`.** Kombinacja „własny projekt ODMAWIA + wyjścia
+PRZECHODZĄ" nie występuje w żadnym innym stanie i jest ściśle **gorsza** niż „poza granicą": cała ścieżka
+eksfiltracji jest wtedy przejezdna od końca do końca. Raportowanie jej jako „poza granicą" gubi jedyny
+moment, w którym ta informacja jest coś warta.
+
+**Przynależność jest ASERTOWANA, nie drukowana.** Krok stanu granicy wypisywał `status.resources`
+i `spec.resources`, ale nie pytał, czy sondowany projekt w którymkolwiek z nich stoi — dowód „granica
+blokuje" wiązał z rzeczywistością wyłącznie człowiek czytający log. Mapowanie `project_id` → numer bierze
+się z **deklaracji repo**, nie z `gcloud projects describe`: tożsamość `plan` ma wyłącznie role org-level
+i nie ma `resourcemanager.projects.get`. Pomiar, który do działania wymaga poszerzenia uprawnień, kupuje
+bramkę kosztem tego, co chroni. To jest odczyt **nazwy**, nie stanu — zbiór członków nadal pochodzi z API.
+
+**Bramka: selftest URUCHAMIA sondę, a nie czyta jej tekstu.** Ten defekt przeszedł przez wszystkie
+dotychczasowe bramki, bo atrapa i sonda **wyglądają w kodzie tak samo**, dopóki nikt ich nie wykona.
+Selftest stawia więc własny serwer HTTP udający serwer metadanych **oraz** sondowane API, uruchamia
+`tools/sonda_egress_wewnetrzna.py` jako podproces i **liczy trafienia**: runda, która tylko drukuje, nie
+zostawia trafień i nie zdaje testu. Ten sam zabieg dla sondy ingressowej — kod obu heredoków (`odczyt
+stanu` i `werdykt`) jest wycinany z workflowa i wykonywany na spreparowanych wejściach, których nigdy nie
+widział. `timeout` podprocesu jest asercją samą w sobie: pętla bez górnej granicy rund nie ma jak oddać
+werdyktu.
+
+**Co odrzucono i dlaczego.**
+
+| wariant | dlaczego nie |
+|---|---|
+| sonda egressowa czyta stan granicy z ACM i na tym stawia werdykt | z wnętrza granicy się **nie da** — ACM nie należy do `vpcAccessibleServices.allowedServices`, więc odczyt dostaje `SERVICE_NOT_ALLOWED_FROM_VPC`. Odczyt zostaje jako **dodatek** (`sonda-perimetr`) i jest informacją w każdym z czterech przypadków, ale werdykt stawia RUCH — bo to ruch jest rzeczą, dla której perimetr istnieje |
+| `continue-on-error: true` na kroku odczytu stanu granicy | krok przestałby wywracać job, ale nadal nie **mówiłby**, co się stało; per-krokowego `outcome` API nie wystawia (DEC-26), więc „nie ma granicy" i „nie mam uprawnień" zostałyby nieodróżnialne |
+| wywalać sondę egressową przy braku granicy | brak granicy to legalny stan świata, który trzeba **umieć zmierzyć** — po to jest tryb `poza-granica` i po to kończy się on zerem |
+| zostawić nieskończoną pętlę i czytać werdykt okiem z portu szeregowego | to jest dokładnie stan sprzed tej decyzji. Werdykt, którego nie ma w kodzie wyjścia, mieszka w człowieku porównującym wypis z macierzą w docstringu |
+| jeden kod wyjścia dla „niezgodne" i „nie zmierzono" | kolor nie niesie werdyktu (DEC-26). Dwa różne stany świata pod jednym kodem to ta sama pomyłka, którą ten plik naprawia piętro wyżej |
+| asercje tekstowe („czy w pliku stoi `set +e`") zamiast wykonania | przeszłyby także wtedy, gdyby klasyfikacja błędu była zepsuta — a to ona rozstrzyga różnicę między „nie ma" a „nie wiem" |
+
+**Residual, nazwany wprost.** Tryb `obserwacja` kończy się zerem **zawsze** — służy do mierzenia
+propagacji (rollback ma dwie różne liczby) i jego własny wypis mówi wprost, że niczego nie dowodzi.
+Przelot bez oczekiwań, który wygląda na dowód, był całą treścią tego zgłoszenia; przelot bez oczekiwań,
+który się do tego przyznaje, jest narzędziem pomiarowym.
+
 ---
 
 ## DEC-37 — Uprawnienie CI rozstrzyga CZĘSTOTLIWOŚĆ, nie groźność nazwy: `accessLevels.delete` TAK, `servicePerimeters.create` NIE
@@ -2756,10 +2829,53 @@ a raport podaje ich liczbę wprost. Fałszywe okno powstaje **wyłącznie** w ko
 | zostawić krok i dopisać przypis „u kogoś innego robi to inny zespół" | przypis nie zmienia tego, że krok stoi w numerowanej ścieżce i wykonujący do niego dojdzie. Procedura, która w połowie oddaje sterowanie, nie nazywając przekazania, jest gorsza od procedury, która się kończy |
 | wyciąć z materiału warianty tworzące i kasujące projekty | to one dają reprodukowalność „od zera" i możliwość ćwiczenia odtworzenia. Problemem jest brak etykiety, nie obecność wariantu — koszt adnotacji bliski zeru, koszt utraty ćwiczenia wysoki |
 | czekać z przepisaniem procedury na automat wykrywający martwego członka | odwrotna kolejność. Uzgodnienie i rekoncyliacja są tańsze, działają bez kodu i dopiero one mówią automatowi, **jakiego czasu detekcji** ma pilnować |
+## DEC-40 — Nazwa sieci w alercie okna jest HIPOTEZĄ, bo wpis audytowy maszyny jej nie niesie
+
+**Decyzja.** Detektor okna świeżej sieci (DEC-32) **zostaje fail-closed**, ale przestaje przedstawiać wynik
+dopasowania jako odczyt. Szczegół trafienia niesie `siec_odczytana` **oraz `podsiec`**, adnotacja przebiegu
+i treść alertu oznaczają dopasowanie fail-closed znacznikiem **`[HIPOTEZA]`**, a dyżurny dostaje referencję
+podsieci — jedyną, którą wpis realnie zawiera. Ścisłe dopasowanie pary wymaga mapy podsieć→sieć i jest
+osobnym zgłoszeniem, bo dotyka **filtra sinka org-level** (materiał: `v1.compute.subnetworks.insert`).
+
+**Dlaczego.** Pierwotna implementacja czytała `protoPayload.request.networkInterfaces[].network` i traktowała
+pustą listę jako rzadki przypadek „przyciętego `request`". **Odczyt żywego wpisu dostarczonego przez sink
+(2026-08-13, przelot dowodowy #2028) pokazał, że dla sieci CUSTOM-MODE tego pola nie ma w ogóle** —
+wpis niesie wyłącznie `subnetwork`:
+
+```
+request.networkInterfaces[0].subnetwork = .../projects/<p>/regions/<r>/subnetworks/<s>
+request.networkInterfaces[0].network    = (pola NIE MA)
+```
+
+Przeszukanie **całego** wpisu pod kątem nazwy sieci dało zero trafień; drugie miejsce z tą informacją,
+`authorizationInfo[].resource`, wskazuje również podsieć. Wpis `operation.last` niesie `request` złożony
+wyłącznie z `@type`, więc jest pusty niezależnie od trybu sieci (scalanie i tak bierze `operation.first`).
+
+**Skutek, który trzeba nazwać, bo zmienia znaczenie metryki.** Ścieżka fail-closed nie jest wyjątkiem, tylko
+**ścieżką domyślną**: w projekcie, w którym w tym samym oknie powstała świeża sieć **i** powstała maszyna
+w sieci **dojrzałej**, alert zapali się na tej drugiej i wskaże w adnotacji nazwę tej pierwszej. Kierunek
+błędu pozostaje bezpieczny — realnego okna nie da się przeoczyć — ale precyzja pary jest **mniejsza, niż
+sugeruje nazwa metryki**. Alert, który nazywa zasób, którego nie odczytał, uczy dyżurnego, że treść alertu
+jest orientacyjna; to jest ta sama klasa szkody co szum, tylko wolniejsza.
+
+**Kontrola, która tego nie złapała, i dlaczego.** Selftest miał asercję pozytywną („maszyna wskazuje tę sieć")
+zbudowaną na **fixture z kształtu dokumentacyjnego**, nie z żywego wpisu — testowała więc wariant, którego
+produkcja nie wykonuje. Asercje `ZYWY ksztalt: …` stoją teraz na kopii wpisu zdjętego z kubełka sinka.
+
+**Co odrzucono i dlaczego.**
+
+| wariant | dlaczego nie |
+|---|---|
+| dopisać `v1.compute.subnetworks.insert` do filtra sinka i złożyć mapę podsieć→sieć **w tym samym MR** | to jest właściwe docelowe rozwiązanie, ale zmienia **sink org-level** — zasób wspólny dla całej kampanii, applikowany ręcznie przez człowieka z `logging.configWriter`, a zmiana filtra **gubi zdarzenia z okna propagacji** (§9.20 pkt 1). Zmiana semantyki pary zasługuje na własne zgłoszenie i własny pomiar, a nie na doklejenie do przelotu dowodowego |
+| zawęzić dopasowanie do maszyn, których podsieć **nazwą** przypomina sieć (`w1-ew1` → `w1`) | dopasowanie po konwencji nazewniczej, a nie po referencji. Działa dla materiału przykładowego i milczy u każdego, kto nazywa podsieci inaczej — czyli bramka mierzyłaby nasz styl nazw |
+| przestać liczyć maszyny bez czytelnej sieci (odwrócić fail-closed na fail-open) | odwraca kierunek błędu na ten jedyny nieodwracalny: ruch w oknie **nie zostawia śladu** (41 przekroczeń granicy → 0 wpisów audytowych), więc przeoczonego okna nie da się odtworzyć z niczego. Fałszywy alarm kosztuje jedno sprawdzenie w widoku |
+| zostawić kod bez zmian i opisać rozbieżność wyłącznie w runbooku | runbook czyta się **po** alercie, a mylące zdanie stoi **w** alercie. Adnotacja twierdziła „sieć X dostała obciążenie" — zdanie mocniejsze, niż pomiar uprawnia |
 
 ---
 
-## DEC-39 — Dowodem zmiany ręcznej jest ODCZYT z żywego API, nie zielony `apply`
+---
+
+## DEC-41 — Dowodem zmiany ręcznej jest ODCZYT z żywego API, nie zielony `apply`
 
 **Decyzja.** Cztery zmiany, które w tym repozytorium wykonuje człowiek, a nie kanał wejścia — wniosek ręczny
 architekta (`change_ref: manual:`), dodanie profilu do katalogu, dodanie i uzbrojenie access levelu, zmiana
