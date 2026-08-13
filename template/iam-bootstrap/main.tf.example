@@ -649,8 +649,14 @@ resource "google_iam_deny_policy" "vpcsc_guardrail" {
   # `name` jest w tym API niezmienne — zmiana nazwy to destroy+create, czyli okno bez guardrailu, i to
   # wykonane rolą `roles/iam.denyAdmin`, którą świadomie nadaje się na chwilę. Nazwa, która lekko kłamie,
   # jest tańsza niż okno bez ochrony; rozjazd nazwy z treścią nadrabia `display_name` i ten komentarz.
-  name         = local.deny_policy_name
-  display_name = "VPC-SC CI — zakaz kasowania i TWORZENIA perimetru oraz kasowania polityki"
+  name = local.deny_policy_name
+  # LIMIT `display_name` TO 63 BAJTY, NIE ZNAKI — zmierzone na żywym API przy apply DEC-37:
+  #   Error 400: The provided policy's display name length (75) is longer than the maximum allowed (63)
+  # …przy napisie o 73 ZNAKACH. Różnicę robił jeden em-dash (3 bajty w UTF-8); polskie znaki diakrytyczne
+  # kosztują po 2. Trzymamy się ASCII w tym jednym polu, żeby liczba znaków była tu równa liczbie bajtów.
+  # Tryb awarii jest paskudny: rola aktualizuje się w tym samym apply POPRAWNIE, więc stan po błędzie jest
+  # ROZJECHANY (rola nowa, Deny stare) i widać to wyłącznie w kolejnym planie.
+  display_name = "VPC-SC CI: zakaz tworzenia i kasowania perimetru oraz polityki"
 
   rules {
     deny_rule {
