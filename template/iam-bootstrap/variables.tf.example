@@ -30,6 +30,27 @@ variable "github_repository" {
   }
 }
 
+variable "org_resource_suffix" {
+  description = "Sufiks doklejany do nazw obiektów ORG-LEVEL tego stacku (role własne, polityka Deny). Puste = nazwy kanoniczne. Ustaw NIEPUSTE tylko dla drugiej instancji toru w tej samej organizacji (próba generalna, pilot, DR-dry-run)."
+  type        = string
+  default     = ""
+
+  validation {
+    # DLACZEGO TA ZMIENNA W OGÓLE ISTNIEJE (zmierzone #2062, próba generalna odtworzenia toru):
+    # `role_id` roli własnej i nazwa polityki Deny są obiektami ORG-LEVEL — jedna organizacja, jedna nazwa.
+    # Przy nazwach na sztywno DRUGI apply tego stacku w tej samej organizacji pada w POŁOWIE:
+    #   Error: Custom project role organizations/<ORG>/roles/vpcScPerimeterWriter already exists and must be imported
+    # …po utworzeniu ~25 z 27 zasobów, czyli zostawia dokładnie ten stan „którego nie opisuje żaden plik",
+    # przed którym ostrzega README tego katalogu. Konsekwencja jest szersza niż wygoda: bez tej zmiennej
+    # NIE DA SIĘ przećwiczyć odtworzenia toru na organizacji, która już go ma — czyli w jedynym momencie,
+    # w którym ćwiczenie ma sens (DR, pilot obok produkcji, próba przed wdrożeniem produkcyjnym).
+    # Ograniczenie znaków wynika z formatu `role_id` (`[a-zA-Z0-9_.]`, BEZ myślnika) — sufiks musi być
+    # legalny w obu miejscach naraz, bo nazwa polityki Deny dopuszcza wyłącznie `[a-z0-9-]`.
+    condition     = can(regex("^[a-z0-9]{0,12}$", var.org_resource_suffix))
+    error_message = "org_resource_suffix: puste albo 1-12 znaków [a-z0-9] (część wspólna formatów role_id i nazwy polityki Deny)."
+  }
+}
+
 variable "apply_environment" {
   description = "Nazwa environment GitHuba wymaganego do impersonacji konta apply. Token z pull requesta go nie niesie, więc tą tożsamością nie da się posłużyć z PR-a."
   type        = string
