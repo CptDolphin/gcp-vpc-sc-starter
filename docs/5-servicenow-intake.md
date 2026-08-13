@@ -224,14 +224,32 @@ sama pozycja „wymaga człowieka", co App dywizji.
 4. **Bramki treści JESZCZE PRZED PR-em**: `check-jsonschema` na pliku członka i reguły OPA
    (`vpcsc.onboarding`). Wcześniej ich tu nie było i kanał ticketowy polegał wyłącznie na tym, że
    ktoś kiedyś spojrzy na PR — a czy PR w ogóle dostaje bramki, zależy od tokenu, który go otworzył (§3.1).
-5. **PR** przez `create-pull-request`: gałąź `onboard/<division>-<project_id>`, etykiety `onboarding`,
-   `dry-run`, w opisie numer ticketu i checklista dla recenzenta. Gdy utworzenie PR-a zostanie odmówione,
-   workflow **kasuje gałąź, którą przed chwilą wypchnął** — kanał ma paść w całości albo wcale.
-6. **`validate.yml`** na tym PR-ze: schematy → reguły OPA → budżet atrybutów → `terraform fmt/validate/test`
+5. **Świeża baza** (`swieza_baza.py`) — gałąź zgłoszenia ma powstać z `main` odczytanego **tuż przed
+   pushem**, a nie z commita sprzed bramek. Między checkoutem a pushem mija kilkadziesiąt sekund, a merge,
+   który w tym oknie ruszy `.github/workflows/**`, sprawia, że push gałęzi ze starszej bazy leci
+   `remote rejected … without workflows permission` — mimo że commit zgłoszenia dotyka **wyłącznie** pliku
+   członków. GitHub porównuje wypychaną gałąź z gałęzią **domyślną**, nie z jej własną bazą, więc starsza
+   wersja pliku workflow wygląda dla tej kontroli na jego modyfikację. Konsekwencje, które łatwo przeoczyć:
+   `add-paths` tego **nie** zamyka (ogranicza commit, a kontrola patrzy na drzewo), a `workflows: write`
+   **nie jest naprawą** — brak tego uprawnienia jest kontrolą, nie usterką.
+   Gdy w tym samym oknie zmienił się **także plik członków** (wszedł czyjś onboarding), przeniesienie
+   gotowej kopii skasowałoby tamten wpis, więc wniosek jest **renderowany ponownie** na świeżym pliku,
+   a bramki treści lecą **jeszcze raz** — inaczej do PR-a poszłoby drzewo, którego żadna bramka nie widziała.
+6. **PR** przez `create-pull-request`: gałąź `onboard/<division>-<project_id>`, etykiety `onboarding`,
+   `dry-run`, w opisie numer ticketu i checklista dla recenzenta. Gdy krok padnie, workflow **rozstrzyga
+   DLACZEGO i mówi to wprost** — bo `conclusion: failure` wygląda tak samo w trzech różnych sytuacjach,
+   a czerwień kanału wejściowego czyta ktoś **spoza tego repozytorium**:
+   gałęzi nie ma + pliki workflow ruszyły się na `main` → **wyścig transportu**, treść jest w porządku,
+   powtórzenie pomoże · gałąź **jest** → padło utworzenie PR-a (§3.1), powtórzenie nie pomoże ·
+   gałęzi nie ma i nic nie wskazuje na wyścig → „nie rozpoznaję przyczyny", powiedziane wprost zamiast
+   zgadywania. Sprzątanie rozróżnia przy tym **„nie ma czego kasować"** (odmowa nastąpiła przed powstaniem
+   gałęzi — `Reference does not exist`, HTTP 422) od **„kasowanie padło"**; wcześniej oba kończyły się
+   czerwienią, a ta pierwsza maskowała prawdziwą przyczynę w podsumowaniu przebiegu.
+7. **`validate.yml`** na tym PR-ze: schematy → reguły OPA → budżet atrybutów → `terraform fmt/validate/test`
    → tflint. Nic z tego nie dotyka chmury, więc PR nie może zejść na czerwono z powodu credentiali.
-7. **Merge** → `apply.yml` czeka na zatwierdzenie environmentu `perimeter-apply`. Projekt wchodzi do
+8. **Merge** → `apply.yml` czeka na zatwierdzenie environmentu `perimeter-apply`. Projekt wchodzi do
    **konfiguracji dry-run**: naruszenia są logowane, nic nie jest blokowane.
-8. **Po oknie obserwacji** — osobny PR promocyjny (`stage: enforced`) z raportem naruszeń jako dowodem.
+9. **Po oknie obserwacji** — osobny PR promocyjny (`stage: enforced`) z raportem naruszeń jako dowodem.
 
 Sekrety: `SNOW_INSTANCE`, `SNOW_USER`, `SNOW_TOKEN` w secrets repozytorium. `snow_verify.py` ich nie loguje —
 w razie błędu wypisuje przyczynę, nie odpowiedź API.
@@ -250,6 +268,8 @@ w razie błędu wypisuje przyczynę, nie odpowiedź API.
 | projekt już jest w `members/` **pod tą samą dywizją** | `render_member.py` przerywa na kroku renderowania, **PR nie powstaje**; komunikat podaje aktualny `stage` | to nie onboarding, a zmiana istniejącego wpisu — edytuj plik PR-em. Bez tej bramki zgłoszenie nadpisałoby wpis i zapisało `stage: dry-run` **także na członku `enforced`**, czyli zdjęłoby ochronę PR-em wyglądającym na onboarding |
 | ten sam projekt zgłoszony pod **inną** dywizją | powstaje drugi plik → blokuje reguła OPA po `project_number` | ustal właściciela: jeden projekt = jeden wpis = jedna dywizja |
 | ServiceNow niedostępny | workflow czerwony na kroku weryfikacji | ponów dispatch; **nie** obchodź weryfikacji |
+| push gałęzi odrzucony: `refusing to allow … without workflows permission` | **wyścig transportu** — w oknie między checkoutem a pushem na `main` wszedł merge dotykający `.github/workflows/**`. Bramki treści **przeszły**; krok werdyktu mówi to wprost w adnotacji i w podsumowaniu | ponów dispatch — druga próba startuje z bazy zawierającej tamten merge. **Nie** nadawaj tokenowi `workflows: write`: jego brak jest kontrolą, nie usterką |
+| gałąź zgłoszenia nie powstała, a sprzątanie zgłasza `Reference does not exist` (422) | nie ma czego sprzątać — odmowa nastąpiła **przed** powstaniem gałęzi. Krok melduje to jako `notice`, nie jako czerwień | nic; przyczyny szukaj w werdykcie kroku wyżej, nie w sprzątaniu |
 | `review_by` w przeszłości (wpis odgrzebany) | OPA blokuje każdy PR dotykający tego pliku | potwierdź wpis albo go usuń (`expiry-sweep.yml` otwiera PR sam) |
 
 Zasada wspólna dla wszystkich wierszy: **awaria kończy się brakiem zmiany**, nigdy zmianą „domyślną".
