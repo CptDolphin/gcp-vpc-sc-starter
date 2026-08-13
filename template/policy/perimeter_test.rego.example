@@ -299,6 +299,89 @@ test_perimeter_delete_denied if {
 	count(deny) > 0 with input as inp
 }
 
+# --- kasowanie access levelu: rozstrzyga REFEROWANIE, nie sam fakt usunięcia -------------------------
+#
+# Gałąź access levelu tej bramki NIE MIAŁA ANI JEDNEGO TESTU do 2026-08-13 — jedyny przypadek dotyczył
+# perimetru. Dlatego zrównanie obu obiektów przeżyło w szablonie tak długo: nic nie opisywało, co ma się
+# stać z poziomem, którego nikt już nie używa.
+
+skasowanie_poziomu(nazwa) := {
+	"address": sprintf("google_access_context_manager_access_level.level[%q]", [nazwa]),
+	"type": "google_access_context_manager_access_level",
+	"change": {
+		"actions": ["delete"],
+		"before": {"name": sprintf("accessPolicies/1/accessLevels/%s", [nazwa])},
+	},
+}
+
+# Poziom osierocony przez offboarding — ostatni krok wyprowadzenia dywizji, NIE break-glass.
+test_access_level_delete_allowed_when_orphaned if {
+	inp := {
+		"planned_values": {"root_module": {"resources": [good_rule]}},
+		"resource_changes": [skasowanie_poziomu("odchodzaca_dywizja")],
+	}
+	count(deny) == 0 with input as inp
+}
+
+# Kontrola anty-tautologiczna do testu wyżej: RÓŻNICA to sama nazwa poziomu. `good_rule` referuje
+# `corp_network`, więc ta sama zmiana z tą jedną nazwą podmienioną MUSI zostać odrzucona — inaczej test
+# „dozwolone" przechodziłby dlatego, że bramka nie działa wcale.
+test_access_level_delete_denied_when_referenced_by_rule if {
+	inp := {
+		"planned_values": {"root_module": {"resources": [good_rule]}},
+		"resource_changes": [skasowanie_poziomu("corp_network")],
+	}
+	count(deny) > 0 with input as inp
+}
+
+# Referencją jest też kompozycja: `required_access_levels` w innym poziomie. Renderer tej zależności nie
+# zna (nazwa jest stringiem z YAML-a), więc gdyby bramka jej nie liczyła, składnik kompozycji dałoby się
+# skasować pull requestem i wywrócić poziom nadrzędny.
+test_access_level_delete_denied_when_referenced_by_composition if {
+	kompozycja := {
+		"address": "google_access_context_manager_access_level.level[\"corp_network_and_region\"]",
+		"type": "google_access_context_manager_access_level",
+		"values": {
+			"name": "accessPolicies/1/accessLevels/corp_network_and_region",
+			"basic": [{"conditions": [{"required_access_levels": ["accessPolicies/1/accessLevels/skladnik"]}]}],
+		},
+	}
+	inp := {
+		"planned_values": {"root_module": {"resources": [kompozycja]}},
+		"resource_changes": [skasowanie_poziomu("skladnik")],
+	}
+	count(deny) > 0 with input as inp
+}
+
+# FAIL-CLOSED: plan bez nazwy usuwanego poziomu nie pozwala orzec o referowaniu — bramka odmawia.
+test_access_level_delete_denied_without_name if {
+	inp := {
+		"planned_values": {"root_module": {"resources": []}},
+		"resource_changes": [{
+			"address": "google_access_context_manager_access_level.level[\"bezimienny\"]",
+			"type": "google_access_context_manager_access_level",
+			"change": {"actions": ["delete"], "before": {}},
+		}],
+	}
+	count(deny) > 0 with input as inp
+}
+
+# Wymiana poziomu (ForceNew: `delete` + `create` w jednym `actions`) NIE jest wyjęta spod tej bramki.
+# Między zniszczeniem a utworzeniem jest okno, w którym poziom nie istnieje, a reguły nadal go wskazują —
+# czyli dokładnie ten sam błąd API, tylko trudniejszy do zauważenia w planie.
+test_access_level_replace_denied_when_referenced if {
+	wymiana := json.patch(skasowanie_poziomu("corp_network"), [{
+		"op": "replace",
+		"path": "/change/actions",
+		"value": ["delete", "create"],
+	}])
+	inp := {
+		"planned_values": {"root_module": {"resources": [good_rule]}},
+		"resource_changes": [wymiana],
+	}
+	count(deny) > 0 with input as inp
+}
+
 # --- egress: te same bramki, ten sam ksztalt wejscia --------------------------------------------------
 #
 # Do 2026-08-11 ten plik nie mial ANI JEDNEGO przypadku egressowego. Bramki na tozsamosci i metody
