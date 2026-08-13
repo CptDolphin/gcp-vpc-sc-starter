@@ -2344,3 +2344,53 @@ wywołania nie wykonał; test na tym kształcie pokazuje 2 przypisania przed zmi
   danych: zgodność 733/733, więc kontrola nic by dziś nie złapała, a na wpisie obcego projektu w fixturze
   (gdzie anonimizacja podstawiła numer członka) fałszywie by krzyczała. Rekord zostaje autorytatywny,
   `resourceName` używamy tam, gdzie rekordu nie ma.
+
+---
+
+## DEC-32 — Okno świeżej sieci wykrywa się DRUGIM sinkiem, a alert stoi na parze sieć+obciążenie, nie na samej sieci
+
+**Decyzja.** Zdarzenia sterujące Compute (`v1.compute.networks.insert`, `v1.compute.instances.insert`) jadą
+**osobnym** sinkiem org-level do **osobnego** kubełka logów, z własnym widokiem i własnym grantem
+`logging.viewAccessor`. Kubełek naruszeń, jego sink, oba jego widoki i ich uprawnienia zostają
+**niezmienione**. Obserwator publikuje z tego strumienia **dwie** liczby, liczone wyłącznie dla projektów
+obecnych w `status` żywej granicy:
+
+* `network_inserts_enforced` — ile sieci VPC powstało w członkach egzekwowanych. **Bez polityki alertu.**
+* `network_window_workload` — do ilu z nich wstawiono maszynę **przed** upływem okna dojrzewania
+  (`network_maturation_seconds`, domyślnie 600 s). **CRITICAL, kanał bezpieczeństwa, próg `> 0`,
+  własny `condition_absent`.**
+
+**Dlaczego osobny kubełek, a nie trzeci człon filtra istniejącego sinka.** Filtr widoku logów wolno oprzeć
+wyłącznie na źródle logu, typie zasobu, polach apphub, etykietach użytkownika i identyfikatorze logu
+(`Error 400: Invalid view filter …`, zmierzone na tym API). `protoPayload.methodName` do żadnej z tych
+kategorii nie należy, a wpisy ACM i wpisy Compute mają **ten sam** identyfikator logu
+(`cloudaudit.googleapis.com/activity`). Rozłączny widok w jednym kubełku musiałby więc stanąć na
+`resource.type`, czyli wymagałby **zawężenia działającego** widoku zmian konfiguracji — jedynej detekcji
+edycji granicy w konsoli, której regresja jest ciszą braną za spokój. Drugi kubełek daje rozłączność
+**z konstrukcji**, a nie z poprawnie dobranego predykatu: zasoby istniejącego stacku nie zmieniają się
+o ani jeden atrybut.
+
+**Dlaczego alert liczy PARĘ, a nie same sieci.** Utworzenie sieci VPC w projekcie członkowskim jest
+czynnością legalną, częstą i wykonywaną przez ludzi, którzy o VPC-SC nie muszą wiedzieć nic — przy modelu
++50 dywizji miesięcznie to kilka zdarzeń dziennie. Alert na każde z nich jest szumem, a wyciszona kategoria
+zabiera ze sobą sygnał, który w niej siedzi. Objawem jest dopiero **złamanie kolejności**: obciążenie
+w sieci, która przez pierwsze minuty nie jest dla granicy „wewnątrz". Surowa liczba zostaje publikowana
+jako kontekst i mianownik — bez niej nie da się odróżnić „nikt nie łamie kolejności" od „nikt nie tworzy
+sieci".
+
+**Dlaczego to jest kontrola forensyczna, a nie prewencyjna — powiedziane w treści alertu.** Okno zamyka się
+w minutach, producent chodzi z kadencją godzinową. Alert daje znacznik czasu i pozwala **ograniczyć**, co
+mogło wyjść; prewencją jest kolejność (sieć powstaje przed obciążeniem i dojrzewa ≥ 10 min). Bez tego zdania
+obecność alertu czyta się jako zabezpieczenie.
+
+**Co odrzucono i dlaczego.**
+
+| wariant | powód odrzucenia |
+|---|---|
+| rozszerzyć filtr istniejącego sinka i dołożyć widok w tym samym kubełku | rozłączności nie da się tam wyrazić (patrz wyżej) bez zawężenia działającego widoku `-config`; to jest zmiana działającej kontroli na niesprawdzonym założeniu o `resource.type` wpisu ACM |
+| alert na samym `networks.insert` w członkach egzekwowanych | czynność legalna i częsta → szum → wyciszenie całej kategorii; przy docelowej skali (+50 dywizji miesięcznie) to kilka incydentów dziennie |
+| alert na `networks.insert` **bez potwierdzenia sondą** | sonda jest krokiem procedury uruchamianym przez człowieka; jej brak jest nieodróżnialny od „nikt nie tworzył sieci", więc alert strzelałby na *nieuruchomienie sondy*, czyli praktycznie zawsze — ten sam szum, tylko drożej |
+| dopasowywać maszynę do sieci wyłącznie po jawnej referencji `networkInterfaces[].network` | `request` w Admin Activity bywa przycięty; alert milczący przy przyciętym polu milczy dokładnie przy zdarzeniu nietypowym. Brak referencji liczy się więc jako dopasowanie (fail-closed, przeszacowanie zamiast ciszy) |
+| liczyć zbiór członków egzekwowanych z `stage` w `projects.yaml` | deklaracja opisuje intencję; okno otwiera się w tym, co jest w granicy NAPRAWDĘ. Źródłem jest `status` żywej granicy, a deklaracja występuje wyłącznie jako słownik numer→ID |
+| liczyć też członków dry-run | w konfiguracji dry-run nic nie jest egzekwowane, więc świeża sieć nie otwiera tam żadnej dziury — byłby to alert na zdarzenie bez skutku |
+| etykieta z nazwą projektu/sieci na metryce | seria z etykietą powstaje i znika razem ze zdarzeniem, więc zdrowa cisza byłaby nieodróżnialna od awarii obserwatora, a martwy-człowiek strzelałby bez przerwy. „Która sieć" wraca z adnotacji przebiegu i z widoku sinka |

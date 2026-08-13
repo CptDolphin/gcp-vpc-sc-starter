@@ -139,6 +139,23 @@
           "maximum": 86400,
           "default": 5400,
           "description": "Okno liczenia. MUSI przekraczać kadencję `watch.yml`, inaczej między przebiegami powstaje szczelina, w której odmowa nie zostanie policzona przez żaden przebieg. Nakładanie się okien jest pożądane: próg alertu to `> 0`, więc podwójne policzenie nie zmienia decyzji, a przeoczenie zmienia."
+        },
+        "network_bucket": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9._-]{2,99}$",
+          "description": "Kubełek zdarzeń sterujących Compute (`network_bucket_id` ze stacku `violations-sink/`). OSOBNY od kubełka naruszeń, bo filtr widoku nie umie oddzielić wpisów ACM od wpisów Compute — oba mają identyfikator logu `cloudaudit.googleapis.com/activity`, a `protoPayload.methodName` nie jest legalną restrykcją widoku."
+        },
+        "network_view": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9._-]{2,99}$",
+          "description": "Widok zdarzeń sterujących Compute (`network_view_name` ze stacku `violations-sink/`). BRAK tego klucza = detektor okna świeżej sieci nie liczy, a polityka alertu „obciążenie w sieci młodszej niż okno dojrzewania” się nie tworzy — bo alert bez producenta chodziłby wiecznie na martwym-człowieku."
+        },
+        "network_maturation_seconds": {
+          "type": "integer",
+          "minimum": 60,
+          "maximum": 7200,
+          "default": 600,
+          "description": "Okno dojrzewania sieci VPC w członku egzekwowanym (DEC-32). MUSI być tą samą liczbą, której wymaga procedura onboardingu — mniejsza oskarżałaby o złamanie zasady kogoś, kto ją stosował, a większa zgłaszałaby jako incydent zachowanie zgodne z runbookiem. Górna obserwacja zmierzonego okna to 5 m 18 s przy rozrzucie 85 s i niedeterministycznej propagacji, stąd domyślne 600 s."
         }
       }
     }

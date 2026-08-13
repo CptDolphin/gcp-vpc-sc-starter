@@ -34,6 +34,28 @@ output "config_view_name" {
   value       = "${local.bucket_name}/views/${local.config_view_name}"
 }
 
+output "network_view_name" {
+  description = "Widok zdarzeń sterujących Compute (osobny kubełek). To jest wejście detektora okna „świeża sieć w członku egzekwowanym” — wartość wpisuje się do `violations_source.network_view` w `perimeter/alerting.yaml`. Puste, gdy `network_window_detector = false`."
+  value       = var.network_window_detector ? local.network_view_name : ""
+}
+
+output "network_bucket_id" {
+  description = "Nazwa kubełka zdarzeń sterujących Compute — wartość dla `violations_source.network_bucket`. Puste, gdy detektor wyłączony."
+  value       = var.network_window_detector ? local.network_bucket_id : ""
+}
+
+output "network_delivery_check" {
+  description = "Czy DRUGI sink dostarcza. Zwraca 0, dopóki nikt w organizacji nie utworzy sieci ani maszyny — a zero jest tu nieodróżnialne od braku prawa zapisu, więc potwierdza się to CZYNNIE: utwórz sieć w projekcie testowym i powtórz komendę. Sink, który nie dostarcza, wygląda dokładnie jak czyste okno."
+  value = var.network_window_detector ? join(" ", [
+    "gcloud logging read '${local.compute_sink_filter}'",
+    "--project=${var.sink_project_id}",
+    "--bucket=${local.network_bucket_id}",
+    "--location=${var.bucket_location}",
+    "--view=${local.network_bucket_id}",
+    "--freshness=1h --format='value(protoPayload.methodName,protoPayload.resourceName)'",
+  ]) : "detektor okna swiezej sieci WYLACZONY (network_window_detector = false)"
+}
+
 output "config_delivery_check" {
   description = "Czy sink dostarcza WPISY O ZMIANIE GRANICY. Zwraca 0 dopóki nikt nie tknie ACM — żeby to potwierdzić, zmień cokolwiek w granicy spoza pipeline'u i powtórz."
   value       = "gcloud logging read 'protoPayload.serviceName=\"accesscontextmanager.googleapis.com\"' --project=${var.sink_project_id} --bucket=${var.bucket_id} --location=${var.bucket_location} --view=${local.config_view_name} --freshness=1h --format='value(protoPayload.methodName)' | wc -l"

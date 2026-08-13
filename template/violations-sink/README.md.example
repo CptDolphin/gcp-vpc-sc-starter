@@ -118,11 +118,37 @@ w `iam-bootstrap`, świadomie poza zakresem tego kroku.
    jest**, więc odczyt nie przechodzi przez granicę i nie produkuje wpisów. Reguła `platform-violations-read`
    w `perimeter/policy.yaml` staje się przez to zbędna — jej zdjęcie to osobna zmiana w plikach perimetru.
 
+## Drugi strumień: okno świeżej sieci (DEC-32)
+
+Ten sam stack tworzy **drugi** sink org-level i **drugi** kubełek — na zdarzenia sterujące Compute
+(`v1.compute.networks.insert`, `v1.compute.instances.insert`). Wyłącznik: `network_window_detector = false`.
+
+**Po co.** Świeża sieć VPC w projekcie będącym członkiem konfiguracji **egzekwowanej** przez pierwsze
+minuty nie jest dla perimetru „wewnątrz": maszyna w niej wychodzi poza granicę **bez odmowy i bez ani
+jednego wpisu audytowego** (nic nie jest odrzucane, więc nie ma czego logować). Jedynym pewnym sygnałem
+jest zdarzenie **sterujące**, a dla członka egzekwowanego jego log leży za granicą — musi go wynieść sink.
+
+**Dlaczego OSOBNY kubełek, a nie trzeci widok tego samego.** Pułapka 2 niżej mówi, że filtr widoku wolno
+oprzeć wyłącznie na źródle logu, typie zasobu, polach apphub, etykietach i identyfikatorze logu. Wpisy ACM
+i wpisy Compute mają **ten sam** identyfikator logu (`activity`), a `protoPayload.methodName` nie jest
+legalną restrykcją widoku — rozłączny widok w jednym kubełku musiałby więc zawęzić **działający** widok
+`-config`, czyli jedyną detekcję edycji granicy w konsoli. Drugi kubełek daje rozłączność z konstrukcji.
+
+**Koszt.** Darmowy przydział ingestu Cloud Logging to 50 GiB/projekt/miesiąc, a wpis audytowy waży ~3,3 KB
+(zmierzone na tym kubełku) — czyli ~15 mln wpisów miesięcznie w cenie zero. Retencja ≤ 30 dni jest darmowa
+niezależnie od wolumenu.
+
+**Konsument.** `tools/perimeter_watch.py` publikuje z tego strumienia `network_inserts_enforced` (kontekst,
+bez alertu) i `network_window_workload` (alert CRITICAL). Współrzędne wpisuje się do
+`perimeter/alerting.yaml` → `violations_source.network_bucket` / `network_view`; biorą się z wyjść
+`network_bucket_id` i `network_view_name`.
+
 ## Weryfikacja po apply
 
 ```
-terraform output delivery_check   # ile wpisów dotarło w ostatniej godzinie
-terraform output read_command     # dokładnie to, co robi violations-report.yml
+terraform output delivery_check          # ile wpisów naruszeń dotarło w ostatniej godzinie
+terraform output read_command            # dokładnie to, co robi violations-report.yml
+terraform output network_delivery_check  # czy DRUGI sink dostarcza (zero = też sprawdź czynnie, patrz pułapka 1)
 ```
 
 Dowód równoważności (tak został wykonany): ustal okno, przeczytaj sink **oraz** każdy projekt osobno na tym

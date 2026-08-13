@@ -1892,8 +1892,8 @@ def test_alerty() -> None:
     typy_py = set(re.findall(r'"(custom\.googleapis\.com/vpcsc/[a-z_]+)"', watch_py))
     check("nazwy metryk zgodne miedzy alerts.tf a perimeter_watch.py", typy_tf == typy_py,
           f"tylko w tf={sorted(typy_tf - typy_py)} tylko w py={sorted(typy_py - typy_tf)}")
-    check("osiem metryk obserwatora (apply/budzet%/budzet-dni/dryf/wygasli + 3 z widokow sinka)",
-          len(typy_tf) == 8, str(sorted(typy_tf)))
+    check("dziesiec metryk obserwatora (apply/budzet%/budzet-dni/dryf/wygasli + 3 z widokow sinka + 2 okna sieci)",
+          len(typy_tf) == 10, str(sorted(typy_tf)))
 
     # PRODUCENT MUSI ROZRÓŻNIAĆ ODMOWĘ EGZEKWOWANĄ PO **BRAKU** POLA `dryRun`. To jest ta sama pułapka,
     # która wcześniej siedziała w filtrze metryki log-based (#1941) i wróciłaby tu, gdyby ktoś „uprościł"
@@ -1919,7 +1919,7 @@ def test_alerty() -> None:
 
     polityki = re.findall(r'resource "google_monitoring_alert_policy" "(\w+)"(.*?)\n}\n',
                           alerts + monitoring, re.S)
-    check("znaleziono polityki alertow", len(polityki) >= 7, str([n for n, _ in polityki]))
+    check("znaleziono polityki alertow", len(polityki) >= 8, str([n for n, _ in polityki]))
     bez_linku = [n for n, tresc in polityki if "links {" not in tresc]
     check("ZADNA polityka alertu nie jest bez runbook-linku", not bez_linku, str(bez_linku))
     bez_kanalu = [n for n, tresc in polityki if "notification_channels" not in tresc]
@@ -2157,6 +2157,112 @@ def test_alerty() -> None:
           konta["measure"] == ["${{ vars.PLAN_SERVICE_ACCOUNT }}"], str(konta))
     check("job publish uzywa OSOBNEGO konta WATCH (jedyny zapis)",
           konta["publish"] == ["${{ vars.WATCH_SERVICE_ACCOUNT }}"], str(konta))
+
+    # 11. OKNO SWIEZEJ SIECI (DEC-32) — trzy rozstrzygniecia, kazde z wlasna asercja i kazde
+    # anty-tautologiczne. To sa jedyne bramki, ktore lapia regres tej kontroli: `terraform validate` widzi
+    # ksztalt polityki, a nie to, czy licznik cokolwiek policzy.
+
+    # 11a. ANTY-REGRES ISTNIEJACEGO LICZNIKA. Detektor dokłada do repozytorium drugi strumien wpisow
+    # `activity`; gdyby trafily one na wejscie `policz_zmiany_konfiguracji`, licznik „ktos zmienil granice
+    # poza pipelinem" zaczalby rosnac przy normalnej pracy dywizji — czyli jedyna detekcja edycji granicy
+    # w konsoli zamienilaby sie w szum. Sprawdzamy to LICZBAMI na tych samych danych, a nie zaufaniem do
+    # rozdzielenia kubelkow.
+    wpis_acm = {"protoPayload": {
+        "serviceName": "accesscontextmanager.googleapis.com",
+        "methodName": "google.identity.accesscontextmanager.v1.AccessContextManager.DeleteAccessLevel",
+        "authenticationInfo": {"principalEmail": "human@example.com"}}}
+    wpis_sieci = {"logName": "projects/prj-example-alpha/logs/cloudaudit.googleapis.com%2Factivity",
+                  "resource": {"type": "gce_network", "labels": {"project_id": "prj-example-alpha"}},
+                  "timestamp": "2026-01-01T10:00:00Z",
+                  "protoPayload": {"serviceName": "compute.googleapis.com",
+                                   "methodName": "v1.compute.networks.insert",
+                                   "resourceName": "projects/prj-example-alpha/global/networks/w1"}}
+    wpis_maszyny = {"logName": "projects/prj-example-alpha/logs/cloudaudit.googleapis.com%2Factivity",
+                    "resource": {"type": "gce_instance", "labels": {"project_id": "prj-example-alpha"}},
+                    "timestamp": "2026-01-01T10:02:00Z",
+                    "protoPayload": {"serviceName": "compute.googleapis.com",
+                                     "methodName": "v1.compute.instances.insert",
+                                     "resourceName": "projects/prj-example-alpha/zones/z/instances/s1",
+                                     "request": {"networkInterfaces": [{"network": "projects/prj-example-alpha/global/networks/w1"}]}}}
+    sa_apply = "sa-apply@prj-example-adm.iam.gserviceaccount.com"
+    przed = pw.policz_zmiany_konfiguracji([wpis_acm], sa_apply)
+    po = pw.policz_zmiany_konfiguracji([wpis_acm, wpis_sieci, wpis_maszyny], sa_apply)
+    check("kontrola pozytywna: licznik zmian ACM w ogole liczy (asercja nizej nie jest pusta)", przed == 1, str(przed))
+    check("ANTY-REGRES: wpisy Compute NIE podbijaja licznika zmian poza pipelinem", przed == po, f"{przed} -> {po}")
+
+    # 11b. ZBIOR CZLONKOW BIERZE SIE Z ZYWEJ GRANICY (`status`), a deklaracja jest wylacznie slownikiem
+    # numer->ID. Liczenie z `stage` w projects.yaml opisywaloby INTENCJE, a okno otwiera sie w tym, co jest
+    # w granicy naprawde — czlonek dopisany do `status` z reki nie mialby wtedy detektora.
+    perimetr_probny = {"status": {"resources": ["projects/111111111111"]},
+                       "spec": {"resources": ["projects/111111111111", "projects/222222222222"]}}
+    doc_probny = {"members": [{"project_id": "prj-example-alpha", "project_number": "111111111111"},
+                              {"project_id": "prj-example-beta", "project_number": "222222222222"}]}
+    egz, nieznane = pw.projekty_egzekwowane(perimetr_probny, doc_probny)
+    check("egzekwowani licza sie z `status` zywej granicy, nie ze `stage` w deklaracji",
+          egz == {"prj-example-alpha"}, str(egz))
+    check("czlonek wylacznie w `spec` (dry-run) NIE wchodzi do detektora", "prj-example-beta" not in egz)
+    check("numer w granicy bez wpisu w deklaracji jest RAPORTOWANY, nie milczany",
+          pw.projekty_egzekwowane({"status": {"resources": ["projects/999999999999"]}}, doc_probny)[1]
+          == ["999999999999"])
+
+    # 11c. ALERT LICZY PARE, NIE SAMA SIEC. Alert na kazdej nowej sieci w czlonku egzekwowanym byłby
+    # alertem na czynnosc legalna i czesta, czyli szumem — a wyciszona kategoria zabiera ze soba sygnal,
+    # ktory w niej siedzi. Para asercji ponizej pilnuje OBU kierunkow: zachowana kolejnosc = cisza,
+    # zlamana = zdarzenie.
+    tylko_siec = pw.policz_okna_sieci([wpis_sieci], egz, 600)
+    z_obciazeniem = pw.policz_okna_sieci([wpis_sieci, wpis_maszyny], egz, 600)
+    check("sama siec (kolejnosc zachowana) jest liczona jako KONTEKST, ale nie podnosi licznika alertu",
+          (tylko_siec["sieci"], tylko_siec["z_obciazeniem"]) == (1, 0), str(tylko_siec))
+    check("siec + maszyna w oknie dojrzewania = zdarzenie alertu",
+          z_obciazeniem["z_obciazeniem"] == 1, str(z_obciazeniem))
+    pozno = dict(wpis_maszyny, timestamp="2026-01-01T10:20:00Z")
+    check("maszyna PO oknie dojrzewania nie jest zdarzeniem",
+          pw.policz_okna_sieci([wpis_sieci, pozno], egz, 600)["z_obciazeniem"] == 0)
+
+    # 11d. DWA WPISY NA JEDNA OPERACJE (`operation.first` / `operation.last`) NIE MOGA PODWAJAC LICZNIKA.
+    # Audit-log Compute zostawia oba dla tej samej `resourceName`; licznik bez scalania meldowalby dwie
+    # sieci tam, gdzie powstala jedna — a przy progu „> 0" bylby to blad NIEWIDOCZNY, bo alert i tak strzela.
+    duplikat = dict(wpis_sieci, timestamp="2026-01-01T10:00:14Z")
+    scalone = pw.policz_okna_sieci([wpis_sieci, duplikat], egz, 600)
+    check("jedna operacja = jedna siec mimo dwoch wpisow audytowych", scalone["sieci"] == 1, str(scalone))
+    check("zero czasu okna to wpis WCZESNIEJSZY", scalone["szczegoly"][0]["utworzona"].endswith("10:00:00Z"),
+          str(scalone["szczegoly"]))
+    odrzucona = dict(wpis_sieci, protoPayload=dict(wpis_sieci["protoPayload"], status={"code": 7}))
+    check("operacja ODRZUCONA nie tworzy okna (sieci, ktorej nie ma, nie da sie ominac)",
+          pw.policz_okna_sieci([odrzucona], egz, 600)["sieci"] == 0)
+
+    # 11e. FAIL-CLOSED NA PRZYCIETYM `request`. Alert milczacy przy nieczytelnym polu milczy dokladnie
+    # przy zdarzeniu nietypowym; kierunek bledu ma byc przeszacowaniem, nie cisza.
+    bez_sieci = dict(wpis_maszyny, protoPayload=dict(wpis_maszyny["protoPayload"], request={}))
+    check("maszyna bez czytelnej referencji sieci JEST liczona do okna (fail-closed)",
+          pw.policz_okna_sieci([wpis_sieci, bez_sieci], egz, 600)["z_obciazeniem"] == 1)
+
+    # 11f. OKNO DOJRZEWANIA W KONFIGURACJI MUSI ZGADZAC SIE Z PROCEDURA. Mniejsze oskarzaloby o zlamanie
+    # zasady kogos, kto ja stosowal; wieksze zglaszaloby jako incydent zachowanie zgodne z runbookiem.
+    zrodlo = yaml.safe_load((ROOT / "perimeter/alerting.yaml").read_text()).get("violations_source", {})
+    if zrodlo.get("network_view"):
+        check("okno dojrzewania >= gornej obserwacji okna (5 m 18 s) z zapasem na migotanie",
+              int(zrodlo.get("network_maturation_seconds", pw.OKNO_DOJRZEWANIA_S)) >= 318,
+              str(zrodlo.get("network_maturation_seconds")))
+        check("kubelek zdarzen Compute jest INNY niz kubelek naruszen (rozlacznosc z konstrukcji)",
+              zrodlo.get("network_bucket") and zrodlo["network_bucket"] != zrodlo["bucket"],
+              f"{zrodlo.get('network_bucket')} vs {zrodlo.get('bucket')}")
+        okno_sieci = next(t for n, t in polityki if n == "vpcsc_network_window_workload")
+        check("alert okna stoi na PARZE (sieci_z_obciazeniem), a nie na surowej liczbie sieci",
+              "local.metryka.sieci_z_obciazeniem" in okno_sieci
+              and "local.metryka.sieci_egzekwowane" not in okno_sieci, okno_sieci[:200])
+        check("alert okna ma wlasny warunek na BRAK danych (wlasny kubelek = wlasny tryb awarii)",
+              "condition_absent" in okno_sieci)
+        check("alert okna idzie na kanal BEZPIECZENSTWA i jest CRITICAL",
+              "local.kanal_bezpieczenstwo" in okno_sieci and 'severity = "CRITICAL"' in okno_sieci)
+        # Zdanie „to nie jest kontrola prewencyjna" MUSI stac w tresci polityki, a nie tylko w runbooku:
+        # alert czytany w powiadomieniu bez tego zdania czyta sie jako zabezpieczenie, ktorym nie jest.
+        check("tresc alertu okna mowi WPROST, ze nie zapobiega (kontrola forensyczna)",
+              "NIE jest kontrola prewencyjna" in okno_sieci or "NIE jest kontrolą prewencyjną" in okno_sieci,
+              "brak zdania o forensycznym charakterze")
+        check("surowa liczba sieci NIE MA polityki alertu (czynnosc legalna i czesta = szum)",
+              not any("local.metryka.sieci_egzekwowane" in tresc for _, tresc in polityki),
+              str([n for n, tresc in polityki if "local.metryka.sieci_egzekwowane" in tresc]))
 
     iam = (ROOT / "iam-bootstrap/main.tf").read_text()
     check("konto watch dostaje WYLACZNIE metricWriter", 'role    = "roles/monitoring.metricWriter"' in iam)

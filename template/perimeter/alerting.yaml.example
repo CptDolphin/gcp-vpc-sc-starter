@@ -131,6 +131,21 @@ violations_source:
   # prog „> 0”, wiec policzenie tej samej odmowy dwa razy nie zmienia decyzji, a przeoczenie — zmienia.
   window_seconds: 5400
 
+  # --- OKNO SWIEZEJ SIECI (DEC-32) --------------------------------------------------------------
+  # TRZECI strumien, z WLASNEGO kubelka. Nie „trzeci widok tego samego kubelka": filtr widoku wolno
+  # oprzec wylacznie na zrodle logu, typie zasobu, polach apphub, etykietach i identyfikatorze logu, a
+  # wpisy ACM i wpisy Compute maja TEN SAM identyfikator (`activity`). Rozlaczny widok w jednym kubelku
+  # wymagalby wiec ZAWEZENIA dzialajacego widoku `config_view`, czyli ryzyka dla licznika zmian granicy.
+  # BRAK `network_view` = detektor nie liczy, a polityka alertu sie nie tworzy (nie ma jej kto zasilac).
+  # Wspolrzedne pochodza z wyjsc stacku `violations-sink/`: `network_bucket_id`, `network_view_name`.
+  network_bucket: "vpcsc-violations-networks"
+  network_view: "vpcsc-violations-networks"
+  # Okno dojrzewania sieci. MUSI byc TA SAMA liczba, ktorej wymaga procedura z DEC-32 („zostaw siec na
+  # >= 10 minut przed dopuszczeniem obciazenia"). Mniejsza oskarzalaby o zlamanie zasady kogos, kto ja
+  # stosowal; wieksza zglaszalaby jako incydent zachowanie zgodne z runbookiem. Gorna OBSERWACJA okna to
+  # 5 m 18 s (3 przeloty: 5 m 18 s / 3 m 53 s / 4 m 41 s), a propagacja migocze — stad zapas do 600 s.
+  network_maturation_seconds: 600
+
 # --- RUNBOOK ----------------------------------------------------------------------------------------
 # Kazda polityka alertu niesie `documentation.links` z URL-em na KONKRETNA kotwice w `docs/7-alerty.md`.
 # Alert bez procedury budzi czlowieka i zostawia go z pytaniem, co teraz — czyli jest polowa rozwiazania.

@@ -302,3 +302,151 @@ resource "google_monitoring_alert_policy" "vpcsc_out_of_band_change" {
     }
   }
 }
+
+# --- 3. Alert: obciążenie trafiło do sieci, która jeszcze nie jest za granicą ------------------------
+#
+# CO TO JEST ZA OBJAW, opowiedziany od strony tego, kto go odczuwa. Świeża sieć VPC w projekcie będącym
+# członkiem konfiguracji EGZEKWOWANEJ przez pierwsze minuty nie jest dla perimetru „wewnątrz": maszyna
+# w niej wychodzi na zewnątrz granicy BEZ ODMOWY, a w stanie pośrednim czyta z wnętrza perimetru
+# I wysyła na zewnątrz jednocześnie — czyli cała ścieżka eksfiltracji jest przejezdna od końca do końca.
+# ZMIERZONE 3/3 (DEC-32): okno 3 m 53 s – 5 m 18 s od `networks.insert`, droga na zewnątrz otwarta do
+# 4 m 56 s. Jednostką propagacji jest SIEĆ — maszyna w sieci dojrzałej jest poprawna od pierwszej sekundy.
+#
+# DLACZEGO ALERT LICZY PARĘ, A NIE SAME SIECI. Utworzenie sieci VPC w projekcie członkowskim jest
+# czynnością LEGALNĄ, częstą i wykonywaną przez ludzi, którzy o VPC-SC nie muszą wiedzieć nic. Alert na
+# każdą z nich mówiłby „obudź dyżurnego, bo dywizja pracuje" — a wyciszony alert zabiera ze sobą całą
+# kategorię, w której siedzi jedyny sygnał o tym oknie. Objawem jest dopiero para: sieć młodsza niż okno
+# dojrzewania ORAZ obciążenie wstawione do niej w tym oknie, czyli złamanie kolejności z DEC-32
+# („twórz sieć przed obciążeniem, zostaw na ≥ 10 min, potwierdź sondą dwie kolejne rundy").
+#
+# TO NIE JEST KONTROLA PREWENCYJNA I NIE WOLNO JEJ ZA TAKĄ BRAĆ. Okno zamyka się w minutach, a producent
+# chodzi z kadencją `watch.yml` (godzina) — alert PRZYCHODZI PO WSZYSTKIM. Jego wartość jest forensyczna:
+# daje znacznik czasu i ogranicza, co mogło wyjść. Prewencją jest kolejność (procedura), nie ten alert.
+# Zapisane tutaj, w treści polityki, żeby nikt nie odczytał obecności alertu jako zabezpieczenia.
+#
+# DLACZEGO W OGÓLE POTRZEBUJE SINKA. Ruch, który w oknie wychodzi, NIE ZOSTAWIA ŚLADU — 41 udanych
+# przekroczeń granicy dało 0 wpisów audytowych, bo nic nie jest odrzucane, więc nie ma czego logować.
+# Jedynym pewnym sygnałem jest zdarzenie STERUJĄCE (`v1.compute.networks.insert`, Admin Activity), a dla
+# członka egzekwowanego jego log leży za granicą (`logging` jest usługą chronioną) i z laptopa się go nie
+# przeczyta. Wynosi go sink — osobny, do osobnego kubełka, żeby nie ruszyć widoku zmian ACM.
+
+resource "google_monitoring_alert_policy" "vpcsc_network_window_workload" {
+  count = local.sieci_count
+
+  # Ten sam powód co przy dwóch politykach wyżej: deskryptor metryki nie jest widoczny dla walidacji
+  # polityki od razu po utworzeniu, a `depends_on` na samym deskryptorze tego nie rozwiązuje.
+  depends_on = [time_sleep.deskryptory_widoczne]
+
+  project      = local.monitoring.project_id
+  display_name = "VPC-SC: obciążenie w sieci młodszej niż okno dojrzewania"
+  combiner     = "OR"
+
+  # `CRITICAL`, mimo że alert nie zdąży zapobiec. Severity opisuje WAGĘ ZDARZENIA, nie szybkość reakcji:
+  # to jest jedyny sygnał, po którym da się w ogóle dowiedzieć, że istniało okno z przejezdną ścieżką
+  # eksfiltracji, i jedyny, który pozwala je OGRANICZYĆ w czasie. Szumu nie robi, bo licznik zeruje się
+  # przy zachowanej kolejności — sama sieć, bez obciążenia w oknie, nie podbija go ANI RAZU.
+  severity = "CRITICAL"
+
+  conditions {
+    display_name = "maszyna uruchomiona w sieci sprzed mniej niż okna dojrzewania (członek egzekwowany)"
+
+    condition_threshold {
+      filter = join(" AND ", [
+        "metric.type=\"${local.metryka.sieci_z_obciazeniem}\"",
+        "resource.type=\"global\"",
+      ])
+      comparison = "COMPARISON_GT"
+      # Próg 0: jedno takie zdarzenie znaczy, że przez kilka minut istniała otwarta droga na zewnątrz
+      # z maszyną w środku. Uśrednianie ukryłoby dokładnie ten przypadek, dla którego alert powstał.
+      threshold_value = 0
+      duration        = "0s"
+
+      aggregations {
+        # Jak przy pozostałych: producent publikuje JEDEN punkt na przebieg `watch.yml`, więc okno
+        # wyrównania musi być >= kadencji, inaczej warunek gaśnie i zapala się w rytm crona.
+        alignment_period   = "3600s"
+        per_series_aligner = "ALIGN_MAX"
+      }
+    }
+  }
+
+  # WŁASNY MARTWY-CZŁOWIEK, a nie oparcie się o watchdoga metryki odmów. Ta liczba ma WŁASNY kubełek,
+  # WŁASNY sink i WŁASNY grant `logging.viewAccessor` — odebranie tego jednego grantu zatrzymuje wyłącznie
+  # ją, a alerty odmów i zmian ACM milczą dalej, bo ich źródła żyją. Bez tego warunku cisza znaczyłaby
+  # „nikt nie łamie kolejności", czyli dokładnie to, czego nie wolno założyć.
+  conditions {
+    display_name = "obserwator przestał publikować liczbę okien bez ochrony"
+
+    condition_absent {
+      filter = join(" AND ", [
+        "metric.type=\"${local.metryka.sieci_z_obciazeniem}\"",
+        "resource.type=\"global\"",
+      ])
+      duration = "${local.progi.watchdog_absent_seconds}s"
+
+      aggregations {
+        alignment_period   = "3600s"
+        per_series_aligner = "ALIGN_MAX"
+      }
+    }
+  }
+
+  # KANAŁ BEZPIECZEŃSTWA: to jest sygnał o otwartej drodze eksfiltracji, a nie informacja pojemnościowa.
+  notification_channels = local.kanal_bezpieczenstwo
+
+  documentation {
+    mime_type = "text/markdown"
+    subject   = "Maszyna wystartowała w sieci, która nie była jeszcze za granicą"
+
+    # Zdanie „kto i jak to odczuwa" stoi w pierwszym akapicie — wymóg dla każdej reguły CRITICAL.
+    content = <<-DOC
+      W projekcie będącym członkiem konfiguracji **egzekwowanej** powstała sieć VPC, a **w tej samej sieci
+      i w oknie dojrzewania uruchomiono maszynę**. Przez pierwsze **3-5 minut** życia sieci perimetr nie
+      uznaje jej za „wewnętrzną": ruch z tej maszyny **wychodzi poza granicę bez odmowy i bez ani jednego
+      wpisu audytowego**, a w stanie pośrednim maszyna potrafi **jednocześnie** czytać dane z wnętrza
+      perimetru i wysyłać je na zewnątrz.
+
+      **Kto to odczuwa:** właściciel danych w tym projekcie — przez kilka minut jego dane mogły opuścić
+      granicę, a granica tego **nie zarejestruje**. Nie odczuwa tego nikt w postaci awarii, i to jest
+      najgorsza własność tego zdarzenia: bez tego alertu nie zostaje po nim ŻADEN ślad.
+
+      **To NIE jest kontrola prewencyjna.** Okno zamknęło się, zanim ten alert powstał (obserwator chodzi
+      co godzinę). Nie szukaj czegoś do zablokowania — ogranicz SKUTEK.
+
+      **1. Ustal, która sieć i która maszyna.** Adnotacje przebiegu `watch.yml` niosą nazwy i liczbę sekund
+      od utworzenia sieci. Niezależnie odczytasz to z widoku sinka:
+
+      ```
+      gcloud logging read 'protoPayload.methodName="v1.compute.networks.insert" OR protoPayload.methodName="v1.compute.instances.insert"' \
+        --project=<PROJEKT_ADM> --bucket=<KUBELEK_SIECI> --location=<LOKALIZACJA> --view=<KUBELEK_SIECI> \
+        --freshness=2h \
+        --format='table(timestamp, resource.labels.project_id, protoPayload.methodName, protoPayload.resourceName)'
+      ```
+
+      Uwaga na dwa wpisy o tej samej `resourceName` (`operation.first` i `operation.last`) — to jedna
+      operacja. Zero czasu okna to wpis WCZEŚNIEJSZY.
+
+      **2. Ogranicz, co mogło wyjść.** Okno trwa od utworzenia sieci do ~5 minut później (górna
+      obserwacja 5 m 18 s; propagacja migocze, więc bierz górną, nie średnią). Pytanie brzmi: czy ta
+      maszyna miała w tym czasie dostęp do czegokolwiek wrażliwego i czy cokolwiek wysyłała. **Nie szukaj
+      tego w audit-logu VPC-SC — tam tego nie ma i nie będzie.** Szukaj po stronie workloadu: logi
+      aplikacji, ruch wychodzący, uprawnienia konta maszyny.
+
+      **3. Rozstrzygnij, czy to obejście procedury, czy jej brak.** DEC-32 wymaga: sieć powstaje
+      **przed** obciążeniem, dojrzewa **≥ 10 minut**, a przed dopuszczeniem ruchu potwierdza się sondą
+      **dwie kolejne** rundy z odmową wyjścia. Jeśli dywizja tej procedury nie zna — to jest luka
+      w onboardingu, nie incydent tożsamościowy. Jeśli zna i pominęła — to jest obejście kontroli.
+
+      **4. Nie „naprawiaj" tego org policy blokującą tworzenie sieci.** Alternatywa była rozważona
+      i odrzucona (DEC-32): zamienia okno czterominutowe na trwałą blokadę czynności legalnej, a wyjątek
+      od niej jest tą samą dziurą, tylko z podpisem.
+
+      Pełna procedura i pomiar: `docs/7-alerty.md#okno-swiezej-sieci`.
+    DOC
+
+    links {
+      display_name = "runbook"
+      url          = "${local.runbook}#okno-swiezej-sieci"
+    }
+  }
+}
