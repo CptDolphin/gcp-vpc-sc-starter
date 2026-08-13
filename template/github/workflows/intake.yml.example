@@ -62,6 +62,16 @@ on:
           name, pull-request title and label all say the verdict came from a fixture (DEC-43).
         required: false
         default: ""
+      symulator:
+        description: >-
+          TEST MODE, DRUGA POSTAĆ. Dowolna niepusta wartość uruchamia `tools/snow_symulator.py` na
+          PĘTLI ZWROTNEJ runnera i kieruje tam `SNOW_INSTANCE` zamiast instancji ServiceNow. Różnica
+          wobec `fixture`: fixture podstawia gotową ODPOWIEDŹ (więc zawsze pasuje do zapytania, także
+          do niesprawnego), a symulator odpowiada na ZAPYTANIE wg kontraktu Table API — więc pytanie
+          niesprawne dostaje odpowiedź niesprawną. `snow_ticket` działa normalnie i wskazuje rekord
+          w `tests/symulator-instancja.json`. Przebieg znaczy się tak samo jak fixture'owy (DEC-46).
+        required: false
+        default: ""
 
 permissions:
   contents: write # the bot commits a member file on a branch of THIS repository
@@ -121,16 +131,29 @@ jobs:
           # wartością jest pusty napis. Selftest pilnuje tego wprost: bramka, którą da się uzbroić
           # z ustawień repozytorium, jest bramką, o której nikt nie wie, że jest zdjęta.
           FIXTURE: ${{ inputs.fixture }}
+          # DRUGIE (i ostatnie) WEJŚCIE TRYBU TESTOWEGO — ta sama zasada, co wyżej: wyłącznie jawne
+          # wejście zgłoszenia, domyślnie puste. Dwa wejścia, jeden krok rozstrzygający — inaczej
+          # oznaczenie przebiegu byłoby wariantem w dwóch miejscach naraz.
+          SYMULATOR: ${{ inputs.symulator }}
           DIVISION: ${{ inputs.division }}
           PROJECT_ID: ${{ inputs.project_id }}
         run: |
+          # DWA SYSTEMY REKORDU NARAZ TO ZERO SYSTEMÓW REKORDU. Gdyby oba wejścia były ustawione,
+          # o werdykcie decydowałaby kolejność `if`-ów w tym pliku, a opis pull requesta mówiłby
+          # o jednym z nich — czyli o czymś, czego ten przebieg nie pytał. Odmowa jest tańsza.
+          if [ -n "$FIXTURE" ] && [ -n "$SYMULATOR" ]; then
+            echo "::error::podano NARAZ 'fixture' i 'symulator' — wybierz jeden system rekordu"
+            exit 1
+          fi
           # WSZYSTKIE WYJŚCIA POWSTAJĄ TU, TAKŻE W TRYBIE NORMALNYM — i to jest wybór, nie ozdoba. Gdyby
           # nazwa gałęzi, tytuł, etykiety i zdanie o pochodzeniu werdyktu stały w kroku otwierającym PR-a
           # (jak stały), to oznaczenie trybu testowego byłoby ich WARIANTEM, o którym trzeba pamiętać
           # w każdej przyszłej zmianie tamtego kroku. Tak jest odwrotnie: krok PR-a nie zna trybu i nie
           # umie go pominąć — czyta gotowe wartości, a jedynym miejscem, w którym rozstrzyga się „test czy
           # wniosek", jest ten krok.
-          if [ -z "$FIXTURE" ]; then
+          delimiter="baner-${RANDOM}-$$"  # `date +%N` nie jest przenosne (BSD)
+
+          if [ -z "$FIXTURE" ] && [ -z "$SYMULATOR" ]; then
             {
               echo "path="
               echo "tryb=normalny"
@@ -141,6 +164,41 @@ jobs:
               echo "baner="
             } >> "$GITHUB_OUTPUT"
             echo "Tryb normalny: weryfikacja przez API ServiceNow." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # ── SYMULATOR ──────────────────────────────────────────────────────────────────────────
+          # OZNACZENIE JEST TO SAMO, CO PRZY FIXTURZE, I TO JEST WYBÓR. Symulator jest WIERNIEJSZY od
+          # fixture'u, ale nadal NIE JEST systemem rekordu: nie zna pól własnych organizacji (`u_*`),
+          # jej przepływu approvali ani wersji jej API. Gdyby przebieg symulowany oznaczał się słabiej,
+          # „wierniejszy" po miesiącu przeczytałoby się jako „prawdziwy" — a to jest dokładnie ten błąd,
+          # który DEC-43 zamykał przy fixturze. Etykieta `onboarding` NIE pada, więc przebieg zostaje
+          # poza zasięgiem bota z `intake-rebase.yml`.
+          if [ -n "$SYMULATOR" ]; then
+            {
+              echo "path="
+              echo "tryb=symulator"
+              echo "galaz=onboard/test-${DIVISION}-${PROJECT_ID}"
+              echo "tytul=[TRYB TESTOWY] onboard: ${DIVISION} / ${PROJECT_ID} (dry-run) — NIE MERGOWAC"
+              echo "etykiety=dry-run, tryb-testowy"
+              echo "zrodlo=(NIE zweryfikowano w ServiceNow — werdykt pochodzi z SYMULATORA \`tools/snow_symulator.py\` na petli zwrotnej runnera)"
+              echo "baner<<$delimiter"
+              echo "> [!WARNING]"
+              echo "> **TRYB TESTOWY KANALU (SYMULATOR) — TO NIE JEST WNIOSEK O WEJSCIE DO GRANICY.**"
+              echo "> Werdykt o zatwierdzeniu wydano na \`tools/snow_symulator.py\`, ktory implementuje"
+              echo "> KONTRAKT Table API na danych z \`tests/symulator-instancja.json\` — a **nie** na"
+              echo "> instancji ServiceNow. Symulator nie zna pol wlasnych organizacji (\`u_*\`), jej"
+              echo "> przeplywu approvali ani wersji jej API. Nie merguj tego pull requesta."
+              echo ""
+              echo "$delimiter"
+            } >> "$GITHUB_OUTPUT"
+            {
+              echo "### TRYB TESTOWY — SYMULATOR"
+              echo "System rekordu zastapiony **symulatorem** \`tools/snow_symulator.py\` (dane:"
+              echo "\`tests/symulator-instancja.json\`, nasluch wylacznie na 127.0.0.1)."
+              echo "Werdykt tego przebiegu **nie jest** dowodem na zgode w systemie rekordu."
+              echo "Czego symulator NIE dowodzi: \`docs/5-servicenow-intake.md\` §9."
+            } >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           # `grep -qE` z KOTWICAMI, a nie `case`: wzorce powłoki nie mają kotwic w tym sensie, w jakim
@@ -156,7 +214,6 @@ jobs:
           # zasięgu bota przepisującego zgłoszenia (`intake-rebase.yml` bierze `onboard/*` + etykietę
           # `onboarding`) — zostaje, żeby sprzątanie i werdykty działały tak samo; etykieta `onboarding`
           # NIE zostaje, więc przebieg testowy nie wchodzi temu botowi pod force-push.
-          delimiter="baner-${RANDOM}-$$"  # `date +%N` nie jest przenosne (BSD)
           {
             echo "path=tests/$FIXTURE.json"
             echo "tryb=testowy"
@@ -185,21 +242,58 @@ jobs:
       # ktora w trybie normalnym wyglada tak samo (wykonuje sie zawsze i konczy zielono). Zmierzone: przebieg
       # z fixture'em otworzyl pull requesta, ktorego opis twierdzil „verified against the ServiceNow API" —
       # zdanie nieprawdziwe dla tego przebiegu i nieodroznialne od prawdziwego.
+      # WARUNEK JEST `!= 'normalny'`, A NIE WYLICZENIEM TRYBOW TESTOWYCH, i to jest zabezpieczenie na
+      # przyszlosc: trzeci tryb testowy dolozony kiedykolwiek pozniej JEST TU objety domyslnie, a nie
+      # „gdy ktos pamietal dopisac". Lista pozytywna po cichu gubi nowy przypadek; lista negatywna
+      # gubi tylko tryb produkcyjny, a jego pominiecie widac natychmiast.
       - name: WERDYKT NA MATERIALE TESTOWYM - system rekordu NIE zostal zapytany
-        if: steps.fixture.outputs.tryb == 'testowy'
+        if: steps.fixture.outputs.tryb != 'normalny'
         env:
           SCIEZKA: ${{ steps.fixture.outputs.path }}
+          TRYB: ${{ steps.fixture.outputs.tryb }}
         run: |
-          echo "::warning title=TRYB TESTOWY - WERDYKT Z FIXTURE'U::Zatwierdzenie potwierdzono plikiem $SCIEZKA z galezi domyslnej, a NIE instancja ServiceNow. Pull request tego przebiegu jest testem kanalu, nie wnioskiem - nie merguj go."
+          zrodlo="plikiem ${SCIEZKA} z galezi domyslnej"
+          [ "$TRYB" = "symulator" ] && zrodlo="SYMULATOREM tools/snow_symulator.py na petli zwrotnej runnera"
+          echo "::warning title=TRYB TESTOWY - WERDYKT NIE Z SYSTEMU REKORDU::Zatwierdzenie potwierdzono ${zrodlo}, a NIE instancja ServiceNow. Pull request tego przebiegu jest testem kanalu, nie wnioskiem - nie merguj go."
+
+      # SYMULATOR STARTUJE TYLKO W SWOIM TRYBIE, NA PETLI ZWROTNEJ, I ZAWSZE MOWI O TYM GLOSNO.
+      #
+      # DLACZEGO POSWIADCZENIE JEST JAWNE, A NIE LOSOWE ANI Z SEKRETU. Ten serwer sluchа wylacznie na
+      # 127.0.0.1 runnera, zyje tyle, co job, i trzyma material testowy. „Sekret" bylby tu teatrem —
+      # a wartosc losowa w wyjsciach kroku WYGLADALABY na sekret, nie bedac nim, co jest gorsze:
+      # nastepna osoba zaczelaby ja chronic zamiast czytac. Sciezke uwierzytelnienia mierzymy tam,
+      # gdzie da sie ja zmierzyc NEGATYWEM — `tools/snow_symulator_kontrakt.py` (zle haslo → 401 → rc=2).
+      - name: start symulatora ServiceNow (tryb testowy)
+        id: symulator
+        if: steps.fixture.outputs.tryb == 'symulator'
+        run: |
+          nohup python3 tools/snow_symulator.py --dane tests/symulator-instancja.json --port 0 \
+            --uzytkownik symulator-user --haslo symulator-token \
+            --plik-portu "${RUNNER_TEMP}/snow-port" > "${RUNNER_TEMP}/snow-symulator.log" 2>&1 &
+          # CZEKAMY NA PORT, NIE NA `sleep`. Stale opoznienie jest albo za krotkie (wyscig raportowany
+          # jako „ServiceNow nieosiagalne", czyli werdykt o TICKECIE zamiast o srodowisku), albo za
+          # dlugie w kazdym przebiegu. Brak portu po limicie = GLOSNA porazka z logiem serwera.
+          for _ in $(seq 1 50); do [ -s "${RUNNER_TEMP}/snow-port" ] && break; sleep 0.2; done
+          if [ ! -s "${RUNNER_TEMP}/snow-port" ]; then
+            echo "::error title=SYMULATOR NIE WSTAL::Serwer nie zapisal portu w 10 s. To NIE jest odrzucenie wniosku."
+            cat "${RUNNER_TEMP}/snow-symulator.log" || true
+            exit 1
+          fi
+          echo "baza=http://127.0.0.1:$(cat "${RUNNER_TEMP}/snow-port")" >> "$GITHUB_OUTPUT"
 
       # THE payload is DATA, never authorization. A dispatch is exactly as trustworthy as the token that
       # sent it, and tokens leak. We call ServiceNow back and ask the system of record whether this ticket
       # is really approved, by whom, and for which project.
       - name: verify the ticket at the source
         env:
-          SNOW_INSTANCE: ${{ secrets.SNOW_INSTANCE }}
-          SNOW_USER: ${{ secrets.SNOW_USER }}
-          SNOW_TOKEN: ${{ secrets.SNOW_TOKEN }}
+          # `||` WYBIERA SYSTEM REKORDU I JEST TU JEDYNYM MIEJSCEM, W KTORYM sie to rozstrzyga. Krok
+          # symulatora nie wykonal sie (tryb normalny) → wyjscie puste → spadamy na sekret. Odwrotnie
+          # NIE JEST mozliwe: krok startuje wylacznie przy `tryb == 'symulator'`, ktory ustawia sie
+          # wylacznie z jawnego wejscia zgloszenia. `snow_verify.py` i tak odmawia wszystkiemu, co nie
+          # jest nazwa instancji albo baza na petli zwrotnej.
+          SNOW_INSTANCE: ${{ steps.symulator.outputs.baza || secrets.SNOW_INSTANCE }}
+          SNOW_USER: ${{ steps.symulator.outputs.baza && 'symulator-user' || secrets.SNOW_USER }}
+          SNOW_TOKEN: ${{ steps.symulator.outputs.baza && 'symulator-token' || secrets.SNOW_TOKEN }}
           TICKET: ${{ inputs.snow_ticket }}
           PROJECT_ID: ${{ inputs.project_id }}
           # Zatwierdzający ze zgłoszenia — wejście PIĄTEJ kontroli (`zatwierdzający != wnioskodawca`).

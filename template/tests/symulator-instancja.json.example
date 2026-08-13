@@ -1,0 +1,95 @@
+{
+  "_material_testowy": "MATERIAL TESTOWY — dane udawanej instancji dla `tools/snow_symulator.py`. To NIE jest zrzut z ServiceNow ani dowod, ze taka instancja istnieje. Rekordy sa zapisane w postaci SKLADOWANEJ (referencja = sam sys_id), a nie w postaci ODPOWIEDZI — dot-walk i obiekty `{link, value}` powstaja dopiero w symulatorze, wg tego, co zamowi zapytanie. Roznica jest cala poincie: fixture opisuje odpowiedz, ten plik opisuje dane.",
+  "referencje": {
+    "sc_req_item": {
+      "assignment_group": "sys_user_group",
+      "requested_for": "sys_user",
+      "opened_by": "sys_user"
+    }
+  },
+  "tabele": {
+    "sc_req_item": [
+      {
+        "sys_id": "00000000000000000000000000000001",
+        "number": "RITM0000001",
+        "approval": "approved",
+        "state": "3",
+        "u_project_id": "prj-x-test",
+        "assignment_group": "00000000000000000000000000000101",
+        "requested_for": "00000000000000000000000000000201",
+        "opened_by": "00000000000000000000000000000201",
+        "short_description": "POZYTYW — jedyny wiersz, ktory ma przejsc komplet kontroli"
+      },
+      {
+        "sys_id": "00000000000000000000000000000002",
+        "number": "RITM0000002",
+        "approval": "requested",
+        "state": "1",
+        "u_project_id": "prj-x-test",
+        "assignment_group": "00000000000000000000000000000101",
+        "requested_for": "00000000000000000000000000000201",
+        "opened_by": "00000000000000000000000000000201",
+        "short_description": "NEGATYW 2 — approval w toku"
+      },
+      {
+        "sys_id": "00000000000000000000000000000003",
+        "number": "RITM0000003",
+        "approval": "approved",
+        "state": "3",
+        "u_project_id": "prj-x-test",
+        "assignment_group": "00000000000000000000000000000101",
+        "requested_for": "00000000000000000000000000000202",
+        "opened_by": "00000000000000000000000000000202",
+        "short_description": "NEGATYW 3 — wnioskodawca == zatwierdzajacy (grupa POPRAWNA, wiec kontrole 1-4 przechodza)"
+      },
+      {
+        "sys_id": "00000000000000000000000000000004",
+        "number": "RITM0000004",
+        "approval": "approved",
+        "state": "3",
+        "u_project_id": "prj-x-test",
+        "assignment_group": "00000000000000000000000000000102",
+        "requested_for": "00000000000000000000000000000201",
+        "opened_by": "00000000000000000000000000000201",
+        "short_description": "NEGATYW 4 — grupa spoza allowlisty sieciowej"
+      },
+      {
+        "sys_id": "00000000000000000000000000000005",
+        "number": "RITM0000005",
+        "approval": "approved",
+        "state": "3",
+        "u_project_id": "prj-czyjs-inny",
+        "assignment_group": "00000000000000000000000000000101",
+        "requested_for": "00000000000000000000000000000201",
+        "opened_by": "00000000000000000000000000000201",
+        "short_description": "NEGATYW 5 — ticket zatwierdzono dla INNEGO projektu niz prosi zgloszenie"
+      }
+    ],
+    "sys_user_group": [
+      {
+        "sys_id": "00000000000000000000000000000101",
+        "name": "network-team"
+      },
+      {
+        "sys_id": "00000000000000000000000000000102",
+        "name": "example-division"
+      },
+      {
+        "sys_id": "00000000000000000000000000000103",
+        "name": "cloud-networking"
+      }
+    ],
+    "sys_user": [
+      {
+        "sys_id": "00000000000000000000000000000201",
+        "user_name": "dev-wnioskodawca",
+        "email": "dev-wnioskodawca@example.com"
+      },
+      {
+        "sys_id": "00000000000000000000000000000202",
+        "user_name": "net-approver",
+        "email": "net-approver@example.com"
+      }
+    ]
+  }
+}
