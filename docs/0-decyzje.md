@@ -2700,3 +2700,52 @@ Google — każdego **nierefereowanego** poziomu w polityce organizacji, także 
 to repozytorium nie zarządza, i także poziomu `break_glass`. Bramka OPA widzi wyłącznie referencje z TEJ
 konfiguracji. Poziomy tego repo są odtwarzalne z `perimeter/access-levels/` jednym apply (rola ma `create`);
 cudze — nie są. Warstwa Deny tego nie zawęża i świadomie nie próbuje (wiersze wyżej).
+## DEC-38 — Offboarding kończy się na granicy; cykl życia projektu nie należy do tego repozytorium
+
+**Decyzja.** Procedura offboardingu (`docs/3-runbook-promocja-i-break-glass.md` §C) kończy się na usunięciu
+wpisu członka, zielonym `apply` i **potwierdzeniu na żywej granicy**, że numeru nie ma ani w `status.resources`,
+ani w `spec.resources`. Kasowanie projektu GCP **nie jest krokiem tej procedury** — jest zdarzeniem
+zewnętrznym, na które reagujemy, i tak też jest opisane. Prerekwizyty wchodzącego projektu (istnienie
+i `ACTIVE`, billing, Private Google Access, prywatna strefa DNS na restricted VIP, tożsamości z reguł) są
+**wymaganiami wobec wnioskodawcy**: pre-flight je weryfikuje, repozytorium ich nie tworzy (przedłużenie
+DEC-5/DEC-24 na ścieżkę wyjścia i powrotu).
+
+**Dlaczego.** W typowym wdrożeniu zespół perimetru **nie ma** `resourcemanager.projects.create` ani
+`.delete` — cykl życia projektu ma innego właściciela i przebiega **bez powiadomienia** tego repozytorium.
+Procedura, która kończyła się krokiem `gcloud projects delete`, prowadziła wykonującego do czynności bez
+uprawnienia **w połowie zmiany bezpieczeństwa**, tuż po tym, jak `apply` zdjął ochronę. To najgorszy możliwy
+moment na zatrzymanie się: stan jest wtedy częściowo zastosowany, a procedura nie mówi, co dalej.
+
+Drugi powód jest cięższy i wynika z pomiaru. Gdy projekt zniknie, a wpis zostanie, **nie widzi tego żaden
+mechanizm**: `plan` = `No changes.`, `apply` = `0 added, 0 changed, 0 destroyed`, obserwator =
+`drift_resources: 0`, `expiry-sweep` pomija, pre-flight raportuje „projekt istnieje, numer zgodny".
+Jednocześnie naruszenia martwego członka spadają do zera — a zero to dokładnie **dowód „czystego okna"**,
+którego wymaga bramka promocji. Skoro projekt kasuje ktoś inny i nie mówi o tym, **obcy zespół produkuje
+fałszywy dowód gotowości do egzekwowania**. To przenosi „martwy członek" z kategorii przypadku brzegowego
+do normalnego trybu pracy i czyni z niego problem bezpieczeństwa, nie porządku.
+
+Kontrola pozytywna, która rozstrzyga kierunek poprawki: **poprawny offboarding fałszywego czystego okna
+NIE produkuje** — wpisy członka nie znikają, tylko przechodzą do kategorii „naruszenia spoza listy członków",
+a raport podaje ich liczbę wprost. Fałszywe okno powstaje **wyłącznie** w kolejności odwrotnej.
+
+**Konsekwencje.**
+
+* Kolejność „najpierw granica, potem projekt" zostaje niezmieniona co do treści, ale **zmienia nośnik**:
+  tam, gdzie drugiej strony nie wykonujemy, nie da się jej wymusić numeracją kroków. Egzekwuje ją
+  uzgodnienie z zespołem właścicielskim projektów (**cztery pytania**: skąd sygnał · w jakim czasie ·
+  pytanie przed czy powiadomienie po · kto reaguje) plus rekoncyliacja po naszej stronie.
+* **Brak uzgodnienia zapisujemy wprost.** Milczące założenie „ktoś nam powie" jest gorsze od nazwanego
+  braku, bo nie ma właściciela ani czasu detekcji.
+* Rekoncyliacja (`projects describe` po każdym `project_id` z `perimeter/projects.yaml`) chodzi w rytmie
+  **nie rzadszym niż okno obserwacji `dry-run`** — dłuższa przerwa dopuszcza promocję na dowodzie
+  wyprodukowanym przez martwy projekt.
+* Materiał, który tworzy albo kasuje projekty na potrzeby odtworzenia od zera i ćwiczeń, **zostaje**, ale
+  jest oznaczony jako wariant środowiska referencyjnego. Bez etykiety czytelnik nie odróżni „tak się to
+  robi" od „tak to robiono tam, gdzie były uprawnienia".
+
+| odrzucone | dlaczego |
+|---|---|
+| poprosić o `resourcemanager.projects.delete` dla konta/zespołu perimetru | ruch przeciwny do najmniejszych uprawnień, na operacji nieodwracalnej (soft-delete 30 dni, ID zajęte, `undelete` **nie przywraca billingu**) na cudzym zasobie. Rozstrzyga jednak co innego: **nie rozwiązuje problemu** — nawet z uprawnieniem nie bylibyśmy jedynym podmiotem kasującym projekty, więc asynchroniczne zniknięcie zostaje trybem awarii |
+| zostawić krok i dopisać przypis „u kogoś innego robi to inny zespół" | przypis nie zmienia tego, że krok stoi w numerowanej ścieżce i wykonujący do niego dojdzie. Procedura, która w połowie oddaje sterowanie, nie nazywając przekazania, jest gorsza od procedury, która się kończy |
+| wyciąć z materiału warianty tworzące i kasujące projekty | to one dają reprodukowalność „od zera" i możliwość ćwiczenia odtworzenia. Problemem jest brak etykiety, nie obecność wariantu — koszt adnotacji bliski zeru, koszt utraty ćwiczenia wysoki |
+| czekać z przepisaniem procedury na automat wykrywający martwego członka | odwrotna kolejność. Uzgodnienie i rekoncyliacja są tańsze, działają bez kodu i dopiero one mówią automatowi, **jakiego czasu detekcji** ma pilnować |

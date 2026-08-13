@@ -306,6 +306,18 @@ jobs:
           # value in GitHub Actions expressions, not an error — so the no-App path degrades, it does not
           # break.
           token: ${{ steps.app.outputs.token || github.token }}
+          # AN ALLOW-LIST, NOT A DENY-LIST. Without `add-paths` this action stages the WHOLE working
+          # tree — everything the steps above wrote to disk: the downloaded contract from the last
+          # apply, the violations report, Python bytecode. Measured on the sibling channel (#2037): an
+          # onboarding pull request carried `stan/contract.json` and a compiled `.pyc` alongside its 17
+          # lines of declaration, with all five checks green, because none of them looks at WHICH files
+          # a pull request adds.
+          #
+          # `.gitignore` catches this too and was extended in the same change, but that is defence by
+          # PREDICTION: it works for artefacts somebody named in advance. This line is defence by
+          # RESTRICTION — the intake channel changes member declarations and nothing else, so an
+          # artefact nobody predicted still has no way in.
+          add-paths: perimeter/projects.yaml
           branch: onboard/${{ inputs.division }}-${{ inputs.project_id }}
           title: "onboard: ${{ inputs.division }} / ${{ inputs.project_id }} (dry-run)"
           commit-message: "onboard: add ${{ inputs.project_id }} to the dry-run configuration"

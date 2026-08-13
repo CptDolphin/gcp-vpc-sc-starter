@@ -287,6 +287,17 @@ jobs:
           # tu odporna na POMINIETY krok `app`: odczyt nieistniejacego pola kontekstu daje w wyrazeniach
           # GitHub Actions wartosc pusta, a nie blad — wiec sciezka bez Appa nie wywraca sie, tylko degraduje.
           token: ${{ steps.app.outputs.token || github.token }}
+          # LISTA DOZWOLONYCH SCIEZEK, NIE LISTA ZAKAZANYCH. Bez `add-paths` ta akcja stage'uje CALE
+          # drzewo robocze, czyli wszystko, co wypisaly kroki wyzej: pobrany kontrakt ostatniego apply,
+          # raport naruszen, bytecode Pythona. Zmierzone (#2037): pull request onboardujacy `t-div`
+          # niosl obok 17 linii deklaracji takze `stan/contract.json` i skompilowany `.pyc` — przy
+          # pieciu zielonych checkach, bo zaden nie patrzy na to, JAKIE pliki wchodza.
+          #
+          # `.gitignore` tez to lapie i zostal uzupelniony w tym samym MR, ale jest obrona przez
+          # PRZEWIDZENIE: dziala dla artefaktow, ktore ktos wczesniej nazwal. Ta linia jest obrona przez
+          # OGRANICZENIE — kanal wejsciowy zmienia deklaracje czlonkow i nic wiecej, wiec kazdy przyszly
+          # artefakt, ktorego nikt nie przewidzial, i tak nie ma jak wjechac.
+          add-paths: perimeter/projects.yaml
           branch: external/${{ steps.render.outputs.division }}-${{ steps.render.outputs.project_id }}
           title: "onboard (external): ${{ steps.render.outputs.division }} / ${{ steps.render.outputs.project_id }}"
           commit-message: "onboard: ${{ steps.render.outputs.project_id }} requested by ${{ inputs.source_repository }}"
