@@ -95,9 +95,18 @@ git checkout -b wniosek/<dywizja>-<projekt> origin/main
 
 ```bash
 # 3. Bramki lokalnie — te same, które pojadą w CI. Kolejność od najtańszej.
-python3 tools/collect_declarations.py > /tmp/dekl.json
-conftest test --namespace vpcsc.onboarding --parser json /tmp/dekl.json
+#
+#    UWAGA: `conftest` BEZ kontraktu widzi INNY stan świata niż CI i pokazuje czerwień na członkach,
+#    których nie dotknąłeś. Bramka promocji porównuje deklarację ze stanem z OSTATNIEGO APPLY, a nie
+#    z niczym: bez `--contract` jest uzbrojona dla KAŻDEGO członka `enforced`, więc każdy z nich wygląda
+#    na promowany „teraz" — bez dowodu i bez okna obserwacji. Zmierzone: 2 czerwone linie o cudzym
+#    członku na PR-ze, który zmieniał zupełnie co innego. Pobierz kontrakt tak, jak robi to CI:
+gh release download contract --pattern contract.json --dir stan
+python3 tools/collect_declarations.py --contract stan/contract.json > /tmp/dekl.json
+conftest test --policy policy --namespace vpcsc.onboarding /tmp/dekl.json
 python3 tools/attribute_budget.py --input /tmp/dekl.json
+#    Brak release'u `contract` (repo przed pierwszym apply) jest stanem poprawnym — wtedy czerwień
+#    bramki promocji jest OCZEKIWANA i CI zgłasza to samo, `::notice::brak release'u contract`.
 
 # 4. Pull request. Opis odpowiada na pytanie, na które `change_ref` nie ma miejsca:
 #    co ten członek realnie robi i czego w związku z tym potrzebuje.
@@ -192,11 +201,14 @@ osobną regułą OPA. Sprawdzisz to lokalnie, zanim pull request w ogóle powsta
 
 ```bash
 # Para: profil z `to_external_from` i risk: high przechodzi; ten sam profil z risk: medium ma paść.
-python3 tools/collect_declarations.py > /tmp/dekl.json
-conftest test --namespace vpcsc.onboarding --parser json /tmp/dekl.json
+# `--contract` jak w §8.1 krok 3 — bez niego w wyniku siedzi czerwień bramki promocji na cudzych członkach
+# i para przestaje być czytelna.
+gh release download contract --pattern contract.json --dir stan
+python3 tools/collect_declarations.py --contract stan/contract.json > /tmp/dekl.json
+conftest test --policy policy --namespace vpcsc.onboarding /tmp/dekl.json
 sed -i.bak 's/^risk: high$/risk: medium/' perimeter/profiles/<nowy>.yaml
-python3 tools/collect_declarations.py > /tmp/dekl-zly.json
-conftest test --namespace vpcsc.onboarding --parser json /tmp/dekl-zly.json  # MA BYĆ CZERWONE
+python3 tools/collect_declarations.py --contract stan/contract.json > /tmp/dekl-zly.json
+conftest test --policy policy --namespace vpcsc.onboarding /tmp/dekl-zly.json  # MA BYĆ CZERWONE
 mv perimeter/profiles/<nowy>.yaml.bak perimeter/profiles/<nowy>.yaml
 ```
 
