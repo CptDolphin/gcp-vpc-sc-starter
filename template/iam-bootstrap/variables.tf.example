@@ -159,8 +159,8 @@ variable "wif_provider_id" {
   }
 }
 
-variable "grant_logging_viewer" {
-  description = "Czy nadać kontu plan roles/logging.viewer na organizacji. Bez tego workflow violations-report nie odczyta naruszeń dry-run, a wtedy promocja do enforced opiera się na deklaracji zamiast na dowodzie. DRUGI, MNIEJ OCZYWISTY SKUTEK ustawienia na false: przy włączonej sekcji `monitoring` w policy.yaml ta sama rola daje kontu plan `logging.logMetrics.get`, bez którego KAŻDY `terraform plan` pada na odświeżeniu metryk — czyli wyłączenie raportu wyłącza też planowanie."
+variable "grant_sink_reader" {
+  description = "Czy nadać kontu plan rolę własną `vpcScSinkReader` (JEDNO uprawnienie: `logging.sinks.get`) na organizacji. Potrzebna guardowi w `violations-report`, który przed odczytem sprawdza, że sink istnieje, ma `includeChildren` i ten sam filtr co odczyt — bez tego sink, który nie dostarcza, jest nieodróżnialny od czystego okna obserwacji i przepuszcza promocję. Zakres org-level wynika z tego, że sink org-level nie ma innego rodzica; uprawnienie czyta KONFIGURACJĘ logowania, nie treść logów. Zastąpiło org-wide `roles/logging.viewer` (28 uprawnień, w tym `logging.logEntries.list` na całej organizacji)."
   type        = bool
   default     = true
 }

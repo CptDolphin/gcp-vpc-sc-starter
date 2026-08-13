@@ -234,19 +234,27 @@ niewidoczny dla **wszystkich** pozostałych warstw: `terraform plan` mówi `No c
 `0 added, 0 changed, 0 destroyed`, budżet atrybutów nadal go liczy, a raport naruszeń nadal go widzi.
 Soft-delete trwa **30 dni** i ACM przyjmuje taki projekt bez słowa.
 
-### B6 · Czy konto `plan` dostanie `roles/logging.viewer` na organizacji? `[D0]`
+### B6 · Który projekt **członkowski** będzie projektem sondującym kontroli pozytywnej? `[D0]`
 
-**Odpowiedź:** ☐ tak ☐ nie ☐ zamiast tego sink org-level (§B4)
+**Odpowiedź:** `_____________________` (ID projektu; musi być członkiem konfiguracji **egzekwowanej**)
 
-**Jeśli nie — dwa skutki, drugi nieoczywisty:**
+**Po co to pytanie.** Sonda granicy ma jedną sondę, która musi **przejść** — dowód, że reguła baseline
+kogoś **wpuszcza**, a nie tylko że granica odmawia. Bez niej „wszystko odmówione" jest nieodróżnialne od
+zepsutego środowiska. Ta sonda potrzebuje prawa odczytu logów **w sondowanym projekcie**.
 
-1. Nie ma raportu naruszeń dry-run, więc promocja do `enforced` opiera się na **deklaracji zamiast na
-   dowodzie**. To wywraca cały dwustopniowy onboarding (DEC-4).
-2. Przy włączonej sekcji `monitoring` **ta sama rola** daje `logging.logMetrics.get`, bez którego **każdy**
-   `terraform plan` pada na odświeżeniu metryk — także plan, który monitoringu w ogóle nie dotyka.
-   Wyłączenie raportu wyłącza więc planowanie.
+**Jeśli nie wskażecie żadnego:** kontrola pozytywna celuje w projekt z wejścia przelotu, a wtedy prawo
+odczytu musi obejmować **każdego** członka — czyli w praktyce org-wide `roles/logging.viewer`, prawo
+odczytu treści każdego logu w organizacji dla konta CI. Przy setkach członków rozsianych po drzewie
+nadanie per-folder jest tym samym w przebraniu, a per-członek — listą nie do utrzymania.
 
-**Ustawia:** `grant_logging_viewer` w `iam-bootstrap/terraform.tfvars`.
+**Czego to pytanie NIE wymaga:** org-wide `roles/logging.viewer`. Konto `plan` go nie dostaje —
+raport naruszeń czyta **widok** sinka (§B4), guard sinka ma rolę własną `vpcScSinkReader` z jednym
+uprawnieniem `logging.sinks.get` (konfiguracja, nie treść), a kontrola pozytywna ma nadanie
+**per-projekt** w tym jednym wskazanym tu projekcie.
+
+**Ustawia:** `positive_control_project_id` w `iam-bootstrap/terraform.tfvars` **oraz** zmienną repo
+`POSITIVE_CONTROL_PROJECT` (obie muszą mieć tę samą wartość — rozjazd znaczy „sonda pyta o projekt,
+w którym nie ma prawa czytać").
 
 ### B7 · Kto ma `roles/iam.denyAdmin`? `[D0]`
 
@@ -591,7 +599,7 @@ Ta tabela istnieje po to, żeby odpowiedzi dało się **wpisać**, a nie interpr
 | A5, A7 | kolejność wejścia członków; czy potrzebny jawny `spec` u obecnego właściciela | plan wdrożenia |
 | A6, E3 | budżet access leveli; wzorzec `perimeter/access-levels/*.yaml`; lista poziomów cudzych | `perimeter/access-levels/` |
 | A8 | czy w ogóle wchodzimy w przejęcie szkieletu | decyzja przed etapem 3 |
-| B1, B5, B6 | role read-only konta `plan`; **`grant_logging_viewer`** | `iam-bootstrap/` |
+| B1, B5, B6 | role read-only konta `plan`; **`grant_sink_reader`**, **`positive_control_project_id`** (+ zmienna repo `POSITIVE_CONTROL_PROJECT`) | `iam-bootstrap/` |
 | B2 | zakres offboardingu (kończy się na granicy) | `docs/` — zapis granicy odpowiedzialności |
 | B3 | wykonawca odzysku w runbooku break-glass | [`3-runbook-promocja-i-break-glass.md`](3-runbook-promocja-i-break-glass.md) |
 | B4 | kto applikuje `violations-sink/` (człowiek, nie pipeline) | [`1-wdrozenie.md`](1-wdrozenie.md), tabela trzech stacków |

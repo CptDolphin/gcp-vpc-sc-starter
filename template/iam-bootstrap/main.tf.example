@@ -176,13 +176,46 @@ resource "google_organization_iam_member" "apply_perimeter_writer" {
   member = "serviceAccount:${google_service_account.apply.email}"
 }
 
-# Raport naruszeń dry-run czyta audit-logi. Opcjonalne, ale bez tego nie da się UDOWODNIĆ, że okno
-# obserwacji było czyste — a wtedy promocja do enforced jest zgadywaniem.
-resource "google_organization_iam_member" "plan_logging_viewer" {
-  count = var.grant_logging_viewer ? 1 : 0
+# ODCZYT KONFIGURACJI SINKA NARUSZEŃ — rola własna z JEDNYM uprawnieniem, zamiast `roles/logging.viewer`
+# na organizacji.
+#
+# CO TU BYŁO I DLACZEGO ZNIKŁO. Konto `plan` miało org-level `roles/logging.viewer` — 28 uprawnień, w tym
+# `logging.logEntries.list`, czyli prawo odczytu TREŚCI KAŻDEGO LOGU W ORGANIZACJI. Nadane było po to, żeby
+# raport naruszeń mógł czytać audit-logi członków. Raport czyta dziś JEDEN WIDOK w kubełku sinka
+# (`roles/logging.viewAccessor`, nadawany w stacku `violations-sink`), a kontrola pozytywna sondy ma nadanie
+# PER-PROJEKT w wyznaczonym projekcie sondującym (sekcja 3f). Żaden konsument nie potrzebuje już odczytu
+# treści logów org-wide.
+#
+# CO ZOSTAŁO I DLACZEGO MUSI ZOSTAĆ NA ORGANIZACJI. `violations-report` przed odczytem sprawdza, że sink
+# ISTNIEJE, ma `includeChildren` i ten sam filtr co odczyt — bo sink, który nie dostarcza, wygląda DOKŁADNIE
+# tak samo jak czyste okno obserwacji: pusty kubełek, zielony przebieg, zero naruszeń i przepuszczona
+# promocja. Ten guard woła `logging sinks describe --organization=...`, a sink org-level nie ma innego
+# rodzica niż organizacja — więc uprawnienia do jego ODCZYTU nie da się zawęzić do projektu.
+#
+# RÓŻNICA, KTÓRA JEST TU CAŁYM SENSEM: `logging.sinks.get` czyta KONFIGURACJĘ (dokąd płyną logi),
+# a nie ICH TREŚĆ. Zakres pozostaje org-level, bo taki jest zasób; zbiór uprawnień schodzi z 28 do 1,
+# a `logging.logEntries.list` na organizacji znika całkowicie. To jest ta część, o którą pyta security.
+#
+# ZMIERZONE, nie założone: tożsamość mająca WYŁĄCZNIE `logging.sinks.get` (rola własna) odczytuje
+# `sinks describe --organization` poprawnie, a tożsamość mająca WYŁĄCZNIE `roles/logging.viewAccessor`
+# na widoku odczytuje wpisy z kubełka sinka — bez żadnej roli org-wide.
+resource "google_organization_iam_custom_role" "sink_reader" {
+  count = var.grant_sink_reader ? 1 : 0
+
+  org_id      = var.org_id
+  role_id     = "vpcScSinkReader"
+  title       = "VPC-SC violations sink config reader (CI)"
+  description = "Odczyt KONFIGURACJI sinków na organizacji — guard raportu naruszeń. Bez dostępu do treści logów."
+  stage       = "GA"
+
+  permissions = ["logging.sinks.get"]
+}
+
+resource "google_organization_iam_member" "plan_sink_reader" {
+  count = var.grant_sink_reader ? 1 : 0
 
   org_id = var.org_id
-  role   = "roles/logging.viewer"
+  role   = google_organization_iam_custom_role.sink_reader[0].id
   member = "serviceAccount:${google_service_account.plan.email}"
 }
 
@@ -295,14 +328,20 @@ resource "google_storage_bucket_iam_member" "contract_reader" {
 }
 
 # --- 3c. monitoring perimetru ----------------------------------------------------------------------
-# `terraform/monitoring.tf` w repo perimetru tworzy trzy `google_logging_metric` i dwie
-# `google_monitoring_alert_policy` w projekcie `monitoring.project_id`. Zarządza nimi konto APPLY — i do
-# tego dnia nie miało do nich ŻADNEGO prawa, nawet odczytu.
+# `terraform/monitoring.tf` i `terraform/alerts.tf` w repo perimetru tworzą polityki alertów, deskryptory
+# metryk własnych i kanały powiadomień w projekcie `monitoring.project_id`. Zarządza nimi konto APPLY —
+# i do dnia powstania tej sekcji nie miało do nich ŻADNEGO prawa, nawet odczytu.
+#
+# UWAGA NA HISTORIĘ TEJ SEKCJI: do 2026-08-12 stały tu także `google_logging_metric`. Zostały usunięte,
+# bo metryka log-based liczy wyłącznie wpisy PRZYJĘTE przez Log Router swojego projektu i strukturalnie
+# nie potrafi policzyć wpisów przyniesionych przez sink (patrz komentarz w `terraform/monitoring.tf`).
+# Uprawnienia `logging.logMetrics.*` zostają w tej roli świadomie: `apply` musi umieć odczytać wszystko,
+# czym KIEDYKOLWIEK zarządzał, dopóki nie ma pewności, że stan jest czysty w każdym wdrożeniu.
 #
 # DLACZEGO TO WYWRACAŁO APPLY, A NIE PLAN. `terraform apply` zaczyna od ODŚWIEŻENIA stanu, czyli musi
 # PRZECZYTAĆ wszystko, czym zarządza — także zasoby, których w danym przebiegu nie zmienia. Konto plan
-# czytało je „przypadkiem", bo ma org-level `monitoring.viewer` i `logging.viewer`; konto apply miało
-# wyłącznie custom rolę na perimetrze i storage. Efekt: `plan` zielony, `apply` czerwony na
+# czytało je „przypadkiem", bo ma org-level `monitoring.viewer`; konto apply miało wyłącznie custom rolę
+# na perimetrze i storage. Efekt: `plan` zielony, `apply` czerwony na
 # `Error 403: Permission 'logging.logMetrics.get' denied` — zawsze, przy każdej zmianie, także takiej,
 # która monitoringu w ogóle nie dotyka. To ten sam tryb awarii co przy `contract_reader_plan` wyżej
 # (refresh czyta obiekt kontraktu), tylko po drugiej stronie granicy plan/apply.
