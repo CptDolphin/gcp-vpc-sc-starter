@@ -10,30 +10,40 @@ jest nieprawdziwa, a plik, którego nikt nie widzi, nie jest dokumentacją forma
 | `snow-not-approved.json` | approval jeszcze trwa (`approval: requested`) | **PADA** — wniosek w trakcie akceptacji nie wchodzi |
 | `snow-self-approved.json` | zatwierdzony przez grupę wnioskodawcy | **PADA** — samo-zatwierdzenie (patrz zastrzeżenie niżej) |
 | `snow-wrong-project.json` | ticket dotyczy innego projektu niż payload | **PADA** — podmiana celu po approvalu |
-| `snow-no-approval.json` | ticket istnieje, ale nie niesie ŻADNEGO śladu zatwierdzenia | **PADA** — dwiema regułami naraz; zarazem dowód, że nieznany kształt odpowiedzi degraduje się do odmowy, nie do zgody |
+| `snow-no-approval.json` | ticket istnieje, ale nie niesie ŻADNEGO śladu zatwierdzenia | **PADA** — trzema regułami naraz; zarazem dowód, że nieznany kształt odpowiedzi degraduje się do odmowy, nie do zgody |
 | `snow-not-found.json` | `result: []` — numeru ticketu nie ma w systemie rekordu | **PADA** — payload zmyślił numer |
+| `snow-self-approved-person.json` | grupa **poprawna** (sieciowa), ale wnioskodawca == zatwierdzający | **PADA** — samo-zatwierdzenie po OSOBIE; do piątej kontroli ten wiersz przechodził komplet checków |
+| `snow-raw-reference.json` | kształt, który Table API zwraca dla zapytania **bez** `sysparm_fields`: referencja jako `{link, value}`, zero kluczy z kropką | **PADA** — brak grupy i brak wnioskodawcy; dowód, dlaczego zapytanie musi zamawiać pola dot-walk |
+| `snow-requester-sysid.json` | wnioskodawca podany jako `sys_id`, nie login | **PADA** — porównanie z adresem zatwierdzającego nigdy by nie odrzuciło, więc kontrola mówi to wprost zamiast przepuścić |
 | `dispatch-example.json` | komplet wejść `workflow_dispatch` kanału ticketowego | wejście dla `gh workflow run intake.yml -f …` |
 | `vpcsc-violation-dryrun.json` | 4 naruszenia dry-run w kształcie zwracanym przez `gcloud logging read` | `violations_report.py` przypisuje **3** członkowi, 4. trafia do „spoza listy członków" |
 
 ```bash
 python3 tools/snow_verify.py --ticket RITM0000001 --expect-project prj-x-test \
-  --offline-fixture tests/snow-approved.json          # 0
+  --approver net-approver@example.com --offline-fixture tests/snow-approved.json          # 0
 python3 tools/snow_verify.py --ticket RITM0000001 --expect-project prj-x-test \
-  --offline-fixture tests/snow-not-approved.json      # != 0
+  --approver net-approver@example.com --offline-fixture tests/snow-not-approved.json      # != 0
 ```
 
-Pięć z siedmiu plików opisuje przypadki **negatywne** i to jest sedno: bramka, która nigdy nie odrzuca,
-przechodzi każdy test pozytywny i nie chroni niczego. `snow_verify.py` sprawdza cztery rzeczy i każda ma
-teraz swój fixture — `snow-not-found` domyka punkt 1 („ticket istnieje"), który przez cały czas był
-**jedynym bez pokrycia**: kod tej gałęzi nigdy nie wykonał się w żadnym teście.
+Osiem z dziewięciu plików `snow-*` opisuje przypadki **negatywne** i to jest sedno: bramka, która nigdy nie
+odrzuca, przechodzi każdy test pozytywny i nie chroni niczego. `snow_verify.py` sprawdza pięć rzeczy i każda
+ma swój fixture — `snow-not-found` domyka punkt 1 („ticket istnieje"), który przez cały czas był **jedynym
+bez pokrycia**: kod tej gałęzi nigdy nie wykonał się w żadnym teście.
 
-**Czego `snow-self-approved.json` NIE pokrywa, powiedziane wprost.** Opisuje samo-zatwierdzenie przez
-GRUPĘ wnioskodawcy i tyle sprawdza `snow_verify.py`: porównuje grupę z ticketu z allowlistą sieciową.
-Nie porównuje **osoby** zatwierdzającej z wnioskodawcą, więc wnioskodawca należący do grupy sieciowej
-zatwierdziłby własny ticket i przeszedł. Domknięcie wymaga odczytu rekordu approvalu
-(`sysapproval_approver`) z żywej instancji ServiceNow — a fixture napisany „z wyobrażenia o kształcie
-API", którego nie da się skonfrontować z niczym prawdziwym, produkowałby zieloną bramkę o nieznanej
-wartości. To jest zapisana luka, nie przeoczenie.
+## Te pliki są KONTRAKTEM, nie odpowiedzią systemu rekordu (DEC-43)
+
+Każdy `snow-*.json` niesie pole **`_material_testowy`** i bez niego `snow_verify.py` **odmawia** przyjęcia go
+w trybie offline (`rc=2`). To nie jest ozdoba: do tej pory jedyną różnicą między „werdykt z systemu rekordu"
+a „werdykt z pliku w repo" była **nazwa kroku w workflow**, a przebieg testowy otwierał pull requesta, którego
+opis twierdził, że ticket zweryfikowano w API ServiceNow. Znacznik sprawia, że plik mówi o sobie, czym jest —
+przy otwarciu, w każdej linii werdyktu i w opisie pull requesta.
+
+**Czego te fixture'y NIE dowodzą, powiedziane wprost.** Nie dowodzą, że taki kształt odpowiedzi przychodzi
+z realnej instancji: żadna instancja ServiceNow nie została w tym repozytorium zapytana ani razu. Kształt
+pochodzi z dokumentacji dostawcy (`sysparm_fields` + dot-walk), nazwy pól są **konfiguracją organizacji**
+(`u_project_id` jest polem własnym, nie standardem platformy), a rekordu approvalu (`sysapproval_approver`)
+nie czyta nikt — czyli payload kłamiący o zatwierdzającym nadal przejdzie punkt 5. Pełny kontrakt zapytania
+i lista pozycji do potwierdzenia jednym odczytem: `docs/5-servicenow-intake.md` §8.
 
 ## `vpcsc-violation-dryrun.json` — kształt zdjęty z żywej organizacji, nie wymyślony
 
