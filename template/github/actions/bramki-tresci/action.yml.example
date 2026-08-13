@@ -329,6 +329,58 @@ runs:
           exit 1
         fi
 
+    # KOTWICA RUNBOOKA, NA KTORA CELUJE ALERT, MUSI ISTNIEC — sprawdzane po stronie WDROZENIA, nie tylko
+    # w starterze. Kotwica, ktorej nie ma, nie daje bledu: przegladarka laduje na POCZATKU dokumentu, wiec
+    # dyzurny o 3:00 dostaje spis tresci zamiast procedury. Cisza zamiast bledu — ta sama rodzina, co reszta
+    # guardow w tym pliku.
+    #
+    # DLACZEGO TU, SKORO SELFTEST STARTERA JUZ TO SPRAWDZA. Bo selftest chodzi po drzewie STARTERA. Kotwice
+    # i polityki alertow zyja takze w tym repozytorium i mozna je tu zmienic BEZPOSREDNIO — wtedy asercja po
+    # tamtej stronie nie zapala niczego. Zmierzone przy #2051: pull request dotykajacy wylacznie `docs/`
+    # nie dostawal w tym repozytorium ZADNEGO checku („no checks reported on the branch"), wiec martwa
+    # kotwica wchodzila bez jednego czerwonego swiatla. Sciezka `docs/**` w wyzwalaczu `validate.yml`
+    # sprawia, ze ten guard w ogole ruszy; guard sprawia, ze ma co powiedziec.
+    - name: guard - kotwice runbooka alertow istnieja
+      shell: bash
+      run: |
+        python3 - <<'PY'
+        import pathlib, re, sys
+
+        runbook = pathlib.Path("docs/7-alerty.md")
+        if not runbook.exists():
+            sys.exit("::error::brak docs/7-alerty.md — polityki alertow celuja w runbook, ktorego nie ma")
+
+        # Kotwice zapisane JAWNIE (`<a id=…>`), a nie generowane z naglowka: renderer moze zmienic
+        # slug naglowka, a wtedy `runbook_url` przestaje trafiac bez ani jednej zmiany w alertach.
+        w_dokumencie = set(re.findall(r'<a id="([a-z0-9-]+)"></a>', runbook.read_text(encoding="utf-8")))
+
+        zrodla = [pathlib.Path(p) for p in ("terraform/alerts.tf", "terraform/monitoring.tf")]
+        brakujace_pliki = [str(p) for p in zrodla if not p.exists()]
+        if brakujace_pliki:
+            sys.exit(f"::error::nie ma {', '.join(brakujace_pliki)} — bez nich guard nie wie, "
+                     "w ktore kotwice celuja alerty, wiec nie przepuszcza")
+
+        uzyte = set()
+        for p in zrodla:
+            uzyte |= set(re.findall(r'\$\{local\.runbook\}#([a-z0-9-]+)"', p.read_text(encoding="utf-8")))
+
+        # PUSTY ZBIOR TEZ JEST BLEDEM. Zero uzytych kotwic znaczy albo ze alerty stracily `runbook_url`,
+        # albo ze zmienil sie sposob ich sklejania i ten guard przestal cokolwiek widziec. Jedno i drugie
+        # ma byc czerwone, bo zielony wynik przy zerowym pokryciu jest gorszy niz brak guardu.
+        if not uzyte:
+            sys.exit("::error::zaden alert nie wskazuje kotwicy runbooka — albo znikly `runbook_url`, "
+                     "albo zmienil sie wzorzec ich sklejania i ten guard mierzy pustke")
+
+        martwe = sorted(uzyte - w_dokumencie)
+        if martwe:
+            sys.exit(f"::error::alerty wskazuja kotwice, ktorych nie ma w docs/7-alerty.md: "
+                     f"{', '.join(martwe)}. Kotwica bez celu nie daje bledu — przegladarka laduje na "
+                     "poczatku dokumentu, wiec dyzurny dostaje spis tresci zamiast procedury.")
+
+        print(f"OK: {len(uzyte)} kotwic z alertow, wszystkie istnieja w docs/7-alerty.md "
+              f"(kotwic w dokumencie: {len(w_dokumencie)})")
+        PY
+
     # `continue-on-error` ZAMIENIA PORAŻKĘ W „SUCCESS" W REST API — zmierzone, nie teoretyczne.
     #
     # Krok z tą flagą raportuje `steps[].conclusion: "success"` mimo `##[error]` w logu, bo per-krokowego
