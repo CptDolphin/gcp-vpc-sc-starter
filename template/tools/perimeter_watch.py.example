@@ -86,7 +86,7 @@ STAN_ZYWY = "ACTIVE"
 # i niekonfigurowalne, wiec nie da sie ich wylaczyc po stronie projektu czlonkowskiego.
 COMPUTE_SIEC = "v1.compute.networks.insert"
 COMPUTE_MASZYNA = "v1.compute.instances.insert"
-# TRZECI strumien, i jedyne zrodlo mapy podsiec->siec (DEC-43). Bez niego dopasowanie maszyny do sieci
+# TRZECI strumien, i jedyne zrodlo mapy podsiec->siec (DEC-44). Bez niego dopasowanie maszyny do sieci
 # custom-mode NIE MA z czego powstac: wpis maszyny niesie wylacznie `subnetwork` (patrz `sieci_maszyny`),
 # a z samej referencji podsieci nie da sie odczytac, do ktorej sieci ona nalezy.
 COMPUTE_PODSIEC = "v1.compute.subnetworks.insert"
@@ -670,7 +670,7 @@ def policz_okna_sieci(wpisy: list[dict], egzekwowane: set[str], okno_s: int) -> 
     okno jest nieodwracalne, bo ruch, ktory przez nie przeszedl, NIE ZOSTAWIA SLADU (41 przekroczen granicy,
     0 wpisow audytowych).
 
-    SIEC ODCZYTUJE SIE NA DWA SPOSOBY, A DOPIERO ICH BRAK URUCHAMIA (b) — DEC-43. Wpis maszyny w sieci
+    SIEC ODCZYTUJE SIE NA DWA SPOSOBY, A DOPIERO ICH BRAK URUCHAMIA (b) — DEC-44. Wpis maszyny w sieci
     CUSTOM-MODE nie niesie pola `network` w ogole (#2028), wiec sposob pierwszy — jawna referencja
     z `sieci_maszyny` — na zywych danych milczy i (b) bylo sciezka DOMYSLNA. Sposob drugi to mapa
     podsiec->siec zbudowana ze zdarzen `subnetworks.insert` z TEGO SAMEGO okna odczytu: wpis maszyny
@@ -1130,7 +1130,7 @@ def zmierz(args) -> int:
                 # „siec X dostala obciazenie" bez tego zastrzezenia bylo zdaniem twierdzacym wiecej, niz
                 # pomiar uprawnia: maszyna mogla stac w sieci dojrzalej.
                 #
-                # ODKAD JEST MAPA PODSIEC->SIEC (DEC-43) TA SCIEZKA JEST WYJATKIEM, A NIE DOMYSLNA — ale
+                # ODKAD JEST MAPA PODSIEC->SIEC (DEC-44) TA SCIEZKA JEST WYJATKIEM, A NIE DOMYSLNA — ale
                 # nadal istnieje (podsiec starsza niz okno odczytu, brak strumienia). Adnotacja nazywa
                 # ZRODLO odczytu, bo „z wpisu" i „z mapy" roznia sie tym, czego wymagaly: mapa dziala
                 # tylko wtedy, gdy `subnetworks.insert` trafil do tego samego okna. Dyzurny, ktory tego
