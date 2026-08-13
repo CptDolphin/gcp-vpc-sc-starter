@@ -11,15 +11,20 @@
 #   ./install.sh /sciezka/do/repo --force          # nadpisuje
 #   ./install.sh /sciezka --dry-run                # tylko pokaż mapowanie
 #   ./install.sh /sciezka --only validate.yml      # JEDEN plik — wdrożenie etapami (docs/1-wdrozenie.md)
+#   ./install.sh /sciezka --zachowaj-przyklad      # NIE czyść członka przykładowego (używa tego selftest)
 set -euo pipefail
 
 DRY=0
 FORCE=0
 ONLY=""
 TARGET=""
+# Materiał przykładowy (członek + jego zgoda na egress) zostaje TYLKO dla selftestu startera — patrz
+# blok „CZŁONEK PRZYKŁADOWY NIE JEDZIE DO WDROŻENIA" niżej. Wdrożenie nigdy nie używa tej flagi.
+ZACHOWAJ_PRZYKLAD=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) DRY=1 ;;
+    --zachowaj-przyklad) ZACHOWAJ_PRZYKLAD=1 ;;
     --force)   FORCE=1 ;;
     --only)    shift; ONLY="${1:-}"; [ -n "$ONLY" ] || { echo "--only wymaga wzorca nazwy" >&2; exit 2; } ;;
     -*)        echo "nieznany argument: $1" >&2; exit 2 ;;
@@ -110,11 +115,63 @@ if [ "$DRY" -eq 1 ]; then
 fi
 
 echo "Skopiowano $copied plików (pominięto $skipped)."
+
+# CZŁONEK PRZYKŁADOWY NIE JEDZIE DO WDROŻENIA — i to nie jest sprzątanie, tylko warunek wykonalności.
+#
+# `template/perimeter/projects.yaml.example` niesie ŻYWY wpis członka z `project_number: '000000000000'`,
+# a `policy.yaml` — pokrywającą go zgodę w `egress_approvals`. Oba są tam CELOWO: bez nich selftest
+# startera nie miałby na czym sprawdzić drogi zgody na egress (patrz komentarz nad `egress_approvals`).
+# W REPOZYTORIUM PERIMETRU ta sama para jest jednak nie do przejścia w obie strony (zmierzone #2062,
+# próba generalna, pierwsze realne rozpakowanie):
+#   * zostawiona    → pierwszy `terraform apply` pada na API:
+#       Invalid perimeter member: 'projects/000000000000'. Must be of the form 'projects/[1-9][0-9]{0,18}'
+#   * sam wpis usunięty → bramka OPA `vpcsc.onboarding` odrzuca PR:
+#       egress_approvals: zgoda wskazuje członka "example-division-prj-example-vertex-dev", którego nie ma
+# Czyli świeżo rozpakowany starter nie dawał się ani zaapplikować, ani przepchnąć przez własne bramki,
+# dopóki ktoś nie wyczyścił OBU miejsc naraz — a żaden krok procedury o tym nie mówił.
+#
+# Granica jest więc tutaj: przykład zostaje w STARTERZE (selftest ma swój materiał), a WDROŻENIE dostaje
+# puste listy. Pierwszy członek wchodzi wnioskiem, przez bramki — czyli tak, jak ma wchodzić każdy.
+if [ "$DRY" -eq 0 ] && [ -z "$ONLY" ] && [ "$ZACHOWAJ_PRZYKLAD" -eq 0 ]; then
+  wyczyszczono=""
+  if [ -f "$TARGET/perimeter/projects.yaml" ] && grep -q "project_number: '000000000000'" "$TARGET/perimeter/projects.yaml"; then
+    printf 'schema_version: 1\n# Pierwszy członek wchodzi WNIOSKIEM (pull request), nie edycją tego pliku po rozpakowaniu.\n# Kształt wpisu: schemas/member.schema.json + docs/1-wdrozenie.md; przykład: starter, examples/.\nmembers: []\n' \
+      > "$TARGET/perimeter/projects.yaml"
+    wyczyszczono="$wyczyszczono perimeter/projects.yaml"
+  fi
+  if [ -f "$TARGET/perimeter/policy.yaml" ] && grep -q 'member: example-division-prj-example-vertex-dev' "$TARGET/perimeter/policy.yaml"; then
+    python3 - "$TARGET/perimeter/policy.yaml" <<'PY'
+import re, sys
+p = sys.argv[1]
+s = open(p, encoding='utf-8').read()
+# Zgoda przykładowa idzie do komentarza (nie znika): jest jedynym w repo wzorcem wypełnionego wpisu,
+# a bramka czyta wyłącznie treść aktywną. Kotwicą jest nagłówek sekcji, nie numer linii.
+s = re.sub(r'^egress_approvals:\n(?:  [^\n]*\n|\n(?=  ))+',
+           lambda m: 'egress_approvals: []\n# Wzorzec wypełnionej zgody (odkomentuj RAZEM z członkiem, którego dotyczy):\n'
+                     + ''.join('#' + l + '\n' for l in m.group(0).splitlines()[1:]),
+           s, count=1, flags=re.M)
+open(p, 'w', encoding='utf-8').write(s)
+PY
+    wyczyszczono="$wyczyszczono perimeter/policy.yaml"
+  fi
+  [ -z "$wyczyszczono" ] || echo "Wyczyszczono materiał przykładowy (członek + jego zgoda na egress):$wyczyszczono"
+fi
 cat <<'NEXT'
 
 Następne kroki w docelowym repo (kolejność ma znaczenie — patrz docs/1-wdrozenie.md):
-  1. Podmień PLACEHOLDERY: perimeter/policy.yaml (org_id, access_policy_name), .github/CODEOWNERS (@your-org/*),
-     .github/workflows/*.yml (WIF_PROVIDER, TF_SA, BACKEND_BUCKET, SNOW_INSTANCE).
+  1. Podmień PLACEHOLDERY — pełna lista w docs/1-wdrozenie.md. Minimum, bez którego nic nie ruszy:
+       perimeter/policy.yaml       org_id, access_policy_name, contract.bucket, contract.state_bucket,
+                                   monitoring.project_id, konta w baseline_ingress, control_plane_projects
+                                   (WYMAGANA sekcja: projekt administracyjny i NUMER projektu bucketa stanu)
+       perimeter/policy.yaml       perimeter.name/title — to NIE jest placeholder, tylko przykład `ai_core`,
+                                   a nazwa jest NIEZMIENNA po utworzeniu granicy. Podmień świadomie.
+       terraform/versions.tf       bucket stanu   ORAZ  iam-bootstrap/versions.tf  (ten sam bucket,
+                                   ROZŁĄCZNE prefiksy — inaczej pipeline pisze do stanu swoich uprawnień)
+       .github/CODEOWNERS          @your-org/* → realne zespoły. DWA ROZŁĄCZNE zestawy: właściciel
+                                   perimeter/policy.yaml musi mieć kogoś spoza właścicieli
+                                   perimeter/projects.yaml (zgoda na egress ≠ wniosek; bramka to sprawdza)
+     Zmienne repozytorium (WIF_PROVIDER, *_SERVICE_ACCOUNT, ORG_ID, MONITORING_PROJECT…) NIE są w plikach —
+     ustawia je tools/bootstrap_github.sh i to on wypisuje, których brakuje.
   2. terraform -chdir=terraform init && terraform -chdir=terraform validate
   3. pre-commit install && pre-commit run --all-files
   4. Ustaw ochronę gałęzi + environment `perimeter-apply`: polityka gałęzi ograniczona do gałęzi domyślnej

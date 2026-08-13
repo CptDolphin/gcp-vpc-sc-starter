@@ -106,7 +106,10 @@ def bootstrap() -> None:
     ROOT = pathlib.Path(tempfile.mkdtemp(prefix="vpcsc-starter-selftest-"))
     print(f"\n== rozpakowanie szablonow (install.sh) -> {ROOT} ==")
 
-    p = sh(["bash", str(STARTER / "install.sh"), str(ROOT)])
+    # `--zachowaj-przyklad`: reszta tego selftestu orzeka o RENDERZE członka, więc potrzebuje materiału,
+    # którego zwykłe rozpakowanie świadomie NIE zostawia (członek z `projects/000000000000` nie przechodzi
+    # przez API ACM — #2062). Osobny test niżej pilnuje, że tryb bez flagi te listy CZYŚCI.
+    p = sh(["bash", str(STARTER / "install.sh"), str(ROOT), "--zachowaj-przyklad"])
     check("install.sh konczy sie sukcesem", p.returncode == 0, p.stdout + p.stderr)
 
     expected = {
@@ -223,6 +226,22 @@ def bootstrap() -> None:
     p = sh(["bash", str(STARTER / "install.sh"), str(solo), "--only", "nie-ma-takiego"])
     check("install.sh --only bez trafienia PADA", p.returncode != 0, f"rc={p.returncode}")
     shutil.rmtree(solo, ignore_errors=True)
+
+    # ROZPAKOWANIE DOMYŚLNE NIE ZOSTAWIA CZŁONKA PRZYKŁADOWEGO — test NEGATYWNY do `--zachowaj-przyklad`.
+    #
+    # Bez tego guardu cała ta ścieżka jest deklaracją: reszta selftestu jedzie z flagą, więc PATRZY WYŁĄCZNIE
+    # na wariant z przykładem i regresja w trybie domyślnym przeszłaby niezauważona. A ten wariant to jedyny,
+    # którego używa wdrożenie. Zmierzony koszt regresji (#2062): świeżo rozpakowany starter, w którym
+    # `terraform apply` pada na `projects/000000000000`, a usunięcie samego członka wywraca bramkę OPA na
+    # osieroconej zgodzie w `egress_approvals` — czyli materiał opisany, obramkowany i niewykonalny.
+    czysty = pathlib.Path(tempfile.mkdtemp(prefix="vpcsc-czysty-"))
+    sh(["bash", str(STARTER / "install.sh"), str(czysty)])
+    czlonkowie_czysto = yaml.safe_load((czysty / "perimeter/projects.yaml").read_text())["members"]
+    zgody_czysto = yaml.safe_load((czysty / "perimeter/policy.yaml").read_text())["egress_approvals"]
+    check("install.sh bez flagi CZYSCI czlonka przykladowego i jego zgode",
+          czlonkowie_czysto == [] and zgody_czysto == [],
+          f"members={czlonkowie_czysto!r} egress_approvals={zgody_czysto!r}")
+    shutil.rmtree(czysty, ignore_errors=True)
 
     # Szablony muszą pozostać martwe: w template/ nie ma ANI JEDNEGO pliku-kropki ani żywego .tf,
     # bo działałyby w TYM repo (pre-commit walidowałby cudzy szkielet, git czytałby cudze .gitattributes).
