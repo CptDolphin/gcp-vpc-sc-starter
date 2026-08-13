@@ -347,8 +347,15 @@ jobs:
           # Te dwa stany NIE są dowodem na granicę i muszą zostać nazwane osobno, bo wyglądają identycznie.
           MARKERY_API_WYLACZONE = ("has not been used in project", "it is disabled",
                                    "SERVICE_DISABLED", "API has not been used")
+          # `Permission denied for all log views` — ZMIERZONE, nie wydedukowane. Tak odpowiada
+          # `gcloud logging read`, gdy tozsamosc nie ma `logging.logEntries.list` w sondowanym projekcie.
+          # Komunikat nie zawiera ANI JEDNEGO z pozostalych markerow tej krotki, wiec bez tej pozycji
+          # kontrola pozytywna pozbawiona nadania konczyla sie jako `PADLO Z INNEGO POWODU` — czyli
+          # poprawnie ODROZNIONA od odmowy granicy, ale bez nazwania przyczyny. Wylapane wlasnie przez
+          # test anty-tautologiczny (odebranie nadania per-projekt), bo tylko on wchodzi w ten stan.
           MARKERY_BRAK_ROLI = ("does not have permission", "Permission denied on resource",
-                               "IAM_PERMISSION_DENIED", "caller does not have permission")
+                               "IAM_PERMISSION_DENIED", "caller does not have permission",
+                               "Permission denied for all log views")
 
           # nazwa -> (czy ma przejsc przy expect=open, czy ma przejsc przy expect=blocked, po co ta sonda)
           PLAN = {
