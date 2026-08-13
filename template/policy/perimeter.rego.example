@@ -340,14 +340,79 @@ deny contains msg if {
 
 # --- operacje destrukcyjne --------------------------------------------------------------------------
 
-# Usunięcie perimetru albo access levelu to operacja break-glass, nie rutyna PR-owa. CI nie powinien mieć
-# nawet uprawnienia do `servicePerimeters.delete` (IAM Deny), ale bramka jest tańsza niż wykrycie po fakcie.
+# Usunięcie PERIMETRU to operacja break-glass, nie rutyna PR-owa: nie istnieje wniosek dywizji, którego
+# skutkiem jest „granica znika". CI nie powinien mieć nawet uprawnienia do `servicePerimeters.delete`
+# (IAM Deny), ale bramka jest tańsza niż wykrycie po fakcie.
 deny contains msg if {
 	some rc in input.resource_changes
-	rc.type in {
-		"google_access_context_manager_service_perimeter",
-		"google_access_context_manager_access_level",
-	}
+	rc.type == "google_access_context_manager_service_perimeter"
 	"delete" in rc.change.actions
-	msg := sprintf("%s: plan usuwa obiekt polityki dostępu — to ścieżka break-glass, nie zwykły PR", [rc.address])
+	msg := sprintf("%s: plan usuwa PERIMETR — to ścieżka break-glass, nie zwykły PR", [rc.address])
+}
+
+# ACCESS LEVEL JEST INNYM OBIEKTEM NIŻ PERIMETR I DO 2026-08-13 BYŁ Z NIM ZRÓWNANY — to była pomyłka
+# z konsekwencją, której nikt nie widział, bo trafiała wyłącznie w OFFBOARDING.
+#
+# Poziom, którego nikt już nie referuje, nie autoryzuje niczego: jego skasowanie nie zdejmuje ochrony
+# z nikogo i jest OSTATNIM KROKIEM wyprowadzenia dywizji, która przyszła z własnymi zakresami. Zrównanie
+# go z perimetrem dawało układ, w którym:
+#   * `rules.tf` ma `depends_on` na access level PO TO, żeby `destroy` szedł w kolejności reguła → poziom
+#     (bez tego API odrzuca: `you must first remove the reference`) — czyli repozytorium DEKLARUJE, że ta
+#     ścieżka istnieje i ma działać,
+#   * a ta reguła nie wpuszczała jej ANI RAZU przez jedyną drogę, którą granica się zmienia (pull request
+#     → apply; obie ścieżki uruchamiają te same bramki). Dwa niezmienniki mówiły coś przeciwnego.
+# Skutek uboczny był cichy i skumulowany: katalog poziomów mógł tylko rosnąć, a limit access leveli jest
+# **na ORGANIZACJĘ** (500), nie na politykę ani na perimetr — czyli wyciek pojemności org-plane.
+#
+# CO ZOSTAJE ZABRONIONE: skasowanie poziomu, który po tej zmianie NADAL jest przez coś referowany.
+# To jest dokładnie ten przypadek, w którym API odmawia w połowie apply — bramka mówi to samo na PR-ze,
+# nazwiskiem obiektu i przed dotknięciem granicy.
+#
+# CZEGO TA BRAMKA NIE WIDZI (świadomy residual, nie przeoczenie): referencji spoza TEJ konfiguracji —
+# reguły dopisanej z konsoli, reguły innego perimetru w tej samej polityce, inline'owej polityki na
+# szkielecie. Zostają one wyłapane przez API przy apply, komunikatem `you must first remove the reference`,
+# który wskazuje obiekt — degradacja głośna i konkretna, nie cicha.
+#
+# DLACZEGO NIE LICZYMY REFERENCJI Z INLINE'OWYCH `ingress_policies` NA SZKIELECIE, choć są w plan-JSON:
+# szkielet ma na nich `ignore_changes`, więc `planned_values` niesie tam wartość ODŚWIEŻONĄ Z API, czyli
+# stan SPRZED tej zmiany (zmierzone na żywym planie 2026-08-13: `spec[0].ingress_policies` = 8 reguł,
+# w tym ta, którą ten sam plan usuwa). Reguła oparta na nich odrzucałaby KAŻDY poprawny offboarding —
+# opisywałaby świat przed zmianą, a pyta o świat po niej.
+referowane_access_levels contains nazwa if {
+	some r in planned
+	some block in object.get(r.values, "ingress_from", [])
+	some s in object.get(block, "sources", [])
+	nazwa := s.access_level
+}
+
+# Kompozycja: poziom wskazany w `required_access_levels` innego poziomu też jest referencją — API
+# potraktuje ją tak samo, a renderer takich zależności nie zna (nazwa jest stringiem z YAML-a).
+referowane_access_levels contains nazwa if {
+	some r in input.planned_values.root_module.resources
+	r.type == "google_access_context_manager_access_level"
+	some b in object.get(r.values, "basic", [])
+	some c in object.get(b, "conditions", [])
+	some nazwa in object.get(c, "required_access_levels", [])
+}
+
+deny contains msg if {
+	some rc in input.resource_changes
+	rc.type == "google_access_context_manager_access_level"
+	"delete" in rc.change.actions
+	nazwa := object.get(object.get(rc.change, "before", {}), "name", "")
+	nazwa in referowane_access_levels
+	msg := sprintf(
+		"%s: plan usuwa access level `%s`, który po tej zmianie NADAL jest referowany — API odrzuci to w połowie apply (`you must first remove the reference`). Usuń najpierw reguły (albo kompozycje), które go używają",
+		[rc.address, nazwa],
+	)
+}
+
+# FAIL-CLOSED: bez nazwy w `change.before` nie da się orzec, czy ktoś poziom jeszcze referuje. Bramka,
+# która w takiej sytuacji przepuszcza, jest gorsza od jej braku — wygląda na uzbrojoną i nie pyta o nic.
+deny contains msg if {
+	some rc in input.resource_changes
+	rc.type == "google_access_context_manager_access_level"
+	"delete" in rc.change.actions
+	object.get(object.get(rc.change, "before", {}), "name", "") == ""
+	msg := sprintf("%s: plan usuwa access level, ale plan-JSON nie niesie jego nazwy (`change.before.name`) — bez niej nie da się sprawdzić, czy nadal jest referowany", [rc.address])
 }
