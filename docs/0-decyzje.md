@@ -2917,7 +2917,7 @@ a ona pyta o **kształt** zmiany, nie o to, kto ją przeczytał.
 
 ---
 
-## DEC-42 — Kanał ticketowy zostaje na fixturach, a fixture przestaje udawać system rekordu
+## DEC-43 — Kanał ticketowy zostaje na fixturach, a fixture przestaje udawać system rekordu
 
 **Decyzja.** Kanał ServiceNow **nie czeka na żywą instancję** i nie udaje, że ją miał. Trzy rzeczy naraz:
 

@@ -7,7 +7,7 @@ integracji, dopisywałby sobie projekty do perimetru całej organizacji, w pełn
 Oddzwonienie zamienia „ufam wiadomości" w „ufam systemowi rekordu". Nie zmienia tego zawężenie kanału do
 `workflow_dispatch`: węższe uprawnienie nadawcy zmniejsza skutki wycieku, ale nie czyni payloadu prawdziwym.
 
-KONTRAKT ZAPYTANIA — SPISANY, BO NIE JEST ZMIERZONY (DEC-42). Ten skrypt nie rozmawiał jeszcze z żadną
+KONTRAKT ZAPYTANIA — SPISANY, BO NIE JEST ZMIERZONY (DEC-43). Ten skrypt nie rozmawiał jeszcze z żadną
 instancją ServiceNow; wszystko, co o niej „wie", stoi na dokumentacji dostawcy i jest wypisane niżej,
 żeby dało się to skonfrontować JEDNYM odczytem, a nie czytaniem kodu:
 

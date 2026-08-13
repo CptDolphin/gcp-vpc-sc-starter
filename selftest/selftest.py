@@ -186,7 +186,7 @@ def bootstrap() -> None:
         "tests/snow-approved.json", "tests/snow-not-approved.json", "tests/snow-self-approved.json",
         "tests/snow-wrong-project.json", "tests/dispatch-example.json",
         "tests/snow-not-found.json", "tests/snow-no-approval.json",
-        # Trzy negatywy piatej kontroli (DEC-42): samo-zatwierdzenie po OSOBIE (grupa poprawna, wiec
+        # Trzy negatywy piatej kontroli (DEC-43): samo-zatwierdzenie po OSOBIE (grupa poprawna, wiec
         # cztery pierwsze checki przechodza), ksztalt odpowiedzi BEZ `sysparm_fields` (referencja jako
         # {link, value} — jedyny fixture opisujacy odpowiedz, ktora realny endpoint na pewno umie
         # wyprodukowac) i tozsamosc wnioskodawcy jako sys_id (porownanie nigdy by nie odrzucilo).
@@ -1688,7 +1688,7 @@ def test_kanal_ticketowy() -> None:
                 check("intake fixture — polecenie z nazwy NIE zostalo wykonane",
                       not any(l.strip() == "WSTRZYKNIETE" for l in r.stdout.splitlines()), r.stdout[-200:])
 
-    # PRZEBIEG NA FIXTURZE NIE MOZE WYGLADAC JAK WNIOSEK (DEC-42). Zmierzone, zanim to powstalo: przebieg
+    # PRZEBIEG NA FIXTURZE NIE MOZE WYGLADAC JAK WNIOSEK (DEC-43). Zmierzone, zanim to powstalo: przebieg
     # w trybie testowym otworzyl pull requesta z ta sama nazwa galezi, tym samym tytulem, tymi samymi
     # etykietami i opisem twierdzacym „verified against the ServiceNow API" — zdaniem NIEPRAWDZIWYM dla
     # przebiegu, ktory ServiceNow nie zapytal. Asercje ida na WYJSCIACH kroku (co realnie wyprodukowal),
@@ -1769,7 +1769,7 @@ def test_kanal_ticketowy() -> None:
     # snow_verify.py: piec checkow, piec rodzajow negatywu. `snow-not-found` domyka punkt 1 („ticket
     # istnieje"), ktory przez caly czas byl JEDYNYM bez pokrycia — ta galaz kodu nie wykonala sie
     # w zadnym tescie. `snow-no-approval` dokłada dowod, ze NIEZNANY ksztalt odpowiedzi degraduje sie
-    # do odmowy, a nie do zgody. Trzy ostatnie to piata kontrola (DEC-42).
+    # do odmowy, a nie do zgody. Trzy ostatnie to piata kontrola (DEC-43).
     for fixture, opis in [
         ("tests/snow-not-found.json", "ticket nie istnieje w systemie rekordu"),
         ("tests/snow-no-approval.json", "ticket bez zadnego sladu zatwierdzenia"),

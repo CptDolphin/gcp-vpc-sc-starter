@@ -59,7 +59,7 @@ on:
           TEST MODE. Name of a fixture under tests/ (without the .json), used INSTEAD of calling
           ServiceNow. Leave empty in normal operation — see the "test mode" step for what it does and
           does not let through. A run with this input set MARKS ITSELF: annotation, run summary, branch
-          name, pull-request title and label all say the verdict came from a fixture (DEC-42).
+          name, pull-request title and label all say the verdict came from a fixture (DEC-43).
         required: false
         default: ""
 
@@ -441,7 +441,7 @@ jobs:
           # Ten krok nie wie, czy przebieg byl testowy, i nie ma jak o tym zapomniec — a poprzednio wiedzial
           # o tym TYLKO krok fixture'u, wiec pull request przebiegu testowego byl nieodroznialny od wniosku:
           # ta sama nazwa galezi, ten sam tytul, te same etykiety i opis twierdzacy „verified against the
-          # ServiceNow API" (zdanie nieprawdziwe dla przebiegu, ktory ServiceNow nie zapytal). DEC-42.
+          # ServiceNow API" (zdanie nieprawdziwe dla przebiegu, ktory ServiceNow nie zapytal). DEC-43.
           branch: ${{ steps.fixture.outputs.galaz }}
           title: ${{ steps.fixture.outputs.tytul }}
           commit-message: "onboard: add ${{ inputs.project_id }} to the dry-run configuration"

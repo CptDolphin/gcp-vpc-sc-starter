@@ -30,7 +30,7 @@ odrzuca, przechodzi każdy test pozytywny i nie chroni niczego. `snow_verify.py`
 ma swój fixture — `snow-not-found` domyka punkt 1 („ticket istnieje"), który przez cały czas był **jedynym
 bez pokrycia**: kod tej gałęzi nigdy nie wykonał się w żadnym teście.
 
-## Te pliki są KONTRAKTEM, nie odpowiedzią systemu rekordu (DEC-42)
+## Te pliki są KONTRAKTEM, nie odpowiedzią systemu rekordu (DEC-43)
 
 Każdy `snow-*.json` niesie pole **`_material_testowy`** i bez niego `snow_verify.py` **odmawia** przyjęcia go
 w trybie offline (`rc=2`). To nie jest ozdoba: do tej pory jedyną różnicą między „werdykt z systemu rekordu"

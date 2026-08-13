@@ -332,7 +332,7 @@ ze zgłoszenia. `tests/snow-approved.json` mówi `prj-x-test` — żadne wejści
 na czyjś realny projekt. Tryb testowy da się włączyć **wyłącznie** jawnym wejściem `fixture` zgłoszenia
 (wartość domyślna: pusta) — nie zmienną repozytorium, nie sekretem, nie plikiem w drzewie.
 
-**Czym przebieg testowy KRZYCZY, że jest testem (DEC-42).** Do 2026-08-13 jedynym śladem trybu testowego
+**Czym przebieg testowy KRZYCZY, że jest testem (DEC-43).** Do 2026-08-13 jedynym śladem trybu testowego
 poza logiem kroku była nazwa kroku, która w trybie normalnym wygląda tak samo. Zmierzone: przebieg
 z fixture'em otworzył pull requesta z **tą samą** nazwą gałęzi, **tym samym** tytułem, **tymi samymi**
 etykietami i opisem twierdzącym „verified against the ServiceNow API" — zdaniem nieprawdziwym dla przebiegu,
@@ -414,7 +414,7 @@ raportuje jako **niezweryfikowane** — to Directory API Workspace, inna domena 
 
 ---
 
-## 8. Kontrakt z ServiceNow — spisany, bo NIE jest zmierzony (DEC-42)
+## 8. Kontrakt z ServiceNow — spisany, bo NIE jest zmierzony (DEC-43)
 
 Ten kanał **nie rozmawiał z żadną instancją ServiceNow ani razu**. Cała jego ścieżka — łącznie z jedynym
 przebiegiem, który dojechał do pull requesta — była weryfikowana fixture'em z `tests/`. To nie jest to samo,
@@ -500,4 +500,4 @@ które trzeba znać, zanim ktoś oprze na tym bramkę:
 Wniosek praktyczny: PDI skraca listę z §8.3 o punkty 2, 4 i 5 (i część 3), ale punktu 1 nie zamknie nikt poza
 organizacją docelową. Dlatego **uruchomienie kanału ticketowego w nowym środowisku ma prerekwizyt: przelot
 §8.4 na jego instancji**, a do tego czasu kanał wolno uruchamiać wyłącznie w trybie testowym (§6c) — który,
-od DEC-42, sam mówi o sobie, czym jest.
+od DEC-43, sam mówi o sobie, czym jest.
