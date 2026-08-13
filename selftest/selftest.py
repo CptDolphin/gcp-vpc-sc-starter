@@ -5983,7 +5983,7 @@ def test_samodzielnosc() -> None:
               not trafienia, "; ".join(trafienia[:6]))
 
     # Anty-tautologia: skan, który nic nie znajduje na czystym wejściu, mógłby po prostu nie działać
-    # (zły regex, pominięte rozszerzenie). Podkładamy tekst naruszający KAŻDĄ z pięciu klas reguł
+    # (zły regex, pominięte rozszerzenie). Podkładamy tekst naruszający KAŻDĄ klasę reguł kształtu
     # i wymagamy kompletu trafień. Wartości w próbce są wymyślone — próbka jest częścią materiału
     # publicznego, więc nie może nieść niczego realnego.
     # Próbkę SKLEJAMY z kawałków, zamiast wpisać wprost. DLACZEGO: ten plik też podlega skanowi, więc
@@ -5993,14 +5993,65 @@ def test_samodzielnosc() -> None:
     probka = (
         "Przyklad naruszenia: repo " + "labu, ADR GCP-" + "0999, klie" + "nt prosi o dostep.\n"
         "Numer projektu 987654" + "321098, zgloszenie RITM" + "0912345, dostawca: Hetz" + "ner.\n"
+        # Klasy identyfikatorów wdrożenia. Numer w ŚCIEŻCE zasobu ma tu 11 cyfr, a nie 12 — inaczej
+        # zgłosiłaby go reguła bez kontekstu i asercja przeszłaby, choć reguła kontekstowa byłaby martwa.
+        # Sklejenie musi rozbic POCZATEK wzorca, a nie jego srodek. Reguly kontekstowe dopasowuja sie od
+        # przedrostka (schemat adresu, nazwa zasobu przed ukosnikiem), wiec kawalek urwany DALEJ jest
+        # sam w sobie kompletnym trafieniem i zapala guard na TYM pliku. Zlapane wlasnie tak, dwa razy:
+        # raz na probce, raz na komentarzu, ktory ja tlumaczyl cytujac urwane kawalki doslownie.
+        "Kubelek gs:" + "//bkt-jakas-firma-tfstate, numer w sciezce proj" + "ects/98765432109,\n"
+        "adres wlasciciela platform@jakas-" + "firma.io.\n"
     )
     powody = {powod for _, _, powod in skan.skanuj_tekst(probka)}
-    check("skan samodzielnosci LAPIE wszystkie szesc klas naruszen (test anty-tautologiczny)",
-          len(powody) == 6, f"zlapane klasy ({len(powody)}): {sorted(powody)}")
+    check("skan samodzielnosci LAPIE wszystkie dziewiec klas naruszen (test anty-tautologiczny)",
+          len(powody) == 9, f"zlapane klasy ({len(powody)}): {sorted(powody)}")
 
     # Skan musi tez umiec powiedziec CZYSTO — inaczej zielone nic nie znaczy, bo zawsze cos zglasza.
     check("skan samodzielnosci nie zglasza nic na czystym tekscie",
           not skan.skanuj_tekst("Zwykly akapit o perimetrze i regulach ingress. Projekt 123456789012."))
+
+    # KONWENCJA PRZYKLADOW MUSI PRZECHODZIC. Regula, ktora wywraca sie o wlasny przyklad, uczy kasowania
+    # przykladow — a material bez przykladow przestaje dac sie uruchomic. Ta probka to dokladnie te formy,
+    # ktorych `docs/` i `template/` uzywaja na co dzien; kazda z nich lezy w zasiegu jednej z regul wyzej.
+    konwencja = (
+        "Projekt prj-example-adm, dywizja example-division, numer 123456789012.\n"
+        "Sciezki: projects/123456789012, folders/123, accessPolicies/210987654321.\n"
+        "Kubelki: gs://bkt-example-tfstate, gs://bkt-example-contracts/vpc-sc/contract.json.\n"
+        "Konta: sa-vpcsc-plan@prj-example-adm.iam.gserviceaccount.com, "
+        "service-000000000000@gcp-sa-aiplatform.iam.gserviceaccount.com.\n"
+        "Ludzie i grupy: user:example.person@example.com, group:grp-example-division-cloud@example.com.\n"
+        "Bot platformy: github-actions[bot]@users.noreply.github.com. Zgloszenie RITM0000001.\n"
+    )
+    falszywe = skan.skanuj_tekst(konwencja)
+    check("skan samodzielnosci PRZEPUSZCZA cala konwencje przykladow (zero falszywych alarmow)",
+          not falszywe, f"{len(falszywe)}: {[w[2] for w in falszywe]}")
+
+    # Denylista skrotow: sprawdzamy MECHANIZM, nie wartosci. Wartosci sprawdzic sie nie da — wpisanie
+    # ich do testu opublikowaloby dokladnie to, co denylista usuwa (po to sa skroty). Zamiast tego
+    # liczymy skrot tokenu WYMYSLONEGO i zadamy, zeby skan go zlapal po dopisaniu do mapy: gdyby
+    # `tokeny_zakazane` bylo martwe (zly obcinek, zla wielkosc liter), ta asercja czerwieni sie od razu.
+    token = "przykladowanazwaorganizacji"
+    skrot = hashlib.sha256(token.encode()).hexdigest()[:16]
+    pierwotne = dict(skan.ZAKAZANE_SKROTY)
+    try:
+        skan.ZAKAZANE_SKROTY[skrot] = "token testowy"
+        zlapane = {p for _, _, p in skan.skanuj_tekst(f"Tekst z {token.upper()} w srodku.")}
+        check("mechanizm skrotow lapie token po dopisaniu (wielkosc liter bez znaczenia)",
+              "token testowy" in zlapane, f"zlapane: {sorted(zlapane)}")
+        del skan.ZAKAZANE_SKROTY[skrot]
+        check("mechanizm skrotow milczy po usunieciu wpisu (kontrola: nie lapie czegokolwiek)",
+              not skan.skanuj_tekst(f"Tekst z {token} w srodku."))
+    finally:
+        skan.ZAKAZANE_SKROTY.clear()
+        skan.ZAKAZANE_SKROTY.update(pierwotne)
+
+    # Klasy, ktore MUSZA byc pokryte skrotem, nazwane etykieta. Sama obecnosc wpisu nie dowodzi, ze
+    # skrot jest poprawny (to sprawdza pomiar na kopii drzewa, opisany w PR) — dowodzi, ze refaktor
+    # nie zdejmie klasy po cichu. Bez tej asercji usuniecie wiersza przechodzi na zielono.
+    etykiety = set(skan.ZAKAZANE_SKROTY.values())
+    for wymagana in ("prefiks identyfikatorow konkretnego wdrozenia", "domena konkretnego wdrozenia"):
+        check(f"denylista skrotow nadal pokrywa klase: {wymagana}",
+              wymagana in etykiety, f"etykiety: {sorted(etykiety)}")
 
 
 def test_bramki_na_sciezce_apply() -> None:
