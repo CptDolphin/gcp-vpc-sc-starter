@@ -31,14 +31,45 @@ step() { printf '\n== %s ==\n' "$1"; }
 # To jest bramka. Jeśli tu są różnice, import jest przedwczesny — nie dlatego, że „lepiej sprawdzić",
 # a dlatego, że apply po imporcie wyrówna chmurę do repo.
 step "1/4 · porównanie policy.yaml z żywym perimetrem"
-if ! python3 tools/perimeter_to_policy.py --policy-id "$POLICY_ID" --perimeter "$PERIMETER" --diff; then
-  cat >&2 <<'STOP'
+
+# NARZĘDZIE MUSI DAĆ SIĘ URUCHOMIĆ, ZANIM UWIERZYMY W JEGO WERDYKT.
+# Do 2026-08-13 ten wrapper brał KAŻDY niezerowy kod wyjścia za „są różnice". Skutek zmierzony na żywo
+# (A6): `perimeter_to_policy.py` NIE PARSOWAŁ SIĘ (SyntaxError — polski cudzysłów zamknięty znakiem
+# ASCII), a operator dostawał wiarygodnie wyglądający komunikat „STOP — policy.yaml NIE opisuje
+# rzeczywistości". Taka pomyłka nie kończy się nigdy: poprawiasz policy.yaml, uruchamiasz ponownie
+# i dostajesz ten sam werdykt, bo werdykt nie pochodził z porównania.
+if ! python3 -m py_compile tools/perimeter_to_policy.py 2>/tmp/a6_compile.err; then
+  echo >&2
+  echo "AWARIA — tools/perimeter_to_policy.py nie daje się skompilować. To NIE jest werdykt o policy.yaml." >&2
+  cat /tmp/a6_compile.err >&2
+  exit 3
+fi
+
+set +e
+python3 tools/perimeter_to_policy.py --policy-id "$POLICY_ID" --perimeter "$PERIMETER" --diff
+diff_rc=$?
+set -e
+
+# 2 = nie udało się porównać (gcloud padł, brak perimetru, brak uprawnienia). To awaria, nie różnica.
+if [ "$diff_rc" -ge 2 ]; then
+  echo >&2
+  echo "AWARIA — nie udało się ODCZYTAĆ perimetru, więc nie wiadomo, czy policy.yaml go opisuje." >&2
+  echo "Przeczytaj komunikat wyżej: 403 z braku uprawnienia, brak perimetru i odmowa VPC-SC wyglądają" >&2
+  echo "tak samo w kodzie wyjścia, a wymagają trzech różnych reakcji." >&2
+  exit 3
+fi
+
+if [ "$diff_rc" -ne 0 ]; then
+  # Podpowiedź cytuje ARGUMENTY, z którymi skrypt został wywołany (stąd heredoc bez cudzysłowów).
+  # Wcześniej stała tu nazwa perimetru z NASZEGO wdrożenia — na cudzej organizacji podpowiadała opis
+  # niewłaściwego obiektu, czyli kierowała operatora dokładnie tam, gdzie nie chciał patrzeć.
+  cat >&2 <<STOP
 
 STOP — policy.yaml NIE opisuje rzeczywistości.
 
 Nie importuj. Najpierw przenieś różnice DO PLIKU (kierunek: rzeczywistość → repo):
 
-    python3 tools/perimeter_to_policy.py --policy-id <ID> --perimeter <NAZWA> > /tmp/live.yaml
+    python3 tools/perimeter_to_policy.py --policy-id $POLICY_ID --perimeter $PERIMETER > /tmp/live.yaml
     # przepisz restricted_services i perimeter.name z /tmp/live.yaml do perimeter/policy.yaml
 
 Potem uruchom ten skrypt ponownie. Różnica, którą zignorujesz teraz, wróci jako apply zmieniający zakres

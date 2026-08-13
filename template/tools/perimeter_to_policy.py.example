@@ -36,7 +36,11 @@ def describe(policy_id: str, perimeter: str) -> dict:
          "--policy", policy_id, "--format", "json"],
         capture_output=True, text=True)
     if out.returncode != 0:
-        sys.exit(f"gcloud describe nie zadziałał:\n{out.stderr.strip()}")
+        # KOD 2 = "NIE UDAŁO SIĘ PORÓWNAĆ", a nie "są różnice". Wołający (brownfield_import.sh) musi
+        # rozróżnić te dwa stany: 403 z braku uprawnienia, brak perimetru i odmowa VPC-SC wyglądają tak
+        # samo w kodzie wyjścia, a znaczą co innego. Werdykt bierze się z TREŚCI, nie z faktu porażki.
+        print(f"gcloud describe nie zadziałał:\n{out.stderr.strip()}", file=sys.stderr)
+        raise SystemExit(2)
     return json.loads(out.stdout)
 
 
@@ -79,7 +83,7 @@ def to_policy_fragment(live: dict) -> dict:
         notes.append(
             f"UWAGA: vpc_accessible_services w chmurze ({len(live_allowed)} usług) NIE jest równe "
             f"restricted_services ({len(status.get('restrictedServices', []))}). Nasz model zakłada 1:1 — "
-            "jeśli tak ma zostać, trzeba rozszerzyć renderer, a nie „poprawić" listę.")
+            "jeśli tak ma zostać, trzeba rozszerzyć renderer, a nie „poprawić” listę.")
     if status.get("resources"):
         notes.append(
             f"INFO: perimetr ma już {len(status['resources'])} projektów w konfiguracji egzekwowanej. "
@@ -122,8 +126,28 @@ def diff_against_repo(fragment: dict, repo_policy: pathlib.Path) -> int:
         print("           → apply po imporcie DODAŁBY ochronę tych usług (może zablokować ruch)")
         diffs += 1
 
+    # vpc_accessible_services — POWÓD, DLA KTÓREGO TA FUNKCJA NIE KOŃCZY SIĘ NA USŁUGACH.
+    # Do 2026-08-13 porównywaliśmy wyłącznie `perimeter.name` i `restricted_services`, po czym
+    # drukowaliśmy „plan po imporcie powinien być pusty". ZMIERZONE (A6, przejęcie na żywym ACM): plan
+    # po takim „ZGODNE" pokazał `1 to change`, bo perimetr postawiony ręcznie NIE MA bloku
+    # `vpcAccessibleServices` w ogóle, a repo deklarowało `enable_restriction: true`. Obietnica pustego
+    # planu, której nie da się dotrzymać, jest gorsza niż brak obietnicy: operator czyta „ZGODNE"
+    # i przestaje czytać plan.
+    live_vas = fragment["vpc_accessible_services"]
+    repo_vas = repo.get("vpc_accessible_services") or {}
+    if bool(live_vas["enable_restriction"]) != bool(repo_vas.get("enable_restriction", False)):
+        print(f"  RÓŻNICA  vpc_accessible_services.enable_restriction: "
+              f"repo={repo_vas.get('enable_restriction')} chmura={live_vas['enable_restriction']}")
+        print("           → apply po imporcie ZMIENIŁBY zakres usług osiągalnych OD WEWNĄTRZ granicy")
+        diffs += 1
+
     if not diffs:
-        print("  ZGODNE   policy.yaml opisuje rzeczywistość — plan po imporcie powinien być pusty")
+        print("  ZGODNE   policy.yaml opisuje rzeczywistość w polach, które ten skrypt porównuje")
+        print("           UWAGA: to NIE JEST obietnica pustego planu. Konfiguracji dry-run (`spec`)")
+        print("           ten skrypt nie porównuje — perimetr postawiony ręcznie zwykle jej nie ma,")
+        print("           a nasz renderer ją tworzy (`use_explicit_dry_run_spec = true`). To zmiana")
+        print("           DOKŁADAJĄCA konfigurację logującą; egzekwowanej (`status`) nie rusza.")
+        print("           Rozstrzyga PLAN, nie ten komunikat — krok 3/4.")
     return diffs
 
 

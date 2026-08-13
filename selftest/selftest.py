@@ -2839,6 +2839,29 @@ def test_brownfield() -> None:
     # Niepusty plan musi kończyć się kodem błędu, nie zachętą do apply.
     check("niepusty plan (kod 2) konczy sie bledem", 'exit 2' in imp)
 
+    # AWARIA NARZĘDZIA != RÓŻNICA W KONFIGURACJI. Wrapper, który bierze każdy niezerowy kod wyjścia za
+    # „są różnice", zamienia niedziałające narzędzie w wiarygodnie wyglądający werdykt o cudzym perimetrze
+    # — i operator nigdy się nie dowie, że porównanie się nie odbyło (zmierzone na żywo, A6).
+    check("brownfield_import.sh kompiluje narzedzie PRZED zaufaniem werdyktowi",
+          "py_compile" in imp, "brak pre-kompilacji tools/perimeter_to_policy.py")
+    check("brownfield_import.sh odroznia awarie odczytu od roznicy",
+          "diff_rc" in imp and "-ge 2" in imp, "kazdy niezerowy kod traktowany jak roznica")
+
+    # KAŻDE NARZĘDZIE PYTHONOWE MUSI SIĘ SKOMPILOWAĆ — bramka na REALNY tryb awarii, nie na powierzchnię.
+    # Do 2026-08-13 ta funkcja czytała `perimeter_to_policy.py` jako TEKST i grepowała po nim wzorce.
+    # Plik przez cały ten czas miał SyntaxError (polski cudzysłów zamknięty znakiem ASCII) i przechodził
+    # komplet sprawdzeń, bo grep na tekście nie odróżnia kodu działającego od kodu, który się nie parsuje.
+    # W starterze pliki mają sufiks `.example`, więc nie widzi ich żaden linter pythonowy — ta bramka jest
+    # jedynym miejscem, w którym rozpakowany `*.py` jest w ogóle kompilowany.
+    narzedzia_py = sorted((ROOT / "tools").glob("*.py"))
+    check("tools/: sa narzedzia pythonowe do sprawdzenia", len(narzedzia_py) > 0, f"{len(narzedzia_py)}")
+    niekompilujace = []
+    for nar in narzedzia_py:
+        wynik = sh([sys.executable, "-m", "py_compile", str(nar)])
+        if wynik.returncode != 0:
+            niekompilujace.append(f"{nar.name}: {wynik.stderr.strip()[-160:]}")
+    check("tools/*.py: KAZDY sie kompiluje", not niekompilujace, "; ".join(niekompilujace))
+
     conv = (ROOT / "tools/perimeter_to_policy.py").read_text()
     # Kierunek jest jednoznaczny: rzeczywistość → plik. Skrypt, który nadpisuje policy.yaml automatycznie,
     # zamieniłby „przeczytaj różnicę" w „zaakceptuj różnicę".
