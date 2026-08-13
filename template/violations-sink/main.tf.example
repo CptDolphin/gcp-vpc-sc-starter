@@ -96,7 +96,7 @@ locals {
   # a wpis audytowy waży ~3,3 KB (zmierzone na tym kubełku) — czyli ~15 mln wpisów miesięcznie w cenie zero.
   # Żadna organizacja nie tworzy 15 mln maszyn na miesiąc; retencja <= 30 dni jest darmowa niezależnie.
   #
-  # DLACZEGO TEŻ `subnetworks.insert` (DEC-42). Wpis maszyny w sieci CUSTOM-MODE nie niesie pola
+  # DLACZEGO TEŻ `subnetworks.insert` (DEC-43). Wpis maszyny w sieci CUSTOM-MODE nie niesie pola
   # `networkInterfaces[].network` W OGÓLE — niesie wyłącznie `subnetwork` (zmierzone na żywym wpisie,
   # #2028). Bez trzeciego strumienia obserwator nie ma z czego zbudować mapy podsieć->sieć, więc każdą
   # maszynę liczy do KAŻDEJ świeżej sieci w projekcie (fail-closed) i nazywa w alercie sieć, w której tej
@@ -317,7 +317,7 @@ resource "google_logging_project_bucket_config" "network_inserts" {
   # odtworzyć, KTÓRA sieć i KIEDY była poza granicą, i ograniczyć, co mogło wtedy wyjść.
   retention_days = var.retention_days
 
-  description = "Zdarzenia sterujące Compute (utworzenie sieci VPC, podsieci i maszyny) z całej organizacji — wejście detektora okna „świeża sieć w członku egzekwowanym” (DEC-32, mapa podsieć->sieć DEC-42)."
+  description = "Zdarzenia sterujące Compute (utworzenie sieci VPC, podsieci i maszyny) z całej organizacji — wejście detektora okna „świeża sieć w członku egzekwowanym” (DEC-32, mapa podsieć->sieć DEC-43)."
 }
 
 resource "google_logging_organization_sink" "network_inserts" {

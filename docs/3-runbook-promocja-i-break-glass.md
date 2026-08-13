@@ -673,32 +673,40 @@ Wpis-nagrobek jest brzydki i jest właściwą reakcją.
 | projekt skasowany **przed** offboardingiem (kolejność złamana) | **wchodzimy w kroki 1–5 natychmiast po wykryciu**: wpis nadal zdejmuje ochronę z niczego i **fałszuje dowód promocyjny** |
 | projekt przywrócony (`undelete` w oknie 30 dni) | numer **ten sam**, więc konfiguracja granicy nie wymaga zmiany — ale **billing nie wraca**. Powrót do granicy idzie normalnym onboardingiem z pre-flightem, nie „cofnięciem offboardingu" |
 
-**Jak się o tym dowiemy.** Dziś: **nie dowiemy się sami** — martwego członka nie widzi żadna z warstw
-(`plan`, `apply`, dryf, `expiry-sweep`, raport, pre-flight, obserwator). Potrzebne są **dwie** rzeczy i obie
-trzeba świadomie ustawić przy wdrożeniu:
+**Jak się o tym dowiemy.** Martwego członka nie widzi ANI JEDNA z warstw pytających o zgodność Gita
+z chmurą (`plan`, `apply`, dryf, `expiry-sweep`, raport, pre-flight) — i nie jest to ich defekt: Git
+i granica zgadzają się co do numeru, którego nie ma. Odpowiada za to **osobne pytanie**, zadawane przez
+obserwatora: czy numer w granicy ma jeszcze za sobą projekt (**DEC-42**). Sygnał to metryka
+`custom.googleapis.com/vpcsc/members_not_active` i alert
+[„członek granicy bez potwierdzonego stanu ACTIVE"](7-alerty.md#martwy-czlonek), z rytmem **godzinnym**.
+Do kompletu potrzebne są jeszcze **dwie** rzeczy i obie trzeba świadomie ustawić przy wdrożeniu:
 
 1. **Uzgodnienie z zespołem właścicielskim projektów** — odpowiadające na cztery pytania: **skąd**
    dowiadujemy się o skasowaniu (ticket, subskrypcja Asset Inventory, lista) · **w jakim czasie** od
    `DELETE_REQUESTED` · czy jest **pytanie przed**, czy tylko **powiadomienie po** · **kto** po naszej stronie
    reaguje. Bez tego uzgodnienia zapisz wprost, że powiadomienia nie ma — milczące założenie jest gorsze
    od nazwanego braku.
-2. **Rekoncyliacja po naszej stronie**, w rytmie nie rzadszym niż okno obserwacji `dry-run` (dłuższa przerwa
-   dopuszcza promocję na dowodzie wyprodukowanym przez martwy projekt):
+2. **Rekoncyliacja po naszej stronie** — **wykonuje ją obserwator co godzinę** (DEC-42), czyli gęściej niż
+   wymagane „nie rzadziej niż okno obserwacji `dry-run`". Poniższa komenda jest **odczytem kontrolnym
+   człowieka** na tym samym źródle, z którego liczy się metryka — do użycia przy triage'u alertu albo gdy
+   chcesz potwierdzić stan bez czekania na przelot:
 
 ```bash
-python3 - <<'PY'
-import subprocess, sys
-sys.path.insert(0, "tools")
-import projects_file
-for m in projects_file.wczytaj(".")["members"]:
-    s = subprocess.run(["gcloud", "projects", "describe", m["project_id"],
-                        "--format=value(lifecycleState)"], capture_output=True, text=True)
-    print(m["project_id"], s.stdout.strip() or f"BRAK (rc={s.returncode})")
-PY
+gcloud asset search-all-resources --scope=organizations/<ORG_ID> \
+  --asset-types=cloudresourcemanager.googleapis.com/Project \
+  --billing-project=<PROJEKT_ADM> \
+  --format='table(additionalAttributes.projectId, project, state)'
 ```
 
-   → **DOWÓD:** `ACTIVE` przy każdym wpisie. Każde `DELETE_REQUESTED` lub `BRAK` = wejście w krok 1 dla tego
-   członka, tego samego dnia.
+   → **DOWÓD:** `ACTIVE` przy każdym numerze, który stoi w `spec.resources` albo `status.resources`. Każdy
+   inny stan = wejście w krok 1 dla tego członka, tego samego dnia. Numer **nieobecny w wyniku** to nie jest
+   „w porządku" — obserwator liczy go jako `unreadable` i alarmuje osobnym warunkiem; rozstrzyga wtedy
+   `gcloud projects describe <ID>`.
+
+   > [!NOTE]
+   > `--billing-project` jest tu potrzebny, bo to są poświadczenia **użytkownika**. Producent metryki go nie
+   > ustawia (nagłówek `X-Goog-User-Project` wymaga `serviceusage.services.use`, którego konto planu nie ma
+   > — kwota konta serwisowego idzie domyślnie na jego własny projekt).
 
 > [!WARNING]
 > Dwa fałszywe sygnały, oba zmierzone. **`gcloud projects list` nie pokazuje skasowanego projektu w ogóle**,

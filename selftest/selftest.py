@@ -129,7 +129,7 @@ def bootstrap() -> None:
         "policy/perimeter.rego", "policy/perimeter_test.rego",
         "schemas/member.schema.json", "schemas/projects.schema.json",
         "schemas/policy.schema.json", "schemas/profile.schema.json",
-        "schemas/access-level.schema.json",
+        "schemas/access-level.schema.json", "schemas/contributors.schema.json",
         "terraform/locals.tf", "terraform/members.tf", "terraform/outputs.tf",
         "terraform/perimeter.tf", "terraform/rules.tf", "terraform/versions.tf",
         "terraform/contract.tf", "terraform/tests/renderer.tftest.hcl", "terraform/monitoring.tf",
@@ -181,6 +181,8 @@ def bootstrap() -> None:
         "tests/snow-wrong-project.json", "tests/dispatch-example.json",
         "tests/snow-not-found.json", "tests/snow-no-approval.json",
         "tests/vpcsc-violation-dryrun.json",
+        # Fikstura detektora martwego czlonka (DEC-42) — wierny ksztalt odpowiedzi Asset Inventory.
+        "tests/asset-projekty.json",
     }
     # Dokumentacja jedzie razem z kodem. Wyliczamy ją z katalogu startera zamiast przepisywać listę:
     # przepisana lista wywracałaby ten test przy każdym nowym dokumencie, a to uczy dopisywania nazw
@@ -2028,8 +2030,9 @@ def test_alerty() -> None:
     typy_py = set(re.findall(r'"(custom\.googleapis\.com/vpcsc/[a-z_]+)"', watch_py))
     check("nazwy metryk zgodne miedzy alerts.tf a perimeter_watch.py", typy_tf == typy_py,
           f"tylko w tf={sorted(typy_tf - typy_py)} tylko w py={sorted(typy_py - typy_tf)}")
-    check("dziesiec metryk obserwatora (apply/budzet%/budzet-dni/dryf/wygasli + 3 z widokow sinka + 2 okna sieci)",
-          len(typy_tf) == 10, str(sorted(typy_tf)))
+    check("jedenascie metryk obserwatora (apply/budzet%/budzet-dni/dryf/wygasli + 3 z widokow sinka "
+          "+ 2 okna sieci + martwy czlonek)",
+          len(typy_tf) == 11, str(sorted(typy_tf)))
 
     # PRODUCENT MUSI ROZRÓŻNIAĆ ODMOWĘ EGZEKWOWANĄ PO **BRAKU** POLA `dryRun`. To jest ta sama pułapka,
     # która wcześniej siedziała w filtrze metryki log-based (#1941) i wróciłaby tu, gdyby ktoś „uprościł"
@@ -2445,7 +2448,7 @@ def test_alerty() -> None:
     check("ZYWY ksztalt: szczegol niesie podsiec, czyli jedyna referencje do sprawdzenia hipotezy",
           trafienie["podsiec"] == "w1-ew1", str(trafienie))
 
-    # 11g. MAPA PODSIEC->SIEC (DEC-42) — KSZTALT ZDJETY Z ZYWYCH WPISOW, NIE Z DOKUMENTACJI GOOGLE.
+    # 11g. MAPA PODSIEC->SIEC (DEC-43) — KSZTALT ZDJETY Z ZYWYCH WPISOW, NIE Z DOKUMENTACJI GOOGLE.
     # Zmierzone 2026-08-13 (#2052) na projekcie czlonkowskim labu, 10 wpisow = 5 operacji:
     #   operation.first=true -> request = {name, network, ipCidrRange, ...}  network JEST  (5/5)
     #   operation.last=true  -> request = {"@type": ...} i NIC WIECEJ        network BRAK  (0/5)
@@ -2556,7 +2559,98 @@ def test_alerty() -> None:
               not any("local.metryka.sieci_egzekwowane" in tresc for _, tresc in polityki),
               str([n for n, tresc in polityki if "local.metryka.sieci_egzekwowane" in tresc]))
 
+    # 12. MARTWY CZLONEK GRANICY (DEC-42) — czlonek, ktorego projekt przestal istniec.
+    #
+    # KAZDA ASERCJA TUTAJ CELUJE W ZMIERZONY TRYB AWARII, nie w obecnosc kodu. Punkt wyjscia: po
+    # skasowaniu projektu bedacego czlonkiem `plan` mowi `No changes`, `apply` `0 added, 0 changed,
+    # 0 destroyed`, dryf 0, `expiry-sweep` pomija, a pre-flight melduje „projekt istnieje". Wszystkie te
+    # odpowiedzi sa PRAWDZIWE — Git i granica zgadzaja sie co do numeru, ktorego nie ma. Test musi wiec
+    # pilnowac tego, co odroznia ten detektor od pozostalych: pyta o TRESC stanu, a nie o zgodnosc.
+    fikstura = json.loads((ROOT / "tests/asset-projekty.json").read_text())["results"]
+    stany = pw.stany_projektow(fikstura)
+    ZYWY, MARTWY, BEZ_STANU = "111111111111", "333333333333", "444444444444"
+
+    # 12a. KONTROLA POZYTYWNA PRZED ANTY-TAUTOLOGIA. Bez niej asercja „granica zdrowa => 0" przechodzi
+    # takze wtedy, gdy detektor nie liczy NICZEGO — a to jest dokladnie ten defekt, ktorego szukamy.
+    check("mapa stanow indeksuje po NUMERZE (tym operuje granica) i po ID",
+          stany.get(MARTWY) == "DELETE_REQUESTED" and stany.get("prj-example-delta") == "DELETE_REQUESTED",
+          str(sorted(stany)))
+    check("wpis BEZ pola `state` NIE trafia do mapy jako zywy", BEZ_STANU not in stany)
+
+    zdrowa = {"spec": {"resources": [f"projects/{ZYWY}"]}, "status": {"resources": [f"projects/{ZYWY}"]}}
+    w_zdrowej = pw.czlonkowie_bez_potwierdzenia(zdrowa, stany)
+    check("granica z samych ACTIVE => 0 nieaktywnych i 0 nieodczytanych",
+          (len(w_zdrowej["nieaktywni"]), len(w_zdrowej["nieodczytani"])) == (0, 0), str(w_zdrowej))
+    check("czlonek policzony mimo obecnosci w OBU konfiguracjach (dedup po numerze)",
+          w_zdrowej["czlonkowie"] == [ZYWY], str(w_zdrowej["czlonkowie"]))
+
+    # 12b. WERDYKT: ten sam zestaw stanow + jeden numer w DELETE_REQUESTED => 1. Pokazujemy 1, potem 0.
+    z_martwym = {"spec": {"resources": [f"projects/{ZYWY}", f"projects/{MARTWY}"]}, "status": {}}
+    w_martwym = pw.czlonkowie_bez_potwierdzenia(z_martwym, stany)
+    check("czlonek w DELETE_REQUESTED jest WERDYKTEM (nieaktywny), z podanym stanem",
+          [w["numer"] for w in w_martwym["nieaktywni"]] == [MARTWY]
+          and w_martwym["nieaktywni"][0]["stan"] == "DELETE_REQUESTED", str(w_martwym["nieaktywni"]))
+
+    # 12c. NIEODCZYTANY NIGDY NIE JEST OK — dwa rozne wejscia, ten sam wymog. Numer spoza indeksu
+    # (projekt skasowany twardo, zawezony zakres, odebrane uprawnienie) i wpis bez pola `state`.
+    for etykieta, numer in (("numer spoza indeksu", "999999999999"), ("wpis bez pola state", BEZ_STANU)):
+        wynik = pw.czlonkowie_bez_potwierdzenia(
+            {"spec": {"resources": [f"projects/{ZYWY}", f"projects/{numer}"]}}, stany)
+        check(f"{etykieta} => NIEODCZYTANY, a nie ACTIVE",
+              wynik["nieodczytani"] == [numer] and wynik["nieaktywni"] == [], str(wynik))
+
+    # 12d. CZLONEK, KTORY NIE JEST PROJEKTEM (siec VPC) jest RAPORTOWANY, a nie po cichu pomijany —
+    # inaczej detektor udawalby, ze przeszukal cala granice, skoro czesci jej nie umie zapytac.
+    siec = pw.czlonkowie_bez_potwierdzenia(
+        {"spec": {"resources": [f"projects/{ZYWY}",
+                                "//compute.googleapis.com/projects/prj-example-alpha/global/networks/w1"]}},
+        stany)
+    check("zasob spoza indeksu projektow jest RAPORTOWANY jako pominiety, nie liczony jako czlonek",
+          len(siec["pominiete"]) == 1 and siec["czlonkowie"] == [ZYWY], str(siec))
+
+    # 12e. ANTY-TAUTOLOGIA. Wszyscy dzisiejsi czlonkowie sa ACTIVE, wiec „zero" nie dowodzi niczego.
+    # Rozbrajamy detektor tak, jak zrobilby to naiwny wariant ze zgloszenia — werdykt po tym, czy
+    # wywolanie cokolwiek zwrocilo (odpowiednik kodu bledu) zamiast po TRESCI pola `state` — i pokazujemy,
+    # ze ten sam martwy czlonek PRZECHODZI. Gdyby ta asercja padla, znaczyloby to, ze test 12b zaliczylby
+    # takze detektor, ktory niczego nie sprawdza.
+    rozbrojony = [n for n in (ZYWY, MARTWY) if n not in stany]
+    check("ROZBROJONY detektor (werdykt po istnieniu wpisu, nie po tresci) PRZEPUSZCZA martwego czlonka",
+          rozbrojony == [], f"rozbrojony wariant zglosilby {rozbrojony}, czyli nic")
+
+    # 12f. PRODUCENT PUBLIKUJE OBIE SERIE ZAWSZE — takze z zerem. Bez tego seria powstaje i znika razem
+    # ze zdarzeniem, czyli zdrowa cisza jest nieodrozninalna od awarii producenta i `condition_absent`
+    # polityki chodzi bez przerwy. Ta sama lekcja co przy metryce odmow.
+    check("obie serie (`not_active` i `unreadable`) publikuja sie z KAZDEGO przebiegu",
+          '{"state": "not_active"}' in watch_py and '{"state": "unreadable"}' in watch_py)
+    # FAIL-CLOSED: bez odczytu granicy albo Asset Inventory NIE publikujemy zera — zero znaczyloby
+    # „wszyscy czlonkowie zyja", czyli zamienialoby slepote w spokoj.
+    check("bez odczytu detektor NIE publikuje zera (punkty tylko gdy `czlonkowie_stan`)",
+          "] if czlonkowie_stan else []) + punkty_granicy" in watch_py)
+    # Naglowek projektu rozliczeniowego w kodzie producenta = `403` na koncie planu (brak
+    # `serviceusage.services.use`). Asercja celuje w WYWOLANIE, a nie w tekst pliku — sam plik OPISUJE ten
+    # naglowek w komentarzu, wiec zakaz literalu odrzucalby wlasna dokumentacje (ta sama pulapka, na ktorej
+    # pierwsze uruchomienie `decisions_check.py` odrzucilo wlasne zrodlo).
+    check("odczyt Asset Inventory idzie BEZ dodatkowych naglowkow (konto planu nie ma serviceusage.use)",
+          "odp = _http(url, token)" in watch_py,
+          "wywolanie w `szukaj_projektow` musi byc `_http(url, token)` — bez `naglowki`")
+
+    # 12g. POLITYKA ALERTU — trzy warunki, bo trzy rozne zdania; kanal bezpieczenstwa, bo to falszowanie
+    # dowodu promocyjnego, a nie dlug porzadkowy.
+    martwy_alert = next((t for n, t in polityki if n == "vpcsc_member_project_gone"), "")
+    check("istnieje polityka alertu na martwego czlonka", bool(martwy_alert))
+    if martwy_alert:
+        check("polityka rozroznia WERDYKT od SLEPOTY (osobne warunki po etykiecie `state`)",
+              'metric.labels.state=\\"not_active\\"' in martwy_alert
+              and 'metric.labels.state=\\"unreadable\\"' in martwy_alert, martwy_alert[:200])
+        check("polityka ma WLASNY warunek na BRAK danych (slepota calego detektora)",
+              "condition_absent" in martwy_alert)
+        check("polityka idzie na kanal BEZPIECZENSTWA", "local.kanal_bezpieczenstwo" in martwy_alert)
+
     iam = (ROOT / "iam-bootstrap/main.tf").read_text()
+    # Uprawnienie, na ktorym stoi caly detektor. Rola ma DWOCH konsumentow i zaden nie jest oczywisty,
+    # wiec porzadkowanie listy rol potrafi ja zdjac „bo nikt jej nie uzywa".
+    check("konto plan ma `cloudasset.viewer` — bez niej detektor martwego czlonka jest slepy",
+          '"roles/cloudasset.viewer"' in iam)
     check("konto watch dostaje WYLACZNIE metricWriter", 'role    = "roles/monitoring.metricWriter"' in iam)
     check("konto watch zwiazane refem (wezej niz plan, ktory bierze caly repository)",
           "attribute.ref/${var.watch_ref}" in iam)
@@ -5548,10 +5642,42 @@ def test_schemas() -> None:
              ("schemas/profile.schema.json", sorted(str(p.relative_to(ROOT)) for p in (ROOT / "perimeter/profiles").glob("*.yaml"))),
              ("schemas/projects.schema.json", ["perimeter/projects.yaml"]),
              ("schemas/access-level.schema.json", sorted(str(p.relative_to(ROOT)) for p in (ROOT / "perimeter/access-levels").glob("*.yaml"))),
+             ("schemas/contributors.schema.json", ["perimeter/contributors.yaml"]),
              ("schemas/alerting.schema.json", ["perimeter/alerting.yaml"])]
     for schema, files in pairs:
         p = sh(["check-jsonschema", "--schemafile", schema, *files], cwd=ROOT)
         check(f"schema {pathlib.Path(schema).stem} akceptuje przyklady", p.returncode == 0, p.stdout[-500:])
+
+    # NEGATYWY DO SCHEMATU CONTRIBUTORS. Ten plik AUTORYZUJE — mowi, ktore repozytorium moze wnioskowac
+    # o ktory projekt — a jego bledy sa CICHE: regula OPA odczytuje brakujace pole jako puste, wiec
+    # literowka w kluczu daje puste uprawnienie zamiast odrzucenia. Kazdy przypadek nizej jest realnym
+    # ksztaltem pomylki, nie losowa mutacja.
+    contributors = yaml.safe_load((ROOT / "perimeter/contributors.yaml").read_text())
+
+    def _contributors_odrzuca(nazwa: str, mutacja) -> None:
+        import copy
+        zly = copy.deepcopy(contributors)
+        mutacja(zly["contributors"][0])
+        sciezka = ROOT / "contributors-zly.yaml"
+        sciezka.write_text(yaml.safe_dump(zly, allow_unicode=True))
+        try:
+            w = sh(["check-jsonschema", "--schemafile", "schemas/contributors.schema.json", sciezka.name], cwd=ROOT)
+            check(f"schema contributors ODRZUCA: {nazwa}", w.returncode != 0, w.stdout[-300:])
+        finally:
+            sciezka.unlink(missing_ok=True)
+
+    _contributors_odrzuca("literowka w kluczu (allowed_project bez `s`)",
+                          lambda c: c.__setitem__("allowed_project", c.pop("allowed_projects")))
+    _contributors_odrzuca("skrocony klucz (repo zamiast repository)",
+                          lambda c: c.__setitem__("repo", c.pop("repository")))
+    # WILDCARD: zakaz byl do 2026-08-13 wylacznie ZWYCZAJEM zapisanym w komentarzu pliku, a komentarz
+    # niczego nie odrzuca. `ORG/*` autoryzowaloby repozytorium do kazdego projektu w organizacji.
+    _contributors_odrzuca("wildcard w nazwie repozytorium",
+                          lambda c: c.__setitem__("repository", "ORG/*"))
+    # PUSTA LISTA nie autoryzuje niczego, a WYGLADA jak autoryzacja — wpis istnieje, wiec przeglad
+    # widzi „to repo jest skonfigurowane".
+    _contributors_odrzuca("pusta lista allowed_projects",
+                          lambda c: c.__setitem__("allowed_projects", []))
 
     # NEGATYWY DO SCHEMATU ALERTINGU. Oba przypadki są ciche na wdrożeniu: ukośnik na końcu bazy URL daje
     # `//7-alerty.md`, czyli 404 z alertu o 3:00, a brak jednego z kanałów daje politykę bez odbiorcy —

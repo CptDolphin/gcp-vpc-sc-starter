@@ -426,7 +426,7 @@ resource "google_monitoring_alert_policy" "vpcsc_network_window_workload" {
       Uwaga na dwa wpisy o tej samej `resourceName` (`operation.first` i `operation.last`) — to jedna
       operacja. Zero czasu okna to wpis WCZEŚNIEJSZY.
 
-      **Adnotacja mówi, SKĄD wzięła się nazwa sieci — przeczytaj to, zanim ją zacytujesz (DEC-42).**
+      **Adnotacja mówi, SKĄD wzięła się nazwa sieci — przeczytaj to, zanim ją zacytujesz (DEC-43).**
       Trzy możliwe stany, bo maszyna w sieci custom-mode nie niesie pola `network`, tylko `subnetwork`:
 
       * bez dopisku — sieć odczytana wprost z wpisu maszyny (sieć auto-mode). Nazwa jest faktem;

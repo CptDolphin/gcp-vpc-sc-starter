@@ -137,10 +137,17 @@ locals {
     # i jest ACTIVE, numer zgodny z ID, brak kolizji z cudzą konfiguracją egzekwowaną).
     "roles/accesscontextmanager.policyReader", # odczyt perimetru do terraform plan + pre-flight 1 i 2
     # NIE dla pre-flightu, mimo że tak tu stało: skrypt nie woła Cloud Asset Inventory ani razu (zmierzone).
-    # Ta rola żywi KONTROLĘ POZYTYWNĄ sondy granicy — `gcloud asset search-all-resources` jest w niej
-    # wywołaniem usługi SPOZA `restricted_services`, które ma przejść ZAWSZE. Bez niej sonda nie odróżnia
-    # „granica odmówiła" od „nie miałem prawa zapytać", czyli jej negatyw przestaje być falsyfikowalny.
-    "roles/cloudasset.viewer",     # sonda granicy: kontrola pozytywna (NIE pre-flight)
+    # DWAJ KONSUMENCI, OBAJ NIEOCZYWIŚCI — stąd ten komentarz, żeby porządkowanie ról nie zdjęło pozycji
+    # „bo nikt jej nie używa":
+    #   * KONTROLA POZYTYWNA SONDY GRANICY — `gcloud asset search-all-resources` jest w niej wywołaniem
+    #     usługi SPOZA `restricted_services`, które ma przejść ZAWSZE. Bez niej sonda nie odróżnia
+    #     „granica odmówiła" od „nie miałem prawa zapytać", czyli jej negatyw przestaje być falsyfikowalny;
+    #   * DETEKTOR MARTWEGO CZŁONKA (DEC-42) — obserwator pyta tym samym uprawnieniem o `state` wszystkich
+    #     projektów organizacji JEDNYM wywołaniem. To jedyna warstwa widząca, że projekt członka przestał
+    #     istnieć; jej alternatywą było `resourcemanager.projects.get`, czyli NOWE nadanie na organizacji.
+    # Zdjęcie tej roli nie wywala apply — gasi dwa sygnały, każdy fail-closed (sonda: brak werdyktu;
+    # detektor: brak punktów i `condition_absent` polityki).
+    "roles/cloudasset.viewer",     # sonda granicy + detektor martwego członka (NIE pre-flight)
     "roles/compute.networkViewer", # pre-flight 3: Private Google Access na podsieciach
     "roles/dns.reader",            # pre-flight 4: strefa DNS kierująca googleapis.com na restricted VIP
     # Metryki i alerty perimetru (terraform/monitoring.tf) są w stanie, więc `plan` MUSI umieć je odczytać —

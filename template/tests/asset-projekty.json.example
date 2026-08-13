@@ -1,0 +1,66 @@
+{
+  "_komentarz": [
+    "Odpowiedz `cloudasset.googleapis.com/v1/organizations/<ORG>:searchAllResources` dla typu",
+    "`cloudresourcemanager.googleapis.com/Project` — WIERNY KSZTALT, wartosci anonimowe.",
+    "",
+    "PO CO TEN PLIK. Detektor martwego czlonka (DEC-42) buduje werdykt na TRESCI pola `state`, wiec test",
+    "musi dostac odpowiedz o tym samym ksztalcie, co zywe API — z polem `project` (numer!), `state`",
+    "i `additionalAttributes.projectId`. Fikstura pisana `z glowy` sprawdzalaby wylacznie zgodnosc kodu",
+    "z wyobrazeniem autora o API.",
+    "",
+    "CZTERY WPISY, KAZDY Z INNEGO POWODU:",
+    "  * 111111111111 ACTIVE            — czlonek zywy (kontrola pozytywna: bez niej test 'zero naruszen'",
+    "                                     przechodzilby takze wtedy, gdy detektor nie liczy NICZEGO);",
+    "  * 222222222222 ACTIVE            — drugi zywy, zeby licznik mial co sumowac;",
+    "  * 333333333333 DELETE_REQUESTED  — WERDYKT: projekt kasowany, a numer nadal moze byc w granicy;",
+    "  * 444444444444 BEZ pola `state`  — ksztalt, ktorego API zwykle nie zwraca, ale ktory MUSI",
+    "                                     wyladowac jako `unreadable`, a nie jako `ACTIVE`. To jest ta",
+    "                                     sama klasa co `dryRun` przy odmowach: brak pola bierze sie za",
+    "                                     wartosc domyslna i cisza robi sie spokojem."
+  ],
+  "results": [
+    {
+      "name": "//cloudresourcemanager.googleapis.com/projects/prj-example-alpha",
+      "assetType": "cloudresourcemanager.googleapis.com/Project",
+      "project": "projects/111111111111",
+      "displayName": "prj-example-alpha",
+      "location": "global",
+      "additionalAttributes": { "projectId": "prj-example-alpha" },
+      "createTime": "2026-01-02T10:00:00Z",
+      "state": "ACTIVE",
+      "organization": "organizations/123456789012"
+    },
+    {
+      "name": "//cloudresourcemanager.googleapis.com/projects/prj-example-beta",
+      "assetType": "cloudresourcemanager.googleapis.com/Project",
+      "project": "projects/222222222222",
+      "displayName": "prj-example-beta",
+      "location": "global",
+      "additionalAttributes": { "projectId": "prj-example-beta" },
+      "createTime": "2026-01-02T10:05:00Z",
+      "state": "ACTIVE",
+      "organization": "organizations/123456789012"
+    },
+    {
+      "name": "//cloudresourcemanager.googleapis.com/projects/prj-example-delta",
+      "assetType": "cloudresourcemanager.googleapis.com/Project",
+      "project": "projects/333333333333",
+      "displayName": "prj-example-delta",
+      "location": "global",
+      "additionalAttributes": { "projectId": "prj-example-delta" },
+      "createTime": "2026-01-02T10:10:00Z",
+      "state": "DELETE_REQUESTED",
+      "organization": "organizations/123456789012"
+    },
+    {
+      "name": "//cloudresourcemanager.googleapis.com/projects/prj-example-bezstanu",
+      "assetType": "cloudresourcemanager.googleapis.com/Project",
+      "project": "projects/444444444444",
+      "displayName": "prj-example-bezstanu",
+      "location": "global",
+      "additionalAttributes": { "projectId": "prj-example-bezstanu" },
+      "createTime": "2026-01-02T10:15:00Z",
+      "organization": "organizations/123456789012"
+    }
+  ]
+}
