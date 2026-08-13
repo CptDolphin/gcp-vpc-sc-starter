@@ -308,9 +308,19 @@ runs:
     - name: guard - repozytorium bez artefaktow przebiegu
       shell: bash
       run: |
+        # NAJPIERW: „nie mogłem sprawdzić" MUSI być czerwone, nie zielone. `git ls-files` zwraca pusto
+        # zarówno wtedy, gdy artefaktów nie ma, jak i wtedy, gdy nie ma indeksu — a `|| true` na całym
+        # potoku skleiłoby te dwa przypadki w jeden zielony. To jest dokładnie ta klasa defektu, którą
+        # ten guard zamyka: kontrola raportująca sukces, bo nie miała na co patrzeć.
+        if ! indeks=$(git ls-files 2>&1); then
+          echo "$indeks"
+          echo '::error::guard nie odczytal indeksu gita — bez tego nie wie, czy repozytorium jest czyste, wiec nie moze przepuscic.'
+          exit 1
+        fi
+
         # Zakotwiczone do korzenia tam, gdzie nazwa jest pospolita: `violations.md` w `docs/` to
         # dokumentacja, `violations.md` w korzeniu to wyjście ostatniego raportu.
-        artefakty=$(git ls-files | grep -E \
+        artefakty=$(printf '%s\n' "$indeks" | grep -E \
           '(^|/)__pycache__/|\.pyc$|^stan/|(^|/)\.terraform/|\.tfstate($|\.)|\.tfplan(\.binary)?$|^(plan|declarations|violations)\.json$|^violations\.md$' \
           || true)
         if [ -n "$artefakty" ]; then
