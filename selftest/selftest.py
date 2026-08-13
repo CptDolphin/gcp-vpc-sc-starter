@@ -383,6 +383,75 @@ def test_terraform() -> None:
               p.returncode == 0 and (regula, poziom) in krawedzie,
               f"brak krawedzi {regula} -> {poziom}; stderr={p.stderr[-300:]}")
 
+    # KOLEJNOSC TWORZENIA: ten sam defekt PIETRO WYZEJ (#2034). Zasoby granularne wskazuja perimetr
+    # `local.perimeter_full_name` — stringiem, nie atrybutem `…service_perimeter.this` — wiec bez jawnego
+    # `depends_on` Terraform puszcza je ROWNOLEGLE ze szkieletem. Zmierzone na zywej granicy w cwiczeniu DR:
+    # `Plan: 20 to add` -> `Error 404: Service perimeter not found` x4, a szkielet po tym przebiegu tez nie
+    # istnial. Kontrola anty-tautologiczna: przed poprawka to samo zapytanie dawalo 0/6.
+    #
+    # PYTAMY O OSIAGALNOSC, NIE O KRAWEDZ. `terraform graph` drukuje graf po REDUKCJI PRZECHODNIEJ, wiec
+    # krawedz implikowana przez istniejaca sciezke (regula egzekwowana -> `…_resource.member` -> szkielet)
+    # NIE JEST rysowana — asercja na krawedzi swiecilaby na czerwono przy kodzie poprawnym. Zmierzone:
+    # 4 krawedzie rysowane, 6 zasobow osiagajacych szkielet.
+    def osiaga(zrodlo, cel, kraw):
+        """Czy z `zrodlo` prowadzi w grafie `kraw` jakakolwiek sciezka do `cel`."""
+        stos, widziane = [zrodlo], set()
+        while stos:
+            w = stos.pop()
+            if w == cel:
+                return True
+            if w in widziane:
+                continue
+            widziane.add(w)
+            stos.extend(b for a, b in kraw if a == w)
+        return False
+
+    szkielet = "google_access_context_manager_service_perimeter.this"
+    granularne = [
+        "google_access_context_manager_service_perimeter_dry_run_resource.member",
+        "google_access_context_manager_service_perimeter_resource.member",
+        "google_access_context_manager_service_perimeter_dry_run_ingress_policy.rule",
+        "google_access_context_manager_service_perimeter_ingress_policy.rule",
+        "google_access_context_manager_service_perimeter_dry_run_egress_policy.rule",
+        "google_access_context_manager_service_perimeter_egress_policy.rule",
+    ]
+    for zasob in granularne:
+        krotko = zasob.replace("google_access_context_manager_service_perimeter_", "")
+        check(f"graf: {krotko} ma sciezke do szkieletu (kolejnosc tworzenia)",
+              p.returncode == 0 and osiaga(zasob, szkielet, krawedzie),
+              f"brak sciezki {zasob} -> {szkielet}; stderr={p.stderr[-300:]}")
+
+    # PREMISA tamtych szesciu asercji: wezel szkieletu MUSI byc w grafie. Material startera jest domyslnie
+    # BROWNFIELD (`manage_skeleton: false`, czyli `count = 0`), wiec gdyby Terraform pomijal wtedy wezel
+    # zasobu, `osiaga` zwracalaby False przy kodzie poprawnym — albo, przy odwrotnym bledzie w tescie,
+    # asercje przechodzilyby nie badajac niczego. Zmierzone: wezel jest rysowany takze przy `count = 0`.
+    check("graf: wezel szkieletu istnieje takze przy manage_skeleton=false (count=0)",
+          f'"{szkielet}"' in p.stdout,
+          f"brak wezla {szkielet} w grafie; manage_skeleton w materiale startera = false")
+
+    # DRUGI WARIANT tego samego przelacznika. Material startera jest brownfieldowy, a defekt z #2034 boli
+    # w GREENFIELDZIE — tam, gdzie szkielet realnie powstaje. Bez tej pary asercja wyzej mierzylaby
+    # wylacznie konfiguracje, w ktorej `count = 0`, czyli te, ktora nie tworzy perimetru.
+    plik_polityki = ROOT / "perimeter/policy.yaml"
+    kopia_polityki = plik_polityki.read_text()
+    # PREMISA: podmiana musi cokolwiek zmienic. Gdyby klucz zmienil nazwe albo domyslna wartosc, ponizsze
+    # dwa uruchomienia zbadalyby po raz drugi brownfield i zameldowaly zielono nie testujac greenfielda.
+    check("greenfield: material startera deklaruje `manage_skeleton: false` (premisa podmiany)",
+          "manage_skeleton: false" in kopia_polityki,
+          "brak `manage_skeleton: false` w perimeter/policy.yaml — asercja greenfielda badalaby brownfield")
+    plik_polityki.write_text(kopia_polityki.replace("manage_skeleton: false", "manage_skeleton: true"))
+    try:
+        pv = sh(["terraform", f"-chdir={tf}", "validate"])
+        pg = sh(["terraform", f"-chdir={tf}", "graph"])
+        kraw_green = {(a, b) for a, b in re.findall(r'"([^"]+)"\s*->\s*"([^"]+)"', pg.stdout)}
+        brak = [z for z in granularne if not osiaga(z, szkielet, kraw_green)]
+    finally:
+        plik_polityki.write_text(kopia_polityki)
+    check("greenfield (manage_skeleton=true): validate przechodzi i kazdy zasob granularny ma sciezke do szkieletu",
+          pv.returncode == 0 and pg.returncode == 0 and not brak,
+          f"validate rc={pv.returncode}, graph rc={pg.returncode}, bez sciezki: {brak}; "
+          f"{pv.stdout[-400:]}{pv.stderr[-400:]}")
+
     # Sekcje opcjonalne MUSZA byc opcjonalne NAPRAWDE. `count` na zasobie nie wystarcza: blok `locals` liczy
     # sie zawsze, wiec odwolanie do nieistniejacej sekcji wywraca `validate` — czyli funkcja opisana jako
     # opcjonalna jest w praktyce obowiazkowa. Wykryte przy pierwszym przygotowaniu prawdziwego testu na

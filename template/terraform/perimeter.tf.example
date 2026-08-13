@@ -241,6 +241,11 @@ resource "google_access_context_manager_service_perimeter" "this" {
   # BROWNFIELD: gdy perimetr już istnieje i nie przejęliśmy go importem, ten zasób NIE powstaje
   # (perimeter.manage_skeleton = false w policy.yaml). Członkowie i reguły odwołują się wtedy do
   # perimetru po NAZWIE (local.perimeter_full_name), więc reszta modułu działa bez zmian.
+  #
+  # WSZYSTKIE SZEŚĆ ZASOBÓW GRANULARNYCH (members.tf, rules.tf) niesie `depends_on` NA TEN ZASÓB — bo
+  # odwołanie po nazwie nie tworzy krawędzi w grafie, a bez niej greenfieldowy apply puszcza szkielet
+  # i jego zawartość równolegle i kończy się `Error 404: Service perimeter not found` (#2034).
+  # Przy `count = 0` te krawędzie są bezkosztowe: wskazują zasób o pustym zbiorze instancji.
   count = local.manage_skeleton ? 1 : 0
 
   parent         = "accessPolicies/${local.policy_id}"

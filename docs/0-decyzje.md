@@ -2553,3 +2553,80 @@ pierwszego udanego przebiegu producenta.
 **Co z tego wynika dla kolejnego alertu.** Nowa polityka na metryce własnej = deskryptor w tym samym pull
 requeście. Jeśli metryki nie da się zadeklarować w stacku polityki, to znaczy, że polityka jest w złym
 stacku — i to jest pytanie do rozstrzygnięcia **przed** wdrożeniem, nie po pierwszym odtworzeniu od zera.
+
+---
+
+## DEC-36 — Zasób granularny deklaruje szkielet perimetru JAWNIE, bo referencja po nazwie nie jest krawędzią
+
+**Decyzja.** Wszystkie sześć zasobów granularnych — `…_dry_run_resource.member`, `…_resource.member`
+i cztery reguły (`ingress`/`egress` × `dry_run`/egzekwowana) — niesie
+`depends_on = [google_access_context_manager_service_perimeter.this]`. Bramką jest asercja selftestu
+czytająca `terraform graph` i pytająca o **OSIĄGALNOŚĆ** szkieletu z każdego z tych zasobów, a nie
+o obecność krawędzi ani o słowo `depends_on` w pliku. Wariant brownfield (`manage_skeleton: false`,
+`count = 0`) zostaje nietknięty i ma własną asercję w tym samym miejscu.
+
+**Dlaczego.** Zasób granularny wskazuje perimetr `local.perimeter_full_name` — **stringiem** złożonym
+z YAML-a, a nie atrybutem zasobu. Terraform nie ma z czego wywnioskować, że jedno jest zawartością
+drugiego, więc przy tworzeniu od zera puszcza szkielet i całą jego zawartość **równolegle**
+(`-parallelism=10`). To jest DOKŁADNIE ten mechanizm, który DEC-33 opisał piętro niżej dla access
+leveli — tam bolał przy `destroy`, tu przy `create`.
+
+Zmierzone na żywej granicy w ćwiczeniu DR: po skasowaniu perimetru przebieg `apply` dał
+`Plan: 20 to add, 0 to change, 0 to destroy` i **cztery** `Error 404: Service perimeter not found` naraz.
+Szkielet po tym przebiegu **też nie istniał** (`perimeters describe` → `NOT_FOUND`), więc „uruchom drugi
+raz" nie było wyjściem. Odzysk wymagał człowieka z lokalnym Terraformem i ADC:
+`terraform apply -target=google_access_context_manager_service_perimeter.this` (12 s), po którym pipeline
+domknął resztę bez błędu.
+
+Nikt tego nie zauważył wcześniej z powodu, który warto nazwać: **nikt nigdy nie skasował perimetru**.
+Repozytorium z `manage_skeleton: true` deklaruje, że szkielet ma — i ma go w konfiguracji, ale nie miało
+go w kolejności. Defekt jest niewidoczny w stanie ustalonym i budzi się wyłącznie przy odtwarzaniu, czyli
+w jedynej chwili, w której granica ma być odbudowana szybko.
+
+Pomiar na materiale szablonu (`terraform graph`, Terraform 1.15.5):
+
+| | krawędzi ogółem | rysowanych do szkieletu | zasobów osiągających szkielet |
+|---|---|---|---|
+| przed | 37 | **0** | **0 / 6** |
+| po | 41 | 4 | **6 / 6** |
+
+**Rysowane są cztery, nie sześć — i to nie jest brak.** `terraform graph` drukuje graf po **redukcji
+przechodniej**, więc krawędź implikowana przez istniejącą ścieżkę (reguła egzekwowana →
+`…_resource.member` → szkielet) nie jest rysowana. Dlatego asercja pyta o ścieżkę: pytanie o krawędź
+świeciłoby na czerwono przy kodzie poprawnym.
+
+**Para anty-tautologiczna**, wzorem DEC-33 — zdjęcie JEDNEJ pozycji `depends_on` i ponowny pomiar:
+
+| zdjęta pozycja | ubyło krawędzi | zerwana osiągalność |
+|---|---|---|
+| `…_dry_run_resource.member` | 1 | 1 |
+| `…_resource.member` | 1 (i **dorysowane 2**) | 1 |
+| `…_dry_run_ingress_policy.rule` | 1 | 1 |
+| `…_dry_run_egress_policy.rule` | 1 | 1 |
+| `…_ingress_policy.rule` | 0 | 0 |
+| `…_egress_policy.rule` | 0 | 0 |
+
+Dwa ostatnie wiersze są odpowiedzią na pytanie „po co pozycja, której w grafie nie widać": obie reguły
+egzekwowane docierają dziś do szkieletu **przez** `…_resource.member`, więc ich własne krawędzie są
+przechodnie. Przestają być w chwili, w której ktoś ruszy `depends_on` w `members.tf` — wiersz drugi
+pokazuje to wprost: usunięcie tamtej jednej pozycji **dorysowuje** te dwie. Bez nich ten sam ruch
+zrywałby kolejność trzem zasobom zamiast jednemu.
+
+Bramka jest anty-tautologiczna także jako całość: na materiale sprzed poprawki siedem z dziewięciu
+nowych asercji jest czerwonych (6 × osiągalność + greenfield), a dwie premisy zielone. Selftest
+743 → 752.
+
+**Co odrzucono i dlaczego.**
+
+| wariant | dlaczego nie |
+|---|---|
+| referencja przez atrybut (`one(google_…this[*].name)` zamiast `local.perimeter_full_name`) | w brownfieldzie `one([])` = `null`, czyli `perimeter_name = null` — wariant, który cały starter ma wspierać, przestaje działać. W greenfieldzie wartość jest `known after apply` na polu **ForceNew**, więc każdy plan pokazywałby zawartość granicy jako nieznaną |
+| ternary `local.manage_skeleton ? one(…) : local.perimeter_full_name` | krawędź powstaje (Terraform czyta referencje statycznie, nie po wybranej gałęzi), ale cena zostaje ta sama co wyżej w greenfieldzie, a czytelnik dostaje wyrażenie sugerujące, że nazwa perimetru może się różnić między wariantami. Nie może — to ten sam string |
+| `create_before_destroy` / `moved{}` | **pozorne przy tych zasobach**: wszystkie mają w stanie ten sam `id` (identyfikator perimetru), bo provider realizuje je jako read-modify-write na jednej liście (DEC-11). Żadne z nich nie porządkuje tworzenia względem szkieletu |
+| zostawić `-target` jako procedurę | działa (12 s) i **zostaje w runbooku**, ale wymaga człowieka z lokalnym Terraformem i ADC — czyli dokładnie tego, czego odtworzenie granicy o 3:00 mieć nie będzie. Procedura ratunkowa nie jest zamiennikiem kolejności |
+| asercja na obecności `depends_on` w pliku | test potwierdzałby własny tekst. DEC-33 rozstrzygnął to samo: mierzymy graf, który Terraform faktycznie zbudował |
+| asercja na krawędzi (jak przy access levelach) | byłaby czerwona na kodzie poprawnym — redukcja przechodnia zjada dwie z sześciu krawędzi. Osiągalność mierzy własność, o którą chodzi (kolejność), a nie kształt wydruku |
+
+**Residual, nazwany wprost.** `depends_on` porządkuje wyłącznie zasoby **tego** stacku. Perimetr, którego
+repo nie zarządza (`manage_skeleton: false`), musi istnieć przed pierwszym apply — tak jak dotąd; bramka
+nie zamienia brownfieldu w greenfield i nie próbuje odgadnąć, czy cudzy szkielet stoi.

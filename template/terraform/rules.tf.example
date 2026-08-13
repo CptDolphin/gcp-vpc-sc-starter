@@ -47,7 +47,13 @@ resource "google_access_context_manager_service_perimeter_dry_run_ingress_policy
   # tu żadnej zależności i przy `destroy` może skasować poziom PRZED regułą, która go referuje. API odrzuca
   # to wprost: `you must first remove the reference`. Zmierzone na żywym ACM 2026-08-07 (#1904) — trafia
   # każdy offboarding członka, którego reguła używa access levelu.
-  depends_on = [google_access_context_manager_access_level.level]
+  #
+  # Perimetr wskazuje TA SAMA konstrukcja — string, nie atrybut — więc krawędź do szkieletu też musi być
+  # jawna. Powód w całości: members.tf, zasób `…dry_run_resource.member` (#2034).
+  depends_on = [
+    google_access_context_manager_access_level.level,
+    google_access_context_manager_service_perimeter.this,
+  ]
 }
 
 resource "google_access_context_manager_service_perimeter_ingress_policy" "rule" {
@@ -96,14 +102,27 @@ resource "google_access_context_manager_service_perimeter_ingress_policy" "rule"
   # ma czego autoryzować, a odwrotna kolejność (projekt bez reguł) odcina ruch na czas między zasobami.
   # Access level — patrz komentarz przy wariancie dry-run: nazwa ze stringa nie tworzy krawędzi w grafie,
   # więc bez tej pozycji `destroy` kasuje poziom, gdy reguła jeszcze go referuje.
+  # Szkielet stoi tu JAWNIE, choć droga do niego prowadzi już przez `…_resource.member`. Ta pozycja jest
+  # w `terraform graph` NIEWIDOCZNA (redukcja przechodnia zjada krawędź implikowaną przez ścieżkę) i to
+  # jest właśnie powód, dla którego ma tu być: gdy ktoś zdejmie krawędź do szkieletu z members.tf, ta
+  # przejmuje kolejność zamiast zniknąć razem z nią. ZMIERZONE (#2034): usunięcie pozycji szkieletu
+  # z `…_resource.member` odbiera grafowi jedną krawędź i DORYSOWUJE dwie — dokładnie tę i jej
+  # odpowiednik przy egressie. Bez nich ten sam ruch zrywałby kolejność TRZEM zasobom, nie jednemu.
   depends_on = [
     google_access_context_manager_service_perimeter_resource.member,
     google_access_context_manager_access_level.level,
+    google_access_context_manager_service_perimeter.this,
   ]
 }
 
 resource "google_access_context_manager_service_perimeter_dry_run_egress_policy" "rule" {
   for_each = local.egress_rules_all
+
+  # Krawędź do szkieletu — powód w całości w members.tf, zasób `…dry_run_resource.member` (#2034).
+  # Ten wariant był JEDYNYM zasobem granularnym bez ani jednego `depends_on`: nie referuje access levelu
+  # (egress rozstrzyga tożsamość wołającego, nie kontekst sieci) ani członkostwa egzekwowanego, więc do
+  # #2034 nie miał w grafie żadnej krawędzi wychodzącej i startował dokładnie razem ze szkieletem.
+  depends_on = [google_access_context_manager_service_perimeter.this]
 
   perimeter = local.perimeter_full_name
   title     = each.value.title
@@ -179,5 +198,11 @@ resource "google_access_context_manager_service_perimeter_egress_policy" "rule" 
     }
   }
 
-  depends_on = [google_access_context_manager_service_perimeter_resource.member]
+  # Szkielet jawnie, obok członkostwa — uzasadnienie przy regule ingress egzekwowanej wyżej: krawędź jest
+  # dziś przechodnia (i przez to niewidoczna w `terraform graph`), ale przestaje być w chwili, w której
+  # ktoś zmieni `depends_on` w members.tf (#2034).
+  depends_on = [
+    google_access_context_manager_service_perimeter_resource.member,
+    google_access_context_manager_service_perimeter.this,
+  ]
 }
