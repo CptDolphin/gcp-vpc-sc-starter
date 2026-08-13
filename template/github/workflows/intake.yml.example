@@ -233,6 +233,24 @@ jobs:
       # KROK STOI TUTAJ, ZA BRAMKAMI, A NIE PRZED NIMI, I TO JEST WYBOR: okno wyscigu to czas MIEDZY tym
       # krokiem a pushem, wiec im pozniej, tym wezej (~1 s zamiast ~10 s przy ustawieniu przed bramkami).
       # Kosztem jest to, ze przy przerenderowaniu trzeba bramki powtorzyc — krok nizej.
+      #
+      # ZMIERZONE, NIE WYWNIOSKOWANE (#2013). Wyscig jest niedeterministyczny, wiec zostal wywolany
+      # CELOWO: dispatch kanalu ticketowego w trybie testowym, a **6 s pozniej** merge pull requesta
+      # dotykajacego `.github/workflows/**`. Bez tego kroku push galezi poszedl 24 s po dispatchu:
+      #
+      #     ! [remote rejected] onboard/<dywizja>-<projekt> -> onboard/<dywizja>-<projekt>
+      #       (refusing to allow a GitHub App to create or update workflow
+      #        `.github/workflows/external-intake.yml` without `workflows` permission)
+      #
+      # NAZWANY PLIK NIE BYL PRZEZ TEN PRZEBIEG DOTKNIETY W OGOLE — commit zgloszenia zmienial wylacznie
+      # plik czlonkow, a `external-intake.yml` to workflow SASIEDNIEGO kanalu. To jest dowod wprost, ze
+      # kontrola porownuje DRZEWO galezi z galezia domyslna, a nie zawartosc commita — i ze `add-paths`,
+      # ktore ten kanal juz ma, tego nie zamyka.
+      #
+      # Ten sam przebieg pokazal drugi objaw: krok sprzatajacy dostal `gh: Reference does not exist
+      # (HTTP 422)`, bo odmowa nastapila PRZED powstaniem galezi. Jedyna adnotacja, jaka zobaczyl
+      # wnioskodawca, brzmiala `The process '/usr/bin/git' failed with exit code 1` — bez tytulu
+      # i bez werdyktu. Stad krok werdyktu nizej.
       - name: swieza baza — przenies wniosek na `main` odczytany tuz przed pushem
         id: swieza_baza
         env:
