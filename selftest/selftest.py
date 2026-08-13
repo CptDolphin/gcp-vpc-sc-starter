@@ -2410,6 +2410,34 @@ def test_alerty() -> None:
     check("maszyna bez czytelnej referencji sieci JEST liczona do okna (fail-closed)",
           pw.policz_okna_sieci([wpis_sieci, bez_sieci], egz, 600)["z_obciazeniem"] == 1)
 
+    # 11e-bis. KSZTALT WPISU ZDJETY Z ZYWEJ ORGANIZACJI, NIE Z DOKUMENTACJI (#2028, przelot 2026-08-13).
+    # Fixture `wpis_maszyny` wyzej niesie `networkInterfaces[].network` — i tego pola realny wpis
+    # `v1.compute.instances.insert` dla sieci CUSTOM-MODE NIE MA. Odczyt z kubelka sinka pokazal wylacznie
+    # `subnetwork`. Asercje ponizej stoja na kopii ZYWEGO wpisu, zeby sciezka, ktora produkcja chodzi
+    # naprawde, miala wlasne pokrycie — poprzednio testowany byl wariant, ktory nie wystepuje.
+    maszyna_zywa = {"logName": "projects/prj-example-alpha/logs/cloudaudit.googleapis.com%2Factivity",
+                    "resource": {"type": "gce_instance", "labels": {"project_id": "prj-example-alpha"}},
+                    "timestamp": "2026-01-01T10:01:23Z",
+                    "operation": {"first": True},
+                    "protoPayload": {"serviceName": "compute.googleapis.com",
+                                     "methodName": "v1.compute.instances.insert",
+                                     "resourceName": "projects/prj-example-alpha/zones/z/instances/s1",
+                                     "request": {"networkInterfaces": [{"subnetwork": (
+                                         "https://compute.googleapis.com/compute/v1/projects/"
+                                         "prj-example-alpha/regions/europe-west1/subnetworks/w1-ew1")}]}}}
+    check("ZYWY ksztalt: wpis maszyny NIE niesie referencji sieci (tylko podsiec)",
+          pw.sieci_maszyny(maszyna_zywa) == [], str(pw.sieci_maszyny(maszyna_zywa)))
+    check("ZYWY ksztalt: podsiec jest odczytywana i podawana dyzurnemu",
+          pw.podsieci_maszyny(maszyna_zywa) == ["w1-ew1"], str(pw.podsieci_maszyny(maszyna_zywa)))
+    zywe = pw.policz_okna_sieci([wpis_sieci, maszyna_zywa], egz, 600)
+    check("ZYWY ksztalt: para siec+maszyna nadal jest zdarzeniem alertu (przez fail-closed)",
+          zywe["z_obciazeniem"] == 1, str(zywe))
+    trafienie = zywe["szczegoly"][0]["obciazenie"][0]
+    check("ZYWY ksztalt: dopasowanie jest OZNACZONE jako nieodczytane, a nie podane jako fakt",
+          trafienie["siec_odczytana"] is False, str(trafienie))
+    check("ZYWY ksztalt: szczegol niesie podsiec, czyli jedyna referencje do sprawdzenia hipotezy",
+          trafienie["podsiec"] == "w1-ew1", str(trafienie))
+
     # 11f. OKNO DOJRZEWANIA W KONFIGURACJI MUSI ZGADZAC SIE Z PROCEDURA. Mniejsze oskarzaloby o zlamanie
     # zasady kogos, kto ja stosowal; wieksze zglaszaloby jako incydent zachowanie zgodne z runbookiem.
     zrodlo = yaml.safe_load((ROOT / "perimeter/alerting.yaml").read_text()).get("violations_source", {})

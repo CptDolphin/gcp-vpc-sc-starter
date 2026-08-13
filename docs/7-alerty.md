@@ -434,6 +434,23 @@ Pułapka: jedna operacja Compute zostawia **dwa** wpisy o tej samej `resourceNam
 i `operation.last`). Zero czasu okna to wpis **wcześniejszy** — licznik scala je sam, ale czytając ręcznie
 łatwo policzyć dwie sieci tam, gdzie powstała jedna.
 
+**NAZWA SIECI W ALERCIE BYWA HIPOTEZĄ — sprawdź to, ZANIM ją zacytujesz (DEC-39).** Wpis
+`v1.compute.instances.insert` dla sieci **custom-mode nie niesie pola `networkInterfaces[].network`
+w ogóle** (zmierzone na żywym wpisie 2026-08-13); niesie wyłącznie `subnetwork`. Dopasowanie maszyny do
+sieci idzie wtedy ścieżką **fail-closed**: maszyna liczy się do okna każdej świeżej sieci w tym samym
+projekcie. Adnotacja i treść alertu oznaczają taki przypadek znacznikiem **`[HIPOTEZA]`** i podają
+**podsieć**. Rozstrzygnij ją jedną komendą — dopiero jej wynik jest faktem:
+
+```
+gcloud compute networks subnets describe <PODSIEC> --project=<PROJEKT> --region=<REGION> \
+  --format='value(network)'
+```
+
+Jeśli zwrócona sieć **nie jest** siecią z alertu, to zdarzenie jest **fałszywym alarmem**: maszyna stała
+w sieci dojrzałej, a świeża sieć powstała obok. Odnotuj to w zgłoszeniu — kierunek błędu jest świadomy
+(przeoczone okno jest nieodwracalne, fałszywy alarm kosztuje to jedno sprawdzenie), ale nie zamiataj go,
+bo częstość takich trafień jest wejściem do decyzji o mapie podsieć→sieć.
+
 **2. Ogranicz, co mogło wyjść.** Okno trwa od utworzenia sieci do ~5 minut później; propagacja **migocze
 i jest niedeterministyczna**, więc bierz **górną** obserwację, nie średnią. Pytanie brzmi: czy ta maszyna
 miała w tym czasie dostęp do czegokolwiek wrażliwego i czy cokolwiek wysyłała. **Nie szukaj tego
