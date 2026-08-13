@@ -54,7 +54,7 @@ resource "google_service_account" "watch" {
 
 resource "google_organization_iam_custom_role" "perimeter_writer" {
   org_id      = var.org_id
-  role_id     = "vpcScPerimeterWriter"
+  role_id     = "vpcScPerimeterWriter${var.org_resource_suffix}"
   title       = "VPC-SC perimeter writer (CI)"
   description = "Dokłada projekty i reguły do ISTNIEJĄCEGO perimetru. Bez tworzenia i kasowania perimetrów."
   stage       = "GA"
@@ -159,7 +159,12 @@ locals {
   # Nazwa polityki deny (sekcja 5b) mieszka TUTAJ, a nie przy zasobie, bo używa jej też polecenie
   # weryfikacyjne z `outputs.tf`. Rozjazd tych dwóch miejsc dałby operatorowi komendę pytającą o politykę
   # o innej nazwie niż ta, którą stack tworzy — czyli stabilne `NOT_FOUND` na działającym guardrailu.
-  deny_policy_name = "vpcsc-ci-no-destroy"
+  #
+  # Sufiks org-level (`var.org_resource_suffix`, domyślnie pusty) dokleja się TU i do dwóch `role_id`
+  # niżej — to jedyne trzy obiekty tego stacku, których nazwa jest globalna dla organizacji. Reszta
+  # (konta serwisowe, pula WIF, rola monitoringu) jest project-scoped i drugiej instancji nie blokuje.
+  # Pusty sufiks = nazwy sprzed tej zmiany, więc istniejące wdrożenia nie widzą jej w planie.
+  deny_policy_name = var.org_resource_suffix == "" ? "vpcsc-ci-no-destroy" : "vpcsc-ci-no-destroy-${var.org_resource_suffix}"
 }
 
 resource "google_organization_iam_member" "plan" {
@@ -706,7 +711,7 @@ resource "google_service_account_iam_member" "watch_wif" {
 # ról własnych — wtedy podmienia się `role` w przypisaniu niżej i nic więcej.
 resource "google_organization_iam_custom_role" "deny_reader" {
   org_id      = var.org_id
-  role_id     = "vpcScDenyReader"
+  role_id     = "vpcScDenyReader${var.org_resource_suffix}"
   title       = "VPC-SC deny policy reader"
   description = "Odczyt polityk IAM Deny na organizacji. Rozstrzyga, czy guardrail perimetru istnieje — bez prawa zmiany czegokolwiek."
   stage       = "GA"

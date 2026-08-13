@@ -16,7 +16,9 @@
 #       --wif "projects/123/locations/global/workloadIdentityPools/github-actions/providers/github" \
 #       --sa-plan sa-vpcsc-plan@proj.iam.gserviceaccount.com \
 #       --sa-apply sa-vpcsc-apply@proj.iam.gserviceaccount.com \
-#       --org-id 123456789012
+#       --org-id 123456789012 \
+#       --sa-watch sa-vpcsc-watch@proj.iam.gserviceaccount.com \
+#       --monitoring-project proj      # obie potrzebne obserwatorowi (watch.yml) i dead-man's-switchowi
 #
 #   ...--dry-run                          # pokaż, co zostanie wykonane, bez wykonywania
 #   ...--no-human-gate "<powód>"          # świadome odstępstwo: plan bez required reviewers (krok 3)
@@ -24,6 +26,7 @@
 set -euo pipefail
 
 ORG="" REPO="gcp-vpc-sc" NET_TEAM="" SEC_TEAM="" WIF="" SA_PLAN="" SA_APPLY="" ORG_ID="" DRY=0
+SA_WATCH="" MONITORING_PROJECT=""
 NO_HUMAN_GATE="" NO_BRANCH_PROTECTION=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -34,6 +37,8 @@ while [ $# -gt 0 ]; do
     --wif) shift; WIF="${1:-}" ;;
     --sa-plan) shift; SA_PLAN="${1:-}" ;;
     --sa-apply) shift; SA_APPLY="${1:-}" ;;
+    --sa-watch) shift; SA_WATCH="${1:-}" ;;
+    --monitoring-project) shift; MONITORING_PROJECT="${1:-}" ;;
     --org-id) shift; ORG_ID="${1:-}" ;;
     --no-human-gate) shift; NO_HUMAN_GATE="${1:-}" ;;
     --no-branch-protection) shift; NO_BRANCH_PROTECTION="${1:-}" ;;
@@ -66,6 +71,13 @@ run gh variable set WIF_PROVIDER --repo "$SLUG" --body "$WIF"
 run gh variable set PLAN_SERVICE_ACCOUNT --repo "$SLUG" --body "$SA_PLAN"
 run gh variable set APPLY_SERVICE_ACCOUNT --repo "$SLUG" --body "$SA_APPLY"
 run gh variable set ORG_ID --repo "$SLUG" --body "$ORG_ID"
+# Obserwator (`watch.yml`) ma WŁASNĄ tożsamość i własny projekt metryk — i to jest jedyna para zmiennych,
+# której brak psuje warstwę BEZ objawu w tym skrypcie (zmierzone #2062): job `policz` przechodzi (czyta
+# kontem `plan`), job `opublikuj` pada na `auth` z komunikatem o braku `service_account`, metryki nie
+# powstają, a ping dead-man's-switcha nigdy nie wychodzi. Pierwszym sygnałem świeżego wdrożenia jest wtedy
+# CZERWONY check DMS po 3 h — czyli alert o własnej niekompletności, nieodróżnialny od realnej awarii.
+[ -z "$SA_WATCH" ] || run gh variable set WATCH_SERVICE_ACCOUNT --repo "$SLUG" --body "$SA_WATCH"
+[ -z "$MONITORING_PROJECT" ] || run gh variable set MONITORING_PROJECT --repo "$SLUG" --body "$MONITORING_PROJECT"
 
 # 3. Environments. DWIE WARSTWY o różnej naturze — mylenie ich to najczęstszy sposób, w jaki ta bramka
 #    okazuje się nie istnieć:
@@ -133,7 +145,22 @@ team_id() {
 if ! net_id="$(team_id "$NET_TEAM")" || ! sec_id="$(team_id "$SEC_TEAM")"; then
   echo "  BŁĄD: nie znaleziono zespołu ($NET_TEAM / $SEC_TEAM) w orgu $ORG — albo brak uprawnień do jego odczytu." >&2
   echo "  Environment bez wymaganych reviewerów jest GORSZY niż jego brak: wygląda na bramkę, a przepuszcza apply." >&2
-  exit 1
+  # ODSTĘPSTWO MUSI DAĆ SIĘ ZGŁOSIĆ TU, A NIE DOPIERO NIŻEJ (zmierzone #2062, próba generalna).
+  #
+  # Do 2026-08-13 ten `exit 1` był BEZWARUNKOWY, czyli wypadał PRZED jedyną furtką, którą skrypt reklamuje
+  # w swoim nagłówku (`--no-human-gate "<powód>"`, obsługiwana ~40 linii niżej). Skutek: na koncie bez
+  # organizacji — albo w dniu zerowym wdrożenia, zanim zespoły GitHuba w ogóle powstały — krok 7 procedury
+  # odtworzenia był NIEWYKONALNY, a udokumentowane obejście nieosiągalne. Repozytorium zostawało wtedy
+  # bez polityki gałęzi (krok 4 skryptu też się nie wykonywał), czyli bez JEDYNEJ bramki działającej na
+  # każdym planie GitHuba — awaria cichsza i groźniejsza niż brak recenzentów, którego skrypt bronił.
+  #
+  # Świadome odstępstwo zostaje odstępstwem: jedziemy dalej z PUSTĄ listą recenzentów, a werdykt wydaje
+  # ODCZYT z API niżej (`ma_reviewerow`), nie to, co skrypt wysłał. Bez `--no-human-gate` zachowanie się
+  # nie zmienia — twardy błąd, tak jak było.
+  [ -n "$NO_HUMAN_GATE" ] || exit 1
+  echo "  ODSTĘPSTWO ŚWIADOME (brak zespołów): $NO_HUMAN_GATE — lecę dalej z pustą listą recenzentów," >&2
+  echo "  żeby krok 4 (polityka gałęzi) w ogóle się wykonał. Werdykt o bramce ludzkiej wyda odczyt z API." >&2
+  net_id="" sec_id=""
 fi
 
 # `deployment_branch_policy` powtórzone w tym payloadzie CELOWO: PUT opisuje environment w całości, więc
@@ -142,7 +169,9 @@ fi
 env_payload() {
   python3 -c "
 import json,sys
-ids = [int(x) for x in sys.argv[1:]]
+# Puste argumenty przepuszczamy: przy świadomym --no-human-gate bez zespołów lista recenzentów jest pusta,
+# a environment ma i tak powstać — niesie politykę gałęzi, czyli jedyną bramkę działającą na każdym planie.
+ids = [int(x) for x in sys.argv[1:] if x]
 print(json.dumps({'wait_timer': 0, 'reviewers': [{'type': 'Team', 'id': i} for i in ids],
                   'deployment_branch_policy': {'protected_branches': False, 'custom_branch_policies': True}}))
 " "$@"
@@ -284,6 +313,31 @@ ochrona="$(gh api "repos/$SLUG/branches/$GALAZ_DOMYSLNA/protection" \
          (if .enforce_admins.enabled then "admini tez" else "admini pomijaja" end)] | join(" | ")' \
   2>/dev/null || echo "BRAK")"
 printf '  %s (galaz domyslna): ochrona=%s\n' "$GALAZ_DOMYSLNA" "${ochrona:-BRAK}"
+
+# KOMPLETNOŚĆ ZMIENNYCH — ODCZYT Z API vs. TO, CZEGO WORKFLOWY REALNIE UŻYWAJĄ (#2062).
+#
+# DLACZEGO ta pętla, a nie stała lista w komentarzu: lista rosła po cichu razem z workflowami. Procedura
+# odtworzenia wymieniała TRZY zmienne, ten skrypt ustawiał CZTERY, a `.github/workflows/` czytało DZIESIĘĆ
+# — i nic tego nie porównywało. Brakujące `vars.*` nie psują apply; psują warstwy poboczne (obserwator,
+# raport naruszeń, kanał wejściowy) i robią to CICHO, bo `${{ vars.X }}` puste jest legalnym napisem.
+# Źródłem prawdy jest więc drzewo workflowów, nie pamięć autora — inaczej ten guard zestarzeje się tak
+# samo jak lista, którą zastępuje.
+if [ "$DRY" -eq 0 ] && [ -d .github/workflows ]; then
+  echo
+  echo "== zmienne wymagane przez workflowy (odczytane z drzewa, nie z listy) =="
+  uzywane="$(grep -rhoE 'vars\.[A-Z0-9_]+' .github/workflows/ | cut -d. -f2 | sort -u)"
+  ustawione="$(gh variable list --repo "$SLUG" --json name --jq '.[].name' 2>/dev/null | sort -u)"
+  brakujace="$(comm -23 <(printf '%s\n' "$uzywane") <(printf '%s\n' "$ustawione") | tr '\n' ' ')"
+  if [ -n "${brakujace// /}" ]; then
+    echo "  NIEUSTAWIONE:$brakujace" >&2
+    echo "  Warstwy, które ich potrzebują, NIE zgłoszą tego same — pusta zmienna jest w YAML-u legalna." >&2
+    echo "  WATCH_SERVICE_ACCOUNT / MONITORING_PROJECT: obserwator i ping DMS (--sa-watch, --monitoring-project)." >&2
+    echo "  VIOLATIONS_SINK_*: raport naruszeń (stack violations-sink, applikuje człowiek)." >&2
+    echo "  INTAKE_APP_ID: kanał wejściowy — opcjonalny, ustaw dopiero po instalacji aplikacji." >&2
+  else
+    echo "  komplet: $(printf '%s' "$uzywane" | tr '\n' ' ')"
+  fi
+fi
 
 cat <<'NEXT'
 

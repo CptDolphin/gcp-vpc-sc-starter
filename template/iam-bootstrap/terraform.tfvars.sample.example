@@ -11,6 +11,13 @@ state_bucket        = "bkt-tf-state-vpcsc"  # versioning + soft-delete, BEZ rete
 # KAŻDEJ zmianie, także niezwiązanej z monitoringiem.
 # monitoring_project_id = "prj-cloud-monitoring"
 
+# DRUGA INSTANCJA TORU W TEJ SAMEJ ORGANIZACJI (próba generalna, pilot obok produkcji, ćwiczenie DR).
+# Trzy obiekty tego stacku są ORG-LEVEL i mają nazwę globalną dla organizacji: role własne
+# `vpcScPerimeterWriter` i `vpcScDenyReader` oraz polityka Deny `vpcsc-ci-no-destroy`. Bez sufiksu drugi
+# apply pada w POŁOWIE (`already exists and must be imported`) — po utworzeniu większości zasobów, więc
+# zostawia stan rozjechany z kodem. Puste = nazwy kanoniczne, czyli pierwsza (produkcyjna) instancja.
+# org_resource_suffix = "pilot"
+
 # Projekt sondujący KONTROLI POZYTYWNEJ sondy granicy. MUSI BYĆ CZŁONKIEM perimetru — inaczej sonda mierzy
 # brak granicy zamiast reguły (`boundary-probe.yml` to asertuje i czerwieni przelot). Ta sama wartość idzie
 # do zmiennej repo `POSITIVE_CONTROL_PROJECT`. Puste = kontrola pozytywna celuje w projekt z wejścia
