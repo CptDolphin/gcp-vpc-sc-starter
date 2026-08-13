@@ -198,25 +198,46 @@ członek dostaje warianty dry-run, a członek ze `stage: enforced` **dodatkowo**
 realny diff; usunięcie pliku to czysty destroy jednego zasobu; równoległe wnioski nie kolidują w tym samym bloku
 HCL. Miarą sukcesu tej decyzji jest to, że `plan` w PR pokazuje wyłącznie zasoby danego członka.
 
-**Dlaczego single-flight — uzasadnienie SKORYGOWANE pomiarem (2026-08-07).** Pierwotnie stało tu, że dwa
-równoległe apply „nadpisują się nawzajem, a w logach widać dwa poprawne `update`". **To jest nieprawda —
-zdanie zostało obalone pomiarem i nie należy go powtarzać w rozmowie o architekturze.**
+**Dlaczego single-flight — uzasadnienie korygowane DWA RAZY, ostatecznie pomiarem z 2026-08-13.**
+Ta sekcja niosła kolejno dwa zdania i **oba były nieprawdziwe**, każde w inną stronę:
 
-Access Context Manager ma **optymistyczną kontrolę współbieżności na eTagach**. Przy nałożeniu w czasie
-przegrany apply pada GŁOŚNO — `Error 400: The eTag provided '…' does not match the eTag` — a reguła zwycięzcy
-zostaje. Przy przebiegu bez nałożenia oba kończą się `rc=0` i obie reguły są obecne. **Nic nie znika po cichu.**
+1. *„dwa równoległe apply nadpisują się nawzajem, a w logach widać dwa poprawne `update`"* — obalone;
+2. *„ACM ma optymistyczną kontrolę na eTagach, przegrany pada głośno, **nic nie znika po cichu**, więc
+   argumentem jest wyłącznie niezawodność"* — **też obalone**. Przebieg, na którym stało, rozpoznawał
+   konflikt przez `grep -i etag` po całym logu `terraform apply`, a plan drukuje `+ etag = (known after
+   apply)`; wzorzec pasował więc do **każdej** awarii i kategoria „nierozstrzygnięte" była nieosiągalna.
 
-Single-flight zostaje słuszny, ale argumentem jest **niezawodność, nie cicha utrata danych**: bez niego
-~80-100% równoległych apply kończy się błędem, czyli platforma, w której co drugi merge losowo pada. Różnica
-jest praktyczna, a nie akademicka — **przy eTagu retry pomaga**, przy cichej utracie by nie pomógł. Gdyby
-utrata była cicha, samo `concurrency` też by nie wystarczyło: trzeba by weryfikować stan po każdym apply.
+**Rozstrzygnięcie jest dwustronne i zależy od ZASOBU** (43 przebiegi równoległe, perimetr jednorazowy bez
+ani jednego członka):
 
-Skąd korekta: eksperyment [`experiments/race-two-states/`](../experiments/race-two-states/README.md) był
-**zepsuty w sposób, który zawsze potwierdzał tezę** — używał fikcyjnych kont, które ACM odrzuca, więc oba
-applye padały, a werdykt nie odróżniał „apply padł" od „reguła zniknęła". Po podmianie na realne tożsamości:
-5/5 przebiegów = konflikt eTagu, zero cichych utrat. Eksperyment jest dziś sparametryzowany tożsamościami
-i rozróżnia trzy wyniki — uruchom go, zanim ktoś podejmie tę decyzję na podstawie czyjejkolwiek opinii,
-łącznie z tą zapisaną wyżej.
+- **konfiguracja dry-run oraz każde TWORZENIE reguły** — zachowują się zgodnie z pkt 2: przegrany pada
+  głośno, `Error 400: The eTag provided '…' does not match the eTag of the current version of the
+  **Access Policy**`. 15/15 przebiegów, zero cichych utrat;
+- **reguła EGZEKWOWANA aktualizowana w miejscu** — **gubi zmianę po cichu**. Z 9 przebiegów, w których
+  **oba** applye zgłosiły `rc=0`, **5 skończyło się brakiem jednej ze zmian w żywym API**. Pozostałe padały
+  komunikatem nieniosącym nic o współbieżności: `Provider produced inconsistent result after apply …
+  Root object was present, but now absent` — nieodróżnialnym od „ktoś skasował moją regułę".
+
+Różnica bierze się ze schematu providera: warianty `..._dry_run_*` **nie mają `Update`** (zmiana = ForceNew,
+czyli skasuj i utwórz), egzekwowane mają i idą read-modify-write po całej liście.
+
+**Wniosek dla tej decyzji:** single-flight zostaje, ale jest kontrolą **poprawności**, nie wygody — i
+**retry na eTagu go NIE zastępuje**. Retry leczy wyłącznie ścieżkę, która zgłasza błąd; na ścieżce cichej nie
+ma czego ponowić, a co gorsza podniósłby odsetek przebiegów „oba OK", czyli dokładnie tych, w których
+utratę zmierzono. Konsekwencja druga: **zielony `apply` nie kończy zmiany — kończy ją odczyt z API**.
+
+**Jednostką wyłączności jest ACCESS POLICY, nie perimetr.** Zmierzone: zapis do perimetru sąsiedniego
+przesuwa eTag perimetru **nietkniętego** (oba i sama polityka dzielą jedną wartość), co potwierdza też treść
+komunikatu API. Podział na dwa perimetry **nie daje** drugiego, niezależnego toru zapisu — resetuje limit
+atrybutów per konfiguracja i nic poza tym. `concurrency` w jednym repozytorium nie obejmuje więc pozostałych
+piszących do tej samej polityki (człowiek z `gcloud`, inny stack, pipeline drugiego repo) — residuum nazwane.
+
+Skąd korekty: eksperyment [`experiments/race-two-states/`](../experiments/race-two-states/README.md)
+**potwierdzał tezę niezależnie od zachowania API — dwa razy, z dwóch różnych powodów** (fikcyjne tożsamości;
+wzorzec `etag` trafiający w plan). Dziś tożsamości są parametrem, werdykt czyta **wyciągnięty komunikat API**
+i **stan końcowy per strona**, a tryb `SEKWENCYJNIE=1` daje kontrolę anty-tautologiczną (bez współbieżności
+komplet, zmierzone 6/6). Uruchom go, zanim ktoś podejmie tę decyzję na podstawie czyjejkolwiek opinii —
+łącznie z tą zapisaną wyżej, która była błędna już dwukrotnie.
 
 **Dlaczego `ignore_changes` jest obowiązkowe.** Bez tego szkielet i zasoby per-członek biją się o te same listy:
 każdy apply usuwa to, co dodał poprzedni — flapping granicy bezpieczeństwa. Konsekwencja do zapamiętania: dopisanie
