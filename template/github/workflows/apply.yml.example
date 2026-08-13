@@ -23,7 +23,9 @@
 #     change absent from the live API — no error anywhere. Retrying on the eTag does NOT substitute for
 #     serialising: it only cures the path that reports an error, and it would raise the share of runs where
 #     both sides go green — exactly the ones that lost data. Corollary for anyone reading a green run here:
-#     a green `apply` does not end the change, reading the API does (measured, see DEC-6).
+#     a green `apply` does not end the change, reading the API does (measured, see DEC-6). That corollary
+#     is no longer only a sentence: the last step of this job PERFORMS the read — see `weryfikacja stanu
+#     po apply` at the bottom and DEC-45.
 #   * bramka promocji — jedyny punkt, w którym ten workflow ZATRZYMUJE SIĘ i czeka na człowieka, i jedyna
 #     kontrola tutaj, która NIE JEST ustawieniem repozytorium: działa na każdym planie GitHuba. Zatrzymuje
 #     apply, który zacząłby egzekwować granicę wobec członka będącego dziś w dry-run — bo to jedyna zmiana
@@ -309,6 +311,45 @@ jobs:
           gh release upload contract contract.json --clobber
 
           echo "Kontrakt opublikowany: bucket + asset release'u \`contract\`." >> "$GITHUB_STEP_SUMMARY"
+
+      # WERYFIKACJA STANU PO APPLY — jedyny krok tego joba, ktory sprawdza, czy `apply` zrobil to, co
+      # zamierzal. Powod jest zmierzony, nie teoretyczny (DEC-6, DEC-45): na regule EGZEKWOWANEJ
+      # aktualizowanej w miejscu `apply` potrafi zglosic `rc=0` i nie zapisac zmiany — 5 z 9 przebiegow,
+      # w ktorych OBA rownolegle applye byly zielone, skonczylo sie brakiem jednej ze zmian w API.
+      #
+      # DLACZEGO `plan`, A NIE `perimeters describe`: `describe` byloby tansze (jedno wywolanie zamiast
+      # pelnego refreshu), ale wymagaloby DRUGIEGO renderera deklaracji — a dwa renderery rozjezdzaja sie
+      # i wtedy bramka opisuje wlasny blad, nie granice. `describe` widzi przy tym wylacznie perimetr,
+      # a ten stan trzyma takze access levele, obiekt kontraktu i polityki alertow. Cena pelnego refreshu
+      # jest realna (kwota `read_requests` = 500/min na organizacje, a KAZDY zasob granularny ACM czyta
+      # caly perimetr) — dlatego krok MIERZY SAM SIEBIE i wypisuje sekundy do podsumowania przebiegu.
+      #
+      # DLACZEGO W TYM SAMYM JOBIE, a nie `needs: apply`: zamek `concurrency: vpc-sc-apply` trzyma sie
+      # joba. Weryfikacja wyniesiona do osobnego joba zwalnialaby zamek miedzy zapisem a odczytem, czyli
+      # otwieralaby dokladnie to okno, ktore ma wykrywac.
+      #
+      # WRAPPER `setup-terraform` MUSI ZOSTAC WYLACZONY (jest, wyzej): ten krok stoi na `-detailed-exitcode`,
+      # a wrapper zamienia kod `2` na `0`. Z wrapperem ta bramka bylaby cichym no-opem.
+      #
+      # WERDYKT CZYTAMY Z TRESCI PLANU, nie z kodu wyjscia — `plan` zwraca niezero takze przy awarii
+      # srodowiska, a „nie udalo sie zmierzyc" nie moze wygladac ani jak „czysto", ani jak „zmiana nie
+      # weszla". Trzy werdykty i cala argumentacja: naglowek `tools/weryfikacja_po_apply.py`.
+      - name: weryfikacja stanu po apply (zielony apply nie dowodzi zapisu)
+        run: |
+          poczatek=$(date +%s%3N)
+          kod=0
+          # `-out` jest wzgledne wobec `-chdir`, przekierowanie `>` wykonuje POWLOKA w katalogu joba —
+          # ta sama asymetria, ktora wyzej kosztowala nas plan.json w zlym katalogu.
+          terraform -chdir=terraform plan -input=false -lock-timeout=10m -detailed-exitcode \
+            -out=weryfikacja.binary > weryfikacja.log 2>&1 || kod=$?
+          tail -40 weryfikacja.log
+          # `|| true`: przy nieudanym planie pliku nie ma i to jest INFORMACJA (werdykt NIE ZMIERZONO),
+          # nie powod, zeby krok padl bez wyjasnienia.
+          terraform -chdir=terraform show -json weryfikacja.binary > terraform/weryfikacja.json 2>/dev/null || true
+          sekundy=$(awk "BEGIN{printf \"%.1f\", ($(date +%s%3N) - $poczatek) / 1000}")
+
+          python3 tools/weryfikacja_po_apply.py --kod "$kod" --sekundy "$sekundy" \
+            --plan-po terraform/weryfikacja.json --plan-przed terraform/plan.json --log weryfikacja.log
 
       # Done means measured. The outputs say who is really enforced now — paste-able into the ticket.
       - name: report what is live

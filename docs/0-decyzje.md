@@ -3120,3 +3120,51 @@ sinka. Ta zmiana odbiera fałszywym alarmom **jedną konkretną przyczynę** (ma
 | dołożyć `subnetworks.insert` do filtra i **nie** ruszać zapytania odczytu | to są DWA różne filtry. Zdarzenie przepuszczone przez sink, ale niewpuszczone przez zapytanie odczytu, nie dociera do detektora — mapa wyszłaby pusta, a przebieg zielony |
 | zmienić kierunek błędu na „nieznana podsieć = nie licz" | zamienia przeszacowanie na ciszę dokładnie tam, gdzie strumień zawiódł. Sink, który nie dostarcza, wygląda wtedy jak czyste okno — ta klasa defektu ma już własny wpis w runbooku i nie wolno jej wprowadzać powtórnie |
 | osobny, czwarty kubełek na `subnetworks.insert` | rozłączność nie jest tu do niczego potrzebna: to ten sam detektor, to samo okno odczytu i ten sam konsument. Czwarty kubełek to trzeci grant, trzeci widok i trzecia rzecz do odtworzenia na nowym klastrze, kupione za nic |
+
+---
+
+## DEC-45 — `apply` kończy się DOWODEM, że zastosował to, co zamierzał; dowodem jest pusty plan, nie kod wyjścia
+
+**Decyzja.** Ostatnim krokiem joba `apply` jest `terraform plan -input=false -detailed-exitcode` wykonany
+**bezpośrednio po** `terraform apply`, w **tym samym jobie** (czyli pod tym samym zamkiem
+`concurrency: vpc-sc-apply`). Werdykt wystawia `tools/weryfikacja_po_apply.py` i czyta go z **treści planu**
+(`terraform show -json`), nie z kodu wyjścia. Werdykty są trzy: `ZGODNE` (plan pusty), `ROZJAZD` (plan
+niepusty zaraz po udanym apply) i `NIE ZMIERZONO` (planu nie da się odczytać). Dwa ostatnie czerwienią
+przebieg. Krok mierzy własny czas i wypisuje go do podsumowania każdego przebiegu.
+
+**Dlaczego.** Zielony `apply` na regule **egzekwowanej aktualizowanej w miejscu** nie dowodzi, że zapis
+wszedł: z 9 przebiegów, w których **oba** równoległe applye zgłosiły `rc=0`, **5 skończyło się brakiem
+jednej ze zmian w żywym API** — bez jednego błędu (DEC-6). Bez tego kroku jedynym sygnałem
+wdrożenia granicy jest kolor przebiegu, o którym **wiadomo, że kłamie** — a na tym sygnale stoją wszystkie
+pozostałe bramki, dowody i promocje. Serializacja zmniejsza szansę trafienia w okno, ale go nie usuwa:
+jednostką eTagu jest **access policy**, a `concurrency:` obejmuje jedno repozytorium, więc pisarz spoza
+tego workflowa (człowiek z `gcloud`, osobny stack, ręczne odtworzenie perimetru) w to okno wchodzi
+i nic go nie serializuje.
+
+**Dlaczego werdykt z treści, a nie z kodu wyjścia.** `-detailed-exitcode` zwraca niezero także wtedy, gdy
+plan **w ogóle się nie wykonał** (wygasłe poświadczenia, `403`, limit tempa, przerwany refresh). Uznanie
+tego za „zmiana nie wylądowała" byłoby dokładnie tym błędem, który dwa razy zepsuł pomiar wyścigu:
+awaria narzędzia raportowana jako wynik pomiaru. Stąd trzeci werdykt i stąd kierunek zależności — kod
+wyjścia jest **wejściem** dla klasyfikatora, a rozstrzyga zawartość planu. Konsekwencja fail-closed:
+plan, którego nie da się odczytać (brak pliku, niepełny JSON), NIE jest „czysto" — także przy kodzie `0`.
+
+**Dlaczego to nie jest fałszywy alarm blokujący wdrożenie.** Krok biegnie **po** `apply`, więc czerwony
+przebieg nie cofa ani nie wstrzymuje zmiany — jest alarmem o rozjeździe, nie utratą drogi wdrożenia.
+Odwrotnie niż bramka przed `apply`, której awaria zatrzymałaby jedyną ścieżkę mutacji granicy.
+
+**Cena, nazwana wprost.** Jeden dodatkowy pełny refresh na przebieg mutujący. Każdy granularny zasób ACM
+czyta **cały** perimetr, a kwota `read_requests` to 500/min na organizację — przy 500 członkach jeden plan
+to ~271 wywołań, więc dwa plany w tej samej minucie są blisko sufitu. Dlatego krok podaje zmierzony czas
+w każdym przebiegu zamiast opierać się na jednorazowym pomiarze z dnia wdrożenia.
+
+**Co odrzucono i dlaczego.**
+
+| wariant | powód odrzucenia |
+|---|---|
+| zostawić sam kod wyjścia `apply` jako dowód | to jest stan sprzed tej decyzji i jest **zmierzony jako nieprawdziwy** (5/9 przebiegów). Zielony `apply` mówi „provider nie zgłosił błędu", a nie „granica wygląda jak plik w gicie" |
+| porównywać `perimeters describe` z deklaracją zamiast planu | tańsze (jedno wywołanie zamiast refreshu), ale wymaga **drugiego renderera** deklaracji — a dwa renderery rozjeżdżają się i wtedy bramka opisuje własny błąd, nie granicę. Do tego `describe` widzi wyłącznie perimetr, a ten stan trzyma także access levele, obiekt kontraktu i polityki alertów: cicha utrata na którymkolwiek z nich przeszłaby niezauważona |
+| `retry` z backoffem na eTagu zamiast weryfikacji | leczy **wyłącznie ścieżkę głośną**. Na ścieżce, którą zmierzono, nie ma błędu, więc nie ma wyzwalacza retry — a odsetek przebiegów „oba OK" (czyli tych, w których zmierzono utratę) retry **podnosi**. Rozstrzygnięte w DEC-6 |
+| weryfikacja w osobnym jobie (`needs: apply`) | zwalnia zamek `concurrency` między zapisem a odczytem, czyli otwiera dokładnie to okno, które ma wykrywać. Do tego drugi job = drugi `init` i drugi odczyt stanu, więc cena rośnie zamiast maleć |
+| plan zawężony `-target` do zasobów, które ten apply zmieniał | tańszy (1–3 odczyty zamiast pełnego refreshu), ale odpowiada na węższe pytanie: nie zobaczy zasobu z tego samego stanu, który stracił swoją treść przy okazji. Bramka wyglądająca na „stan zgadza się z gitem", a mierząca podzbiór, jest gorsza od jawnie droższej |
+| uruchamiać weryfikację tylko wtedy, gdy plan przed apply był niepusty | oszczędza refresh na przebiegach bez zmian, ale kosztuje jedyny moment, w którym tanio widać dryf: `apply` bez zmian na wejściu jest właśnie tym przebiegiem, w którym rozjazd wprowadzony z zewnątrz zobaczyłby ktoś pierwszy raz |
+| ostrzeżenie (`::warning::`) zamiast czerwonego przebiegu | rozjazd po apply znaczy, że granica NIE jest tym, co przeszło review. Ostrzeżenie w zielonym przebiegu nie zostanie przeczytane — a dokładnie tę klasę defektu („zielone, a niedziałające") ten mechanizm zamyka |
