@@ -62,6 +62,13 @@ runs:
         check-jsonschema --schemafile schemas/profile.schema.json perimeter/profiles/*.yaml
         check-jsonschema --schemafile schemas/projects.schema.json perimeter/projects.yaml
         check-jsonschema --schemafile schemas/access-level.schema.json perimeter/access-levels/*.yaml
+        # `contributors.yaml` byl JEDYNYM z szesciu typow deklaracji bez schematu (#2047) — i akurat tym,
+        # ktory AUTORYZUJE: mowi, ktore repozytorium moze wnioskowac o ktory projekt. Literowka w kluczu
+        # nie byla tu bledem, tylko cisza: regula OPA odczytuje brakujace pole jako puste, wiec
+        # `allowed_project` zamiast `allowed_projects` daje PUSTA liste dozwolonych zamiast odrzucenia.
+        # Schemat dokłada kontrole do regul OPA, nie zastepuje ich — tamte pilnuja ZGODNOSCI wpisu
+        # ze zgloszeniem, ten pilnuje, zeby wpis w ogole znaczyl to, co wyglada, ze znaczy.
+        check-jsonschema --schemafile schemas/contributors.schema.json perimeter/contributors.yaml
         # `alerting.yaml` jest OPCJONALNY (brak = alerty wyłączone, bezpieczna degradacja), ale gdy jest,
         # musi być kompletny. `if`, a NIE `[ -f … ] && … || echo`: ten drugi zapis połyka też PORAŻKĘ
         # walidacji (`||` łapie każdy niezerowy kod, nie tylko brak pliku), czyli daje bramkę, która
