@@ -6045,6 +6045,11 @@ def test_samodzielnosc() -> None:
         "service-000000000000@gcp-sa-aiplatform.iam.gserviceaccount.com.\n"
         "Ludzie i grupy: user:example.person@example.com, group:grp-example-division-cloud@example.com.\n"
         "Bot platformy: github-actions[bot]@users.noreply.github.com. Zgloszenie RITM0000001.\n"
+        # Wersja po malpie NIE jest adresem. Zlapane na cudzym repozytorium: `npx <pakiet>@<wersja>`
+        # i akcja przypieta tagiem `@v<x>.<y>.<z>` maja ksztalt adresu, jesli nie wymagac literowego
+        # ostatniego czlonu domeny. Skan biega poza starterem, wiec falszywa czerwien u odbiorcy kosztuje
+        # tyle samo, co u nas.
+        "Narzedzia: npx cspell@10.0.1, npx dict-pl_pl@3.0.6, uses: actions/checkout@v4.1.1.\n"
     )
     falszywe = skan.skanuj_tekst(konwencja)
     check("skan samodzielnosci PRZEPUSZCZA cala konwencje przykladow (zero falszywych alarmow)",
