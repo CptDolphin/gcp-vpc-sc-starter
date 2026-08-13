@@ -305,7 +305,7 @@ resource "google_logging_project_bucket_config" "network_inserts" {
   # odtworzyć, KTÓRA sieć i KIEDY była poza granicą, i ograniczyć, co mogło wtedy wyjść.
   retention_days = var.retention_days
 
-  description = "Zdarzenia sterujące Compute (utworzenie sieci VPC i maszyny) z całej organizacji — wejście detektora okna „świeża sieć w członku egzekwowanym" (DEC-32)."
+  description = "Zdarzenia sterujące Compute (utworzenie sieci VPC i maszyny) z całej organizacji — wejście detektora okna „świeża sieć w członku egzekwowanym” (DEC-32)."
 }
 
 resource "google_logging_organization_sink" "network_inserts" {
@@ -349,7 +349,7 @@ resource "google_logging_log_view" "network_inserts" {
 
   name        = local.network_bucket_id
   bucket      = google_logging_project_bucket_config.network_inserts[0].id
-  description = "Admin Activity zdarzeń sterujących Compute — wejście alertu „obciążenie w sieci młodszej niż okno dojrzewania"."
+  description = "Admin Activity zdarzeń sterujących Compute — wejście alertu „obciążenie w sieci młodszej niż okno dojrzewania”."
   filter      = "LOG_ID(\"cloudaudit.googleapis.com/activity\")"
 }
 
