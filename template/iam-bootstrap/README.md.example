@@ -15,6 +15,7 @@ perimetru działa samo, a ten katalog rusza się tylko przy zmianie modelu dost�
 | custom rola `vpcScPerimeterWriter` | `servicePerimeters.get/list/**update**` + access levels — **bez** create/delete |
 | custom rola `vpcScMonitoringWriter` (gdy `monitoring_project_id` niepuste) | metryki logowe i polityki alertów perimetru w JEDNYM projekcie, dla `apply`. `terraform apply` zaczyna od **refreshu**, więc bez tego pada na 403 nawet wtedy, gdy monitoringu nie dotyka |
 | 4 role read-only na org dla `plan` | `policyReader` (plan), `cloudasset.viewer` + `compute.networkViewer` + `dns.reader` (pre-flight) |
+| custom rola `vpcScPositiveControlReader` (gdy `positive_control_project_id` niepuste) | odczyt wpisów logu w **jednym** projekcie sondującym — kontrola pozytywna sondy granicy. Zastępuje rolę org-wide: dowód „reguła baseline **wpuszcza**" przestaje kosztować prawo odczytu każdego logu w organizacji, a liczba nadań nie rośnie z liczbą członków |
 | `storage.objectAdmin` na **prefiksie** stanu | backend GCS bierze blokadę (`.tflock`), sam odczyt nie wystarcza nawet dla `plan` |
 | pula WIF + provider z `attribute_condition` | dostęp keyless; warunek pinuje **jedno** repozytorium |
 | custom rola `vpcScDenyReader` | `iam.denypolicies.get/list` — **jedyny** sposób, żeby ktokolwiek w organizacji odpowiedział „czy Deny stoi"; org-admin tego prawa nie ma z urzędu |

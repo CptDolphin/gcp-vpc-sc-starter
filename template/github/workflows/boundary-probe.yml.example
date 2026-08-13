@@ -168,6 +168,9 @@ jobs:
       - name: stan granicy w chwili pomiaru
         env:
           PROJEKT: ${{ github.event.inputs.project }}
+          # PROJEKT SONDUJĄCY kontroli pozytywnej — patrz komentarz przy sondzie `chroniona-z-regula`.
+          # Musi być CZŁONKIEM granicy; ten krok to sprawdza i oddaje werdyktowi jako osobne pole.
+          PROJEKT_POZYTYWNY: ${{ vars.POSITIVE_CONTROL_PROJECT }}
           PERIMETR_WEJSCIE: ${{ github.event.inputs.perimetr }}
           POLITYKA_WEJSCIE: ${{ github.event.inputs.polityka }}
         run: |
@@ -184,6 +187,11 @@ jobs:
 
           rc = int(os.environ["RC"])
           projekt, nazwa, polityka = os.environ["PROJEKT"], os.environ["NAZWA"], os.environ["POLITYKA"]
+          # Pusta zmienna = wdrożenie jeszcze nie wyznaczyło projektu sondującego. Wtedy kontrola pozytywna
+          # celuje w projekt z wejścia — czyli zachowuje się jak przed pinowaniem i WYMAGA uprawnienia
+          # w każdym sondowanym projekcie. To jest degradacja, więc ma być NAZWANA, a nie domyślna po cichu.
+          pinowana = bool(os.environ.get("PROJEKT_POZYTYWNY"))
+          projekt_pozytywny = os.environ.get("PROJEKT_POZYTYWNY") or projekt
           blad = pathlib.Path("perimetr.err").read_text().strip() if pathlib.Path("perimetr.err").exists() else ""
           egz, dry = [], []
           if rc == 0:
@@ -196,25 +204,36 @@ jobs:
           else:
               granica = "NIE_WIADOMO"
 
-          numer = projekt if projekt.isdigit() else None
-          if numer is None:
-              for m in (yaml.safe_load(pathlib.Path("perimeter/projects.yaml").read_text()) or {}).get("members", []):
-                  if m.get("project_id") == projekt:
-                      numer = str(m.get("project_number"))
-                      break
-          if numer is None:
-              przynaleznosc = "NIE_WIADOMO"      # nie wiemy, o czyjej granicy mówi ten pomiar
-          elif granica != "ISTNIEJE":
-              przynaleznosc = "BEZ_GRANICY"
-          elif f"projects/{numer}" in egz:
-              przynaleznosc = "STATUS"
-          elif f"projects/{numer}" in dry:
-              przynaleznosc = "SPEC"
-          else:
-              przynaleznosc = "POZA"
+          czlonkowie = (yaml.safe_load(pathlib.Path("perimeter/projects.yaml").read_text()) or {}).get("members", [])
+
+          def przynaleznosc_projektu(p):
+              """(przynaleznosc, numer) dla project_id ALBO numeru — ta sama reguła dla obu sondowanych projektów."""
+              numer = p if p.isdigit() else None
+              if numer is None:
+                  for m in czlonkowie:
+                      if m.get("project_id") == p:
+                          numer = str(m.get("project_number"))
+                          break
+              if numer is None:
+                  return "NIE_WIADOMO", None     # nie wiemy, o czyjej granicy mówi ten pomiar
+              if granica != "ISTNIEJE":
+                  return "BEZ_GRANICY", numer
+              if f"projects/{numer}" in egz:
+                  return "STATUS", numer
+              if f"projects/{numer}" in dry:
+                  return "SPEC", numer
+              return "POZA", numer
+
+          przynaleznosc, numer = przynaleznosc_projektu(projekt)
+          # Kontrola pozytywna sonduje WŁASNY projekt (`vars.POSITIVE_CONTROL_PROJECT`), więc jego
+          # przynależność jest osobnym faktem i osobnym polem — bez tego „PRZESZŁO" mogłoby pochodzić
+          # z projektu, którego granica w ogóle nie obejmuje, czyli mierzyć BRAK granicy zamiast reguły.
+          przynaleznosc_poz, numer_poz = przynaleznosc_projektu(projekt_pozytywny)
 
           pathlib.Path("stan-granicy.json").write_text(json.dumps({
               "granica": granica, "przynaleznosc": przynaleznosc, "numer": numer,
+              "projekt_pozytywny": projekt_pozytywny, "pinowana": pinowana,
+              "przynaleznosc_pozytywna": przynaleznosc_poz, "numer_pozytywny": numer_poz,
               "perimetr": nazwa, "polityka": polityka, "status": egz, "spec": dry, "blad": blad[-400:],
           }))
           print("### stan granicy odczytany z API\n")
@@ -223,7 +242,14 @@ jobs:
               print(f"- odpowiedź API: `{blad.splitlines()[-1][:220]}`")
           print(f"- konfiguracja EGZEKWOWANA (`status.resources`): {egz or 'PUSTA'}")
           print(f"- konfiguracja DRY-RUN (`spec.resources`): {dry or 'PUSTA'}")
-          print(f"- sondowany projekt: `{projekt}` (numer `{numer or 'NIEZNANY'}`) — **{przynaleznosc}**\n")
+          print(f"- sondowany projekt: `{projekt}` (numer `{numer or 'NIEZNANY'}`) — **{przynaleznosc}**")
+          if pinowana:
+              print(f"- projekt kontroli pozytywnej: `{projekt_pozytywny}` "
+                    f"(numer `{numer_poz or 'NIEZNANY'}`) — **{przynaleznosc_poz}**")
+          else:
+              print("- projekt kontroli pozytywnej: **NIEPINOWANY** — `vars.POSITIVE_CONTROL_PROJECT` jest pusta, "
+                    "kontrola pozytywna celuje w projekt z wejścia i wymaga uprawnienia odczytu logów W NIM")
+          print()
           PY
 
       - name: sondy
@@ -232,6 +258,7 @@ jobs:
           PROJEKT: ${{ github.event.inputs.project }}
           OCZEKIWANIE: ${{ github.event.inputs.expect }}
           KANAREK: ${{ github.event.inputs.kanarek }}
+          PROJEKT_POZYTYWNY: ${{ vars.POSITIVE_CONTROL_PROJECT }}
         run: |
           mkdir -p sondy
           # Każda sonda zapisuje stdout+stderr do pliku i kod wyjścia obok. Sklejamy strumienie celowo:
@@ -245,8 +272,32 @@ jobs:
             echo "--- $n (rc=$(cat "sondy/$n.rc"))"
             sed -n '1,12p' "sondy/$n.out"
           }
+          # =========================================================================================
+          # KONTROLA POZYTYWNA CELUJE W WYZNACZONY PROJEKT SONDUJĄCY, NIE W PROJEKT Z WEJŚCIA
+          # =========================================================================================
+          # CO ONA DOWODZI. To jedyna sonda, która ma PRZEJŚĆ przy `expect=blocked` na chronionej usłudze:
+          # dowód, że reguła `baseline_ingress` kogoś WPUSZCZA, a nie tylko że granica odmawia. Bez niej
+          # „wszystko odmówione" jest nieodróżnialne od „środowisko jest zepsute".
+          #
+          # DLACZEGO NIE `$PROJEKT`. Żeby przeszła, muszą zajść DWA warunki naraz: reguła VPC-SC przepuszcza
+          # metodę TEJ tożsamości ORAZ tożsamość ma w tym projekcie prawo odczytu logów (IAM). Drugi warunek
+          # przy celowaniu w dowolnego członka da się spełnić WYŁĄCZNIE uprawnieniem org-wide — czyli prawem
+          # czytania każdego logu w organizacji. To nie skaluje się do wdrożenia, w którym członków są setki,
+          # przybywa ich ~50/mc i dokłada ich obcy zespół: nadanie per-folder jest wtedy org-wide w przebraniu,
+          # a nadanie per-członek — listą nie do utrzymania.
+          #
+          # FIGURA ROZWIĄZANIA: zamiast „uprawnienie wszędzie" -> JEDNO WYZNACZONE MIEJSCE. Kontrola pozytywna
+          # nie potrzebuje dowolnego członka — wystarczy jej jeden, z nadaniem PER-PROJEKT (iam-bootstrap,
+          # sekcja 3f). Reguła baseline jest org-wide, więc jej zadziałanie na tym jednym członku jest dowodem
+          # jej zadziałania w ogóle. Liczba nadań przestaje rosnąć z liczbą członków.
+          #
+          # WARUNEK KONIECZNY: ten projekt MUSI być członkiem granicy — inaczej sonda mierzy BRAK granicy,
+          # a nie regułę. Sprawdza to krok „stan granicy" (`przynaleznosc_pozytywna`), a werdykt na tym
+          # asertuje; jeśli projekt zniknie (skasowany przez zespół, który go posiada — patrz DEC-42,
+          # żywotność członka), przelot pada GŁOŚNO, zamiast po cichu stracić kontrolę pozytywną.
+          POZYTYWNY="${PROJEKT_POZYTYWNY:-$PROJEKT}"
           sonda chroniona-z-regula \
-            gcloud logging read 'timestamp>="1970-01-01T00:00:00Z"' --project="$PROJEKT" --limit=1 --format=json
+            gcloud logging read 'timestamp>="1970-01-01T00:00:00Z"' --project="$POZYTYWNY" --limit=1 --format=json
           sonda chroniona-bez-reguly \
             gcloud logging buckets list --location=global --project="$PROJEKT" --format=json
           sonda chroniona-inna-usluga \
@@ -360,6 +411,9 @@ jobs:
               if pathlib.Path("stan-granicy.json").exists() \
               else {"granica": "NIE_WIADOMO", "przynaleznosc": "NIE_WIADOMO", "blad": "brak stan-granicy.json"}
           granica, przynaleznosc = stan["granica"], stan["przynaleznosc"]
+          projekt_pozytywny = stan.get("projekt_pozytywny", os.environ["PROJEKT"])
+          przynaleznosc_poz = stan.get("przynaleznosc_pozytywna", przynaleznosc)
+          pinowana = stan.get("pinowana", False)
           bledy, nierozstrzygniete = [], []
 
           if granica == "NIE_WIADOMO":
@@ -384,8 +438,35 @@ jobs:
               bledy.append("BASELINE MIERZONY NA GRANICY, KTORA JUZ EGZEKWUJE — przelot `open` ma ustalic, "
                            "ze wywolania dzialaja PRZED promocja; tu projekt juz jest w `status.resources`")
 
+          # PROJEKT SONDUJĄCY KONTROLI POZYTYWNEJ MUSI BYĆ CZŁONKIEM EGZEKWOWANYM — asercja, nie adnotacja.
+          #
+          # Kontrola pozytywna dowodzi, że reguła baseline WPUSZCZA. Wpuszczenie do projektu, którego granica
+          # nie obejmuje, nie jest zadziałaniem reguły — tam po prostu nie ma czego przechodzić. Bez tej
+          # asercji `PRZESZLO` z projektu wyprowadzonego z perimetru (albo skasowanego i odtworzonego poza nim)
+          # wyglądałoby identycznie jak dowód i po cichu zamieniło kontrolę pozytywną w tautologię.
+          #
+          # To jest też miejsce, w którym widać SKASOWANIE projektu sondującego (powiązanie z detekcją
+          # martwego członka): projekt, którego nie ma, wypada z `status.resources`, więc ten warunek
+          # zaczerwieni przelot GŁOŚNO, zamiast zostawić sondę bez kontroli pozytywnej po cichu.
+          if oczekiwanie == "blocked" and granica == "ISTNIEJE" and pinowana:
+              if przynaleznosc_poz == "NIE_WIADOMO":
+                  nierozstrzygniete.append(
+                      f"nie wiadomo, czy projekt kontroli pozytywnej `{projekt_pozytywny}` nalezy do perimetru "
+                      f"— brak jego numeru w `perimeter/projects.yaml`")
+              elif przynaleznosc_poz != "STATUS":
+                  bledy.append(
+                      f"PROJEKT KONTROLI POZYTYWNEJ `{projekt_pozytywny}` NIE JEST CZLONKIEM EGZEKWOWANYM "
+                      f"(`{przynaleznosc_poz}`) — jego `PRZESZLO` nie dowodzi, ze regula baseline WPUSZCZA, "
+                      f"bo tam nie ma granicy do przejscia")
+
           print(f"## boundary-probe — {os.environ['PROJEKT']}, oczekiwanie `{oczekiwanie}`\n")
           print(f"**Granica: {granica} · sondowany projekt: {przynaleznosc}**\n")
+          if pinowana:
+              print(f"**Kontrola pozytywna sonduje `{projekt_pozytywny}` (przynaleznosc: {przynaleznosc_poz}) "
+                    f"— nadanie PER-PROJEKT, bez uprawnienia org-wide.**\n")
+          else:
+              print("**Kontrola pozytywna NIEPINOWANA** — celuje w projekt z wejscia, wiec wymaga prawa odczytu "
+                    "logow w KAZDYM sondowanym projekcie (czyli w praktyce uprawnienia org-wide).\n")
           print("| sonda | rc | werdykt | po co |")
           print("|---|---|---|---|")
           for nazwa, (ma_przejsc_open, ma_przejsc_blocked, po_co) in PLAN.items():
@@ -412,6 +493,17 @@ jobs:
                     "regule. `PRZESZLO` + `ODMOWA VPC-SC` w jednym przelocie = zmierzona sciezka POZYTYWNA "
                     "i NEGATYWNA access levelu. Kontrola anty-tautologiczna: ten sam przelot z "
                     "`kanarek=rozbrojony` na konfiguracji bez uzbrojonego poziomu.")
+          if kanarek != "brak" and pinowana and os.environ["PROJEKT"] != projekt_pozytywny:
+              # Kanarek NIE jest pinowany razem z kontrolą pozytywną i to jest decyzja, nie przeoczenie:
+              # jego wartość bierze się z tego, że OBIE sondy pary dotykają TEGO SAMEGO projektu i różnią się
+              # wyłącznie access levelem. Rozdzielenie ich na dwa projekty zabiłoby całą konstrukcję.
+              # Cena: `kanarek-poziom-spelniony` to ścieżka POZYTYWNA, więc potrzebuje prawa IAM w projekcie
+              # z wejścia — a po zdjęciu roli org-wide jest ono tylko w projekcie sondującym. Stąd ta uwaga:
+              # przeloty z kanarkiem uruchamiaj z `project` = projekt sondujący.
+              print(f"> UWAGA: kanarek sonduje `{os.environ['PROJEKT']}`, a nadanie per-projekt jest na "
+                    f"`{projekt_pozytywny}`. Sonda `kanarek-poziom-spelniony` jest sciezka POZYTYWNA i bez "
+                    f"prawa odczytu w sondowanym projekcie da `BRAK ROLI`, nie `PRZESZLO`. Przeloty "
+                    f"z kanarkiem uruchamiaj z `project={projekt_pozytywny}`.")
           if kanarek == "rozbrojony":
               print("> KANAREK ROZBROJONY: obie sondy `kanarek-*` maja dostac ODMOWE. Ten przelot jest "
                     "KONTROLA ANTY-TAUTOLOGICZNA dla przelotu `uzbrojony` — bez niego „poziom wpuszcza\" "

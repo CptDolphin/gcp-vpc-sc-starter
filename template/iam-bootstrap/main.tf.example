@@ -464,6 +464,59 @@ resource "google_pubsub_topic_iam_member" "monitoring_publisher" {
   member = "serviceAccount:${google_project_service_identity.monitoring_notification[0].email}"
 }
 
+# --- 3f. kontrola pozytywna sondy granicy -----------------------------------------------------------
+# Sonda `boundary-probe.yml` ma jedną sondę, która przy `expect=blocked` MA PRZEJŚĆ na chronionej usłudze
+# (`chroniona-z-regula`). To jedyny dowód, że reguła `baseline_ingress` kogoś WPUSZCZA — bez niego przelot
+# mówi tylko „wszystko odmówione", co jest nieodróżnialne od zepsutego środowiska.
+#
+# ŻEBY PRZESZŁA, MUSZĄ ZAJŚĆ DWA WARUNKI NARAZ — i ta sekcja odpowiada za drugi:
+#   1. VPC-SC: reguła baseline przepuszcza `LoggingServiceV2.ListLogEntries` tej tożsamości;
+#   2. IAM: tożsamość ma w sondowanym projekcie prawo odczytu logów.
+#
+# DLACZEGO PER-PROJEKT, A NIE ORG-WIDE. Warunek 2 przy celowaniu w DOWOLNEGO członka da się spełnić tylko
+# rolą na organizacji — czyli prawem odczytu KAŻDEGO logu w orgu, dla konta CI płaszczyzny sterowania.
+# We wdrożeniu z setkami członków, przyrostem ~50/mc i onboardingiem prowadzonym przez obcy zespół nadanie
+# per-folder jest org-wide w przebraniu (członkowie leżą w różnych gałęziach drzewa), a nadanie per-członek
+# — listą, której nikt nie utrzyma. Kontrola pozytywna nie potrzebuje jednak dowolnego członka: wystarczy
+# JEDEN wyznaczony. Reguła baseline jest org-wide, więc jej zadziałanie tutaj jest dowodem jej zadziałania
+# w ogóle, a liczba nadań przestaje rosnąć z liczbą członków.
+#
+# DLACZEGO ROLA WŁASNA, A NIE `roles/logging.viewer` NA PROJEKCIE. Predefiniowana niesie 28 uprawnień,
+# w tym odczyt konfiguracji logowania (sinki, kubełki, widoki, wykluczenia) — czyli mapę tego, dokąd płyną
+# logi tego projektu. Sondzie potrzebne są DWA odczyty i ani jeden zapis. Ta sama zasada, co przy
+# `vpcScPerimeterWriter` i `vpcScMonitoringWriter`.
+#
+# TEST ANTY-TAUTOLOGICZNY (warunek, żeby ta kontrola cokolwiek znaczyła): po odebraniu tego nadania sonda
+# `chroniona-z-regula` MUSI paść — i paść jako `BRAK ROLI`, nie `ODMOWA VPC-SC`. Oba stany to `403` i oba
+# wyglądają tak samo w kodzie błędu, więc rozstrzyga TREŚĆ odpowiedzi. Zmierzone: VPC-SC jest ewaluowane
+# PRZED IAM, więc gdy reguła przepuszcza, na wierzch wychodzi błąd IAM — i te dwa stany są rozróżnialne.
+resource "google_project_iam_custom_role" "positive_control_reader" {
+  count = var.positive_control_project_id == "" ? 0 : 1
+
+  project     = var.positive_control_project_id
+  role_id     = "vpcScPositiveControlReader"
+  title       = "VPC-SC boundary probe positive control (CI)"
+  description = "Odczyt wpisów logu w JEDNYM projekcie sondującym — kontrola pozytywna sondy granicy. Bez konfiguracji logowania, bez zapisu."
+  stage       = "GA"
+
+  permissions = [
+    # `gcloud logging read` — sonda `chroniona-z-regula`, czyli sama kontrola pozytywna.
+    "logging.logEntries.list",
+    # `gcloud logging metrics list` — sonda `kanarek-poziom-spelniony`, POZYTYWNA połowa pary kanarka
+    # (`canary-level-match`). Bez niej para kanarka mierzy access level wyłącznie w projekcie, w którym
+    # tożsamość i tak ma prawa z innego tytułu — czyli po zdjęciu roli org-wide przestałaby działać.
+    "logging.logMetrics.list",
+  ]
+}
+
+resource "google_project_iam_member" "plan_positive_control" {
+  count = var.positive_control_project_id == "" ? 0 : 1
+
+  project = var.positive_control_project_id
+  role    = google_project_iam_custom_role.positive_control_reader[0].id
+  member  = "serviceAccount:${google_service_account.plan.email}"
+}
+
 # --- 4. Workload Identity Federation ---------------------------------------------------------------
 # WIF to BRAMA, nie tożsamość: sam z siebie nie nadaje żadnych uprawnień. Decyduje, KTO może impersonować
 # konta serwisowe powyżej — a to one mają role.

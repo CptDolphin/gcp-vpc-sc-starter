@@ -11,6 +11,12 @@ state_bucket        = "bkt-tf-state-vpcsc"  # versioning + soft-delete, BEZ rete
 # KAŻDEJ zmianie, także niezwiązanej z monitoringiem.
 # monitoring_project_id = "prj-cloud-monitoring"
 
+# Projekt sondujący KONTROLI POZYTYWNEJ sondy granicy. MUSI BYĆ CZŁONKIEM perimetru — inaczej sonda mierzy
+# brak granicy zamiast reguły (`boundary-probe.yml` to asertuje i czerwieni przelot). Ta sama wartość idzie
+# do zmiennej repo `POSITIVE_CONTROL_PROJECT`. Puste = kontrola pozytywna celuje w projekt z wejścia
+# i wymaga prawa odczytu logów w KAŻDYM członku, czyli w praktyce roli org-wide.
+# positive_control_project_id = "prj-example-member"
+
 # Domyślne — zmieniaj tylko świadomie:
 # apply_environment    = "perimeter-apply"  # musi zgadzać się z environment w .github/workflows/apply.yml
 # state_prefix         = "vpc-sc/perimeter" # musi zgadzać się z prefix w terraform/versions.tf repo perimetru
