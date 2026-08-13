@@ -222,7 +222,15 @@ i alert są odtwarzalne z kodu jednym apply, a część zmian `metric_descriptor
 replace; perimetru pipeline nie odtworzy, bo `servicePerimeters.create` świadomie nie należy do żadnej
 roli tego pipeline'u i od DEC-37 jest dodatkowo zabronione w warstwie Deny — odtworzenie ma krok człowieka
 opisany w `3-runbook-promocja-i-break-glass.md`, część D.
-| (opcjonalnie) `roles/logging.viewer` | organizacja | raport naruszeń dry-run czyta audit-logi (`protoPayload.metadata.dryRun=true`) | nie da się udowodnić, że okno obserwacji było czyste — a bez tego promocja do enforced jest zgadywaniem. Można też nadać osobnej tożsamości raportującej |
+| custom `vpcScSinkReader` (`logging.sinks.get`) | organizacja | guard raportu naruszeń: czy sink ISTNIEJE, ma `includeChildren` i ten sam filtr co odczyt | sink, który nie dostarcza, jest nieodróżnialny od czystego okna — zielony przebieg, zero naruszeń, przepuszczona promocja |
+| `roles/logging.viewAccessor` | **widok** kubełka sinka | raport naruszeń czyta jeden widok, nie logi członków | brak dowodu z okna dry-run, promocja opiera się na deklaracji |
+| custom `vpcScPositiveControlReader` (`logging.logEntries.list`, `logging.logMetrics.list`) | **jeden projekt sondujący** | kontrola pozytywna sondy granicy — dowód, że reguła baseline kogoś WPUSZCZA | sonda dowodzi tylko odmowy; „granica zablokowała" staje się nieodróżnialne od „środowisko zepsute" |
+
+> **Świadomie BEZ org-wide `roles/logging.viewer`.** Ta rola niesie `logging.logEntries.list`, czyli odczyt
+> treści KAŻDEGO logu w organizacji — dla konta CI płaszczyzny sterowania. Trzy powyższe pozycje pokrywają
+> wszystkich jej konsumentów: konfigurację sinka (org, 1 uprawnienie), treść naruszeń (jeden widok)
+> i kontrolę pozytywną (jeden projekt). Nadanie per-folder nie jest obejściem: przy setkach członków
+> rozsianych po drzewie organizacji jest org-wide w przebraniu albo listą nie do utrzymania.
 
 ### 3.3 IAM Deny — pas bezpieczeństwa ponad rolą
 
@@ -465,7 +473,12 @@ Prosimy o (środowisko: <org GCP>, repozytorium: ORG/gcp-vpc-sc):
                                                                      (tylko te dwa typy; BEZ sinków i kubełków logów.
                                                                       apply odświeża stan, więc bez tego pada na 403
                                                                       przy każdej zmianie, także niedotyczącej monitoringu)
-   - (opcjonalnie) roles/logging.viewer             [ORGANIZACJA]  — raport naruszeń dry-run
+   - CUSTOM ROLA organizations/<ORG_ID>/roles/vpcScSinkReader        [ORGANIZACJA]
+       logging.sinks.get   (guard raportu: czy sink naruszeń istnieje i ma ten sam filtr co odczyt)
+   - roles/logging.viewAccessor                     [WIDOK kubełka sinka naruszeń]
+   - CUSTOM ROLA projects/<PROJEKT_SONDUJACY>/roles/vpcScPositiveControlReader   [JEDEN PROJEKT]
+       logging.logEntries.list, logging.logMetrics.list   (kontrola pozytywna sondy granicy)
+     ŚWIADOMIE BEZ org-wide roles/logging.viewer — konto CI nie czyta treści logów organizacji
 
 3. IAM Deny [ORGANIZACJA] dla obu SA:
    accesscontextmanager.servicePerimeters.delete, accesscontextmanager.policies.delete
