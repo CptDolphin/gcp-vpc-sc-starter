@@ -5196,6 +5196,30 @@ def test_bramka_preflightu() -> None:
 
 
 # --------------------------------------------------------------------- workflows
+def test_terraform_bez_wrappera() -> None:
+    """Wrapper `setup-terraform` maskuje kody wyjscia, na ktorych stoja wszystkie bramki Terraforma.
+
+    Zmierzone (#2058, przebieg `31699704955`): plik z bledem skladni HCL dal krok `fmt` = SUCCESS,
+    a dopiero `init` = failure. `terraform fmt -check` zwraca wtedy **2**, wrapper zamienia to na **0**
+    (kod 3, „pliki niesformatowane", propaguje poprawnie). Bramka formatowania przepuszczala wiec plik,
+    ktorego terraform nie potrafi sparsowac.
+
+    Ten sam wniosek stal juz w `selftest.yml` SAMEGO startera i nie zostal zastosowany do materialu,
+    ktory starter wysyla — repozytorium chronilo siebie, a nie wdrozenie. Ta asercja pilnuje, zeby nowy
+    workflow nie odtworzyl tego przez pominiecie jednej linii.
+    """
+    print("\n== terraform bez wrappera (kody wyjscia) ==")
+    bez = []
+    for plik in sorted((ROOT / ".github/workflows").glob("*.yml")):
+        tekst = plik.read_text()
+        if "setup-terraform" not in tekst:
+            continue
+        if "terraform_wrapper: false" not in tekst:
+            bez.append(plik.name)
+    check("kazdy workflow z setup-terraform wylacza wrapper (kody wyjscia propaguja)",
+          not bez, f"bez `terraform_wrapper: false`: {bez}")
+
+
 def test_workflows() -> None:
     print("\n== workflows ==")
     wf = sorted((ROOT / ".github/workflows").glob("*.yml"))
@@ -7256,6 +7280,7 @@ def main() -> int:
     test_preflight()
     test_bramka_preflightu()
     test_eksperyment_wyscigu()
+    test_terraform_bez_wrappera()
     test_workflows()
     test_workflowy_wykonywalne()
     test_bramki_na_sciezce_apply()

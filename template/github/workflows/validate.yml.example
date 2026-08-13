@@ -90,6 +90,20 @@ jobs:
       - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
         with:
           terraform_version: "1.15.5"
+          # WRAPPER WYLACZONY, BO MASKUJE KODY WYJSCIA — a na nich stoja wszystkie bramki nizej.
+          # Zmierzone (#2058, przebieg `31699704955`): plik `violations-sink/main.tf` z bledem skladni HCL
+          # (polski cudzyslow zamykajacy zapisany jako ASCII) dal krok `fmt` = **success**, a dopiero
+          # `init` = failure. `terraform fmt -check` zwraca w takiej sytuacji **2**, wrapper zamienia to
+          # na **0** (kod 3, czyli „pliki niesformatowane", propaguje poprawnie). Bramka formatowania
+          # przepuszczala wiec plik, ktorego terraform nie potrafi sparsowac.
+          #
+          # Ten sam wniosek stal juz w `selftest.yml` SAMEGO startera („wrapper psuje kody wyjscia, na
+          # ktorych stoi selftest") — i nie zostal zastosowany do materialu, ktory starter WYSYLA.
+          # Repozytorium chronilo siebie, a nie wdrozenie.
+          #
+          # Nic nie czyta `steps.<id>.outputs.stdout/exitcode`, wiec wylaczenie wrappera niczego nie psuje
+          # (sprawdzone grepem w obu repozytoriach).
+          terraform_wrapper: false
       - run: terraform -chdir=terraform fmt -check -recursive
       # -backend=false on purpose: this job has no cloud credentials and must not need any.
       - run: terraform -chdir=terraform init -backend=false
