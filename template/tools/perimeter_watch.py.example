@@ -18,6 +18,9 @@ CO MIERZY (kazda liczba = jeden objaw z `docs/7-alerty.md`):
   config_changed_outside_pipeline  ile zmian ACM tozsamoscia INNA niz konto apply.
   network_inserts_enforced  ile sieci VPC powstalo w czlonkach EGZEKWOWANYCH — kontekst, BEZ alertu.
   network_window_workload   do ilu z nich wstawiono maszyne, ZANIM siec zdazyla dojrzec (DEC-32).
+  members_not_active      ilu czlonkow granicy NIE MA potwierdzonego stanu ACTIVE (DEC-42). Etykieta
+                          `state` rozdziela `not_active` (odczytany stan inny niz ACTIVE) od `unreadable`
+                          (stanu NIE ODCZYTANO) — druga wartosc NIGDY nie chowa sie pod „ACTIVE".
 
 LICZBY OPISUJACE GRANICE (naruszenia, zmiany ACM, okno swiezej sieci) JADA WIDOKIEM SINKA, NIE METRYKA
 LOG-BASED, I NIE JEST TO ROZSZERZENIE ZAKRESU, TYLKO NAPRAWA (#2000). Stały wczesniej na
@@ -65,7 +68,19 @@ METRYKI = {
     # Alert stoi na `sieci_z_obciazeniem`: sieci, do ktorej wstawiono maszyne, ZANIM zdazyla dojrzec.
     "sieci_egzekwowane": "custom.googleapis.com/vpcsc/network_inserts_enforced",
     "sieci_z_obciazeniem": "custom.googleapis.com/vpcsc/network_window_workload",
+    # CZLONEK, KTOREGO PROJEKT PRZESTAL ISTNIEC (DEC-42). Jedna metryka, DWIE serie po etykiecie `state`,
+    # bo „stanu nie odczytano" jest osobnym zdaniem o swiecie niz „stan jest inny niz ACTIVE" — i tylko
+    # drugie jest werdyktem. Zlanie ich w jedna liczbe zamienialoby slepote w rozpoznanie.
+    "czlonkowie_nieaktywni": "custom.googleapis.com/vpcsc/members_not_active",
 }
+
+# Typ zasobu Asset Inventory, ktory niesie stan cyklu zycia projektu. JEDNO wywolanie na cala organizacje.
+ASSET_TYP_PROJEKT = "cloudresourcemanager.googleapis.com/Project"
+
+# Jedyny stan, ktory znaczy „ten czlonek zyje". Werdykt budujemy na TRESCI pola `state`, nie na kodzie
+# bledu — `projects describe` odpowiada tym samym komunikatem na „nie ma projektu" i „brak dostepu",
+# wiec licznik oparty na kodzie wyjscia myli slepote z rozpoznaniem.
+STAN_ZYWY = "ACTIVE"
 
 # Zdarzenia sterujace Compute, z ktorych sklada sie okno. Oba sa Admin Activity — zawsze wlaczone
 # i niekonfigurowalne, wiec nie da sie ich wylaczyc po stronie projektu czlonkowskiego.
@@ -299,6 +314,80 @@ def wygasli_czlonkowie(projects_doc: dict, dzis: datetime.date) -> int:
         if datetime.date.fromisoformat(str(m["review_by"])) < dzis:
             ile += 1
     return ile
+
+
+def stany_projektow(wyniki: list[dict]) -> dict[str, str]:
+    """{numer projektu -> stan cyklu zycia} z odpowiedzi `searchAllResources`.
+
+    Kluczem jest NUMER, bo numerem operuje granica (`spec.resources` / `status.resources`). Asset
+    Inventory podaje go w polu `project` (`projects/<numer>`), a ID w `additionalAttributes.projectId` —
+    indeksujemy po obu, zeby ta sama mapa obslugiwala odczyt z deklaracji, gdzie wystepuja oba.
+
+    Wpis BEZ pola `state` jest pomijany, a nie liczony jako zywy: brak pola znaczy „nie wiem", a
+    `czlonkowie_bez_potwierdzenia` zamieni ten brak na `unreadable`. To jest ta sama zasada, ktora
+    w tym pliku dotyczy kazdej metryki — zero publikujemy tylko wtedy, gdy JEST czym.
+    """
+    mapa: dict[str, str] = {}
+    for w in wyniki or []:
+        stan = str(w.get("state") or "")
+        if not stan:
+            continue
+        numer = str(w.get("project") or "").rsplit("/", 1)[-1]
+        if numer:
+            mapa[numer] = stan
+        pid = str((w.get("additionalAttributes") or {}).get("projectId") or "")
+        if pid:
+            mapa[pid] = stan
+    return mapa
+
+
+def czlonkowie_bez_potwierdzenia(perimetr: dict, stany: dict[str, str]) -> dict:
+    """Czlonkowie granicy, o ktorych NIE POTWIERDZONO, ze ich projekt jest ACTIVE (DEC-42).
+
+    ZRODLEM JEST ZYWA GRANICA, NIE DEKLARACJA — `spec.resources` + `status.resources`. Powod jest ten sam,
+    dla ktorego `projekty_egzekwowane` czyta `status`: falszywy dowod „czystego okna" produkuje to, co
+    REALNIE stoi w granicy, a nie to, co ktos zadeklarowal. Numer dopisany do granicy z reki tez ma
+    projekt, ktory moze zniknac, a wpis w Gicie bez apply nie jest jeszcze niczyim czlonkostwem.
+
+    TRZY WORKI, BO SA TRZY ROZNE ZDANIA:
+      * `nieaktywni`  — stan ODCZYTANY i inny niz ACTIVE (`DELETE_REQUESTED`, `DELETE_IN_PROGRESS`).
+        To jest werdykt: ktos kasuje projekt, ktory nadal jest w granicy;
+      * `nieodczytani` — stanu NIE MA w odpowiedzi. Projekt skasowany twardo (po 30 dniach ID znika
+        z indeksu), opoznienie indeksowania, zawezony zakres, odebrane uprawnienie — nie rozrozniamy
+        tych przyczyn i NIE UDAJEMY, ze rozrozniamy. Jedno jest pewne: to NIE JEST potwierdzenie, ze
+        czlonek zyje, wiec nie wolno tego policzyc jako OK;
+      * `pominiete`   — zasoby, ktore nie sa projektem (siec VPC: `//compute…/networks/<nazwa>`). Maja
+        wlasny cykl zycia i nie ma ich w tym indeksie; raportujemy je, zamiast po cichu zmniejszac
+        mianownik.
+
+    RAPORT CZESCIOWY > BRAK RAPORTU: jeden czlonek bez stanu nie wywraca calego przelotu — laduje
+    w `nieodczytani`, reszta jest policzona. Ale nie ma sciezki, ktora zamiata go pod „ACTIVE".
+    """
+    numery: list[str] = []
+    pominiete: list[str] = []
+    for konfiguracja in ("spec", "status"):
+        for zasob in ((perimetr.get(konfiguracja) or {}).get("resources") or []):
+            ref = str(zasob)
+            ogon = ref.rsplit("/", 1)[-1]
+            if ref.startswith("projects/") and ogon.isdigit():
+                if ogon not in numery:
+                    numery.append(ogon)
+            elif ref not in pominiete:
+                pominiete.append(ref)
+
+    nieaktywni, nieodczytani = [], []
+    for numer in numery:
+        stan = stany.get(numer)
+        if stan is None:
+            nieodczytani.append(numer)
+        elif stan != STAN_ZYWY:
+            nieaktywni.append({"numer": numer, "stan": stan})
+    return {
+        "czlonkowie": numery,
+        "nieaktywni": nieaktywni,
+        "nieodczytani": nieodczytani,
+        "pominiete": sorted(pominiete),
+    }
 
 
 def policz_naruszenia(wpisy: list[dict]) -> dict:
@@ -662,6 +751,46 @@ def pobierz_perimetr(policy_id: str, nazwa: str, token: str) -> dict:
                  f"/servicePerimeters/{nazwa}", token)
 
 
+def szukaj_projektow(org_id: str, token: str, limit_stron: int = 20) -> list[dict]:
+    """Stan cyklu zycia WSZYSTKICH projektow organizacji — JEDNO wywolanie Asset Inventory na strone.
+
+    DLACZEGO ASSET INVENTORY, A NIE `resourcemanager.projects.get` PO KAZDYM CZLONKU (DEC-42):
+      * UPRAWNIENIE, KTORE JUZ MAMY. Konto planu ma `roles/cloudasset.viewer` na organizacji (zawiera
+        `cloudasset.assets.searchAllResources`); `resourcemanager.projects.get` nie ma ZADNE z kont
+        pipeline'u. Wariant per czlonek zaczynalby sie wiec od nowego nadania na organizacji;
+      * KOSZT NIE ROSNIE Z LICZBA CZLONKOW. Kilkuset czlonkow to nadal jedno wywolanie na strone
+        (`pageSize=500`), a nie kilkaset wywolan przy kazdym przelocie;
+      * WIDZI PROJEKTY SKASOWANE. `projects list` domyslnie oddaje wylacznie `ACTIVE`, wiec martwy czlonek
+        jest tam NIEWIDOCZNY — „nie ma go na liscie" wyglada identycznie jak „nigdy go nie bylo".
+
+    BEZ NAGLOWKA `X-Goog-User-Project` — I TO JEST DECYZJA, NIE PRZEOCZENIE. Ustawienie projektu
+    rozliczeniowego wymaga `serviceusage.services.use` na tym projekcie; konto planu go NIE MA, wiec
+    naglowek zamienilby dzialajace wywolanie w `403`. Kwota konta serwisowego idzie domyslnie na projekt,
+    ktory je posiada — a tam `cloudasset.googleapis.com` musi byc wlaczone (`docs/2-uprawnienia-i-wif.md`).
+    Z poswiadczen UZYTKOWNIKA (odczyt z reki) jest odwrotnie: tam naglowek albo `--billing-project` JEST
+    wymagany, i dlatego komenda w runbooku wyglada inaczej niz ten kod.
+
+    OPOZNIENIE INDEKSU JEST REALNE I NAZWANE: Asset Inventory nie jest odczytem z Resource Managera,
+    tylko z indeksu, ktory za nim nadaza. Zmierzone na tej organizacji — patrz `docs/7-alerty.md`
+    (sekcja o martwym czlonku). Dla przelotu godzinnego jest to nieistotne; dla bramki na pull requescie
+    byloby to zrodlo falszywych werdyktow — i to jeden z powodow, dla ktorych bramki tam nie ma.
+    """
+    wyniki: list[dict] = []
+    strona = None
+    for _ in range(limit_stron):
+        zapytanie = {"assetTypes": ASSET_TYP_PROJEKT, "pageSize": "500"}
+        if strona:
+            zapytanie["pageToken"] = strona
+        url = (f"https://cloudasset.googleapis.com/v1/organizations/{org_id}:searchAllResources"
+               f"?{urllib.parse.urlencode(zapytanie)}")
+        odp = _http(url, token)
+        wyniki.extend(odp.get("results") or [])
+        strona = odp.get("nextPageToken")
+        if not strona:
+            break
+    return wyniki
+
+
 def historia_procentow(projekt: str, token: str, dni: int, teraz: int) -> dict:
     """Historia `attribute_budget_percent` z Cloud Monitoring, per etykieta `config`.
 
@@ -764,6 +893,48 @@ def zmierz(args) -> int:
             komunikat = komunikat_rozjazdu(n, zywe[n], zadeklarowane[n], zaleganie > 0, powod)
             if komunikat:
                 print(f"::warning::{komunikat}", file=sys.stderr)
+
+    # --- CZY PROJEKTY CZLONKOW NADAL ISTNIEJA (DEC-42) -------------------------------------------
+    #
+    # JEDYNA WARSTWA, KTORA W OGOLE WIDZI SKASOWANY PROJEKT CZLONKA. Zmierzone: `plan` -> `No changes`,
+    # `apply` -> `0 added, 0 changed, 0 destroyed`, dryf -> 0, `expiry-sweep` -> pomija, pre-flight ->
+    # „projekt istnieje". Wszystkie te odpowiedzi sa PRAWDZIWE — Git i granica zgadzaja sie co do numeru,
+    # ktorego nie ma. Milczy przy tym rzecz grozniejsza od martwego wpisu: naruszenia takiego czlonka
+    # spadaja do zera, a zero jest dowodem „czystego okna" dla bramki promocji.
+    #
+    # FAIL-CLOSED W DWOCH MIEJSCACH, oba z tego samego powodu co reszta tego pliku. Bez ZYWEJ granicy nie
+    # wiadomo, kto jest czlonkiem — liczenie z deklaracji daloby liczbe wygladajaca poprawnie i opisujaca
+    # co innego. Bez odpowiedzi Asset Inventory nie wiadomo NIC o stanach. W obu przypadkach NIE
+    # publikujemy zera: zero znaczyloby „wszyscy czlonkowie zyja", czyli zamienialoby slepote w spokoj.
+    # Brak punktu zapala `condition_absent` polityki, czyli awarie widac JAKO awarie.
+    czlonkowie_stan = None
+    org_id = str((polityka.get("organization") or {}).get("org_id") or "")
+    if blad_odczytu:
+        print("::warning::bez odczytu zywej granicy nie wiadomo, kto jest jej czlonkiem — zywotnosc "
+              "projektow czlonkowskich NIE jest liczona w tym przebiegu", file=sys.stderr)
+    elif not org_id:
+        print("::warning::brak `organization.org_id` w policy.yaml — nie ma zakresu dla Asset Inventory, "
+              "metryka members_not_active NIE powstanie", file=sys.stderr)
+    else:
+        try:
+            czlonkowie_stan = czlonkowie_bez_potwierdzenia(
+                perimetr, stany_projektow(szukaj_projektow(org_id, g_token)))
+        except (urllib.error.HTTPError, urllib.error.URLError, KeyError) as e:
+            print(f"::warning::nie udalo sie odczytac stanu projektow z Asset Inventory ({e}) — metryka "
+                  f"members_not_active NIE zostanie opublikowana, martwy-czlowiek alertu ja przejmie",
+                  file=sys.stderr)
+    if czlonkowie_stan:
+        for wpis in czlonkowie_stan["nieaktywni"]:
+            print(f"::warning::MARTWY CZLONEK GRANICY: `projects/{wpis['numer']}` ma stan "
+                  f"`{wpis['stan']}`, a nadal jest w konfiguracji perimetru. Jego naruszenia spadna do "
+                  f"zera i beda wygladac jak czyste okno: docs/7-alerty.md#martwy-czlonek", file=sys.stderr)
+        if czlonkowie_stan["nieodczytani"]:
+            print(f"::warning::STANU NIE ODCZYTANO dla czlonkow: "
+                  f"{', '.join(czlonkowie_stan['nieodczytani'])} — to NIE jest potwierdzenie, ze zyja: "
+                  f"docs/7-alerty.md#martwy-czlonek", file=sys.stderr)
+        if czlonkowie_stan["pominiete"]:
+            print(f"::warning::czlonkowie spoza indeksu projektow (wlasny cykl zycia, NIE liczeni): "
+                  f"{', '.join(czlonkowie_stan['pominiete'])}", file=sys.stderr)
 
     plan = json.load(open(args.plan_json)) if os.path.exists(args.plan_json) else {}
     dryf = dryf_z_planu(plan, zaleganie > 0)
@@ -908,7 +1079,17 @@ def zmierz(args) -> int:
         ] + [
             punkt(METRYKI["budzet_dni"], prognoza[c], {"config": c}, args.project, teraz, False)
             for c in sorted(prognoza)
-        ] + punkty_granicy,
+        ] + ([
+            # OBIE SERIE PUBLIKUJA SIE ZAWSZE, TAKZE Z ZEREM — i to jest warunek poprawnosci, nie
+            # symetria dla ozdoby. Zbior wartosci etykiety jest ZAMKNIETY (dwie), wiec seria nie
+            # powstaje i nie znika razem ze zdarzeniem; gdyby publikowal sie tylko niezerowy worek,
+            # zdrowa cisza bylaby nieodrozninalna od awarii producenta i martwy-czlowiek polityki
+            # chodzilby bez przerwy. To ta sama lekcja, co przy metryce odmow.
+            punkt(METRYKI["czlonkowie_nieaktywni"], len(czlonkowie_stan["nieaktywni"]),
+                  {"state": "not_active"}, args.project, teraz, True),
+            punkt(METRYKI["czlonkowie_nieaktywni"], len(czlonkowie_stan["nieodczytani"]),
+                  {"state": "unreadable"}, args.project, teraz, True),
+        ] if czlonkowie_stan else []) + punkty_granicy,
         # Czytelne podsumowanie dla `$GITHUB_STEP_SUMMARY` — to jest DOWOD, ze producent liczy realne
         # wartosci, niezalezny od tego, czy alert akurat odpalil. `zadeklarowane` stoi obok `zywe`
         # celowo: te dwie liczby maja byc rowne, a ich rozjazd jest sam w sobie informacja.
@@ -931,7 +1112,15 @@ def zmierz(args) -> int:
             # brak zywej granicy, blad odczytu), `0` = policzyl i nie bylo czego zglosic.
             "network_inserts_enforced": (okna_sieci or {}).get("sieci") if okna_sieci else None,
             "network_window_workload": (okna_sieci or {}).get("z_obciazeniem") if okna_sieci else None,
+            # To samo rozroznienie `null` vs `0`, a tutaj jest ono NAJWAZNIEJSZE w calym podsumowaniu:
+            # `null` znaczy „nie sprawdzilem, czy czlonkowie zyja", a `0` — „sprawdzilem i zyja". Zlanie
+            # tych dwoch daloby raport, ktory po awarii odczytu meldowalby zdrowie.
+            "members_not_active": len(czlonkowie_stan["nieaktywni"]) if czlonkowie_stan else None,
+            "members_unreadable": len(czlonkowie_stan["nieodczytani"]) if czlonkowie_stan else None,
         },
+        # KTORY czlonek i z jakim stanem — do artefaktu przebiegu i do runbooka, nie do etykiety metryki
+        # (etykieta z numerem projektu tworzylaby i kasowala serie razem ze zdarzeniem).
+        "czlonkowie_bez_potwierdzenia": czlonkowie_stan,
         # Szczegoly okna zostaja w artefakcie przebiegu — alert niesie LICZBE, a „ktora siec" odzyskuje
         # sie stad albo odczytem z widoku (komenda w docs/7-alerty.md).
         "okna_sieci": (okna_sieci or {}).get("szczegoly") if okna_sieci else None,
