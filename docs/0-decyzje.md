@@ -2829,7 +2829,7 @@ a raport podaje ich liczbę wprost. Fałszywe okno powstaje **wyłącznie** w ko
 | zostawić krok i dopisać przypis „u kogoś innego robi to inny zespół" | przypis nie zmienia tego, że krok stoi w numerowanej ścieżce i wykonujący do niego dojdzie. Procedura, która w połowie oddaje sterowanie, nie nazywając przekazania, jest gorsza od procedury, która się kończy |
 | wyciąć z materiału warianty tworzące i kasujące projekty | to one dają reprodukowalność „od zera" i możliwość ćwiczenia odtworzenia. Problemem jest brak etykiety, nie obecność wariantu — koszt adnotacji bliski zeru, koszt utraty ćwiczenia wysoki |
 | czekać z przepisaniem procedury na automat wykrywający martwego członka | odwrotna kolejność. Uzgodnienie i rekoncyliacja są tańsze, działają bez kodu i dopiero one mówią automatowi, **jakiego czasu detekcji** ma pilnować |
-## DEC-39 — Nazwa sieci w alercie okna jest HIPOTEZĄ, bo wpis audytowy maszyny jej nie niesie
+## DEC-40 — Nazwa sieci w alercie okna jest HIPOTEZĄ, bo wpis audytowy maszyny jej nie niesie
 
 **Decyzja.** Detektor okna świeżej sieci (DEC-32) **zostaje fail-closed**, ale przestaje przedstawiać wynik
 dopasowania jako odczyt. Szczegół trafienia niesie `siec_odczytana` **oraz `podsiec`**, adnotacja przebiegu

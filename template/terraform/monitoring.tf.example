@@ -426,7 +426,7 @@ resource "google_monitoring_alert_policy" "vpcsc_network_window_workload" {
       Uwaga na dwa wpisy o tej samej `resourceName` (`operation.first` i `operation.last`) — to jedna
       operacja. Zero czasu okna to wpis WCZEŚNIEJSZY.
 
-      **Jeśli w adnotacji stoi `[HIPOTEZA]`, nazwa sieci powyżej NIE jest odczytem (DEC-39).** Wpis
+      **Jeśli w adnotacji stoi `[HIPOTEZA]`, nazwa sieci powyżej NIE jest odczytem (DEC-40).** Wpis
       audytowy maszyny dla sieci custom-mode nie niesie pola `network` — tylko `subnetwork` — więc
       maszyna została dopasowana fail-closed do każdej świeżej sieci w tym projekcie. Rozstrzygnij
       podsiecią z adnotacji, ZANIM zacytujesz nazwę sieci w zgłoszeniu:

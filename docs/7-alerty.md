@@ -434,7 +434,7 @@ Pułapka: jedna operacja Compute zostawia **dwa** wpisy o tej samej `resourceNam
 i `operation.last`). Zero czasu okna to wpis **wcześniejszy** — licznik scala je sam, ale czytając ręcznie
 łatwo policzyć dwie sieci tam, gdzie powstała jedna.
 
-**NAZWA SIECI W ALERCIE BYWA HIPOTEZĄ — sprawdź to, ZANIM ją zacytujesz (DEC-39).** Wpis
+**NAZWA SIECI W ALERCIE BYWA HIPOTEZĄ — sprawdź to, ZANIM ją zacytujesz (DEC-40).** Wpis
 `v1.compute.instances.insert` dla sieci **custom-mode nie niesie pola `networkInterfaces[].network`
 w ogóle** (zmierzone na żywym wpisie 2026-08-13); niesie wyłącznie `subnetwork`. Dopasowanie maszyny do
 sieci idzie wtedy ścieżką **fail-closed**: maszyna liczy się do okna każdej świeżej sieci w tym samym
