@@ -15,13 +15,13 @@ dokument, nie Terraform.
 | # | Katalog | Co stawia | **KTO wykonuje `apply`** | Tożsamość / uprawnienie | Co się stanie, gdy pominiesz |
 |---|---|---|---|---|---|
 | 1 | `iam-bootstrap/` | konta `plan`/`apply`/`watch`, rola własna perimetru i monitoringu, pula WIF, IAM Deny, temat Pub/Sub kanału maszynowego | **CZŁOWIEK** | org-admin (ADC), nadaje uprawnienia — więc nie może ich sobie nadać sam | nie ma czym uruchomić kroków 2 i 3; `plan` w CI pada na uwierzytelnieniu |
-| 2 | `violations-sink/` | kubełki logów, sinki **org-level** (`include_children`), widoki + granty `logging.viewAccessor` | **CZŁOWIEK** | org-level `roles/logging.configWriter` | granica **stoi i działa**, ale obserwator nie ma czego czytać: raport naruszeń i detektor okna świeżej sieci milczą. Alerty są uzbrojone i po `watchdog_absent_seconds` zgłaszają to **martwym-człowiekiem** (DEC-34) — nie zgłosi tego nic wcześniej |
+| 2 | `violations-sink/` | kubełki logów, sinki **org-level** (`include_children`), widoki + granty `logging.viewAccessor` | **CZŁOWIEK** | org-level `roles/logging.configWriter` | granica **stoi i działa**, ale obserwator nie ma czego czytać: raport naruszeń i detektor okna świeżej sieci milczą. Alerty są uzbrojone i po `watchdog_absent_seconds` zgłaszają to **martwym-człowiekiem** (DEC-35) — nie zgłosi tego nic wcześniej |
 | 3 | `terraform/` | sam perimetr, access levele, reguły, kontrakt, **deskryptory metryk i polityki alertów** | **PIPELINE** (`apply.yml`) | `sa-vpcsc-apply` przez WIF; **bez** `logging.configWriter` i bez dostępu do kubełków | nie ma granicy |
 
 **Dlaczego 2 jest przed 3, skoro 3 już od niego nie zależy.** Do 2026-08-13 zależał **twardo**: polityka
 alertu okna świeżej sieci stała na metryce, której deskryptor nie powstawał w żadnym stacku, więc apply
 kroku 3 padał błędem `404 Cannot find metric(s)` dopóty, dopóki krok 2 nie ruszył producenta. Poprawka
-(DEC-34) przeniosła deskryptory tam, gdzie stoją polityki, więc **krok 3 przechodzi dziś na czystym stanie
+(DEC-35) przeniosła deskryptory tam, gdzie stoją polityki, więc **krok 3 przechodzi dziś na czystym stanie
 bez kroku 2**. Kolejność zostaje jako zalecana, bo bez niej pierwsze godziny po odtworzeniu są ślepe —
 ale jej złamanie nie jest już awarią apply, tylko **widocznym brakiem**.
 

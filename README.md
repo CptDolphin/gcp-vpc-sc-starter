@@ -107,7 +107,7 @@ sprzątanie. Uruchom, zanim ktoś podejmie decyzję na podstawie opinii — kosz
 
 `python3 selftest/selftest.py` rozpakowuje starter do katalogu tymczasowego i uruchamia na nim realne bramki —
 **270/270** przy ostatnim przebiegu: `terraform fmt`/`validate`/**`test`** (14 przypadków renderera),
-`conftest verify` (47 testów reguł), **`tflint`** na obu stackach, narzędzia na realnych deklaracjach
+`conftest verify` (47 testów reguł), **`tflint`** na każdym stacku Terraforma, narzędzia na realnych deklaracjach
 (w tym cztery fixture'y kanału ticketowego), `actionlint` na dwunastu workflow **i na workflow przykładu
 dywizji**, realny `validate-local.sh` uruchomiony na `examples/division-repo/vpc-sc/request.yaml`, guardy
 na treść stacku IAM, kontraktu, nazwy obiektów ACM i pinowanie akcji.

@@ -470,7 +470,7 @@ Kolejność stacków przy odtworzeniu i to, co się dzieje, gdy któryś pominie
 > Metryka, do której nigdy nic nie napisano, nie jest „nieobecna" — jest **nieznana**, a warunek na
 > nieobecność jej nie widzi. Przez ten czas martwy-człowiek nie mógł odpalić **ani razu**, a dokładnie ten
 > przypadek (detektor bez źródła) miał być jego powodem istnienia. Deskryptor jest dziś tworzony przy
-> `apply` i uzbraja go od chwili wdrożenia (DEC-34) — jeśli kiedyś zobaczysz ten warunek jako „nigdy nie
+> `apply` i uzbraja go od chwili wdrożenia (DEC-35) — jeśli kiedyś zobaczysz ten warunek jako „nigdy nie
 > strzelał", sprawdź najpierw, czy deskryptor w ogóle istnieje.
 >
 > **`gcloud` nie ma na to komendy** — ani `gcloud monitoring`, ani `gcloud beta monitoring` nie zna

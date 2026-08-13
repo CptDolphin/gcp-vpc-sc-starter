@@ -49,6 +49,25 @@ def have(tool: str) -> bool:
     return shutil.which(tool) is not None
 
 
+def stacki_terraform(root: pathlib.Path) -> list[str]:
+    """Katalogi najwyższego poziomu zawierające konfigurację Terraforma — wyprowadzone z DRZEWA repo.
+
+    DLACZEGO to nie jest lista literalna (DEC-34). Bramki na stacki stały wcześniej wpisane z nazwy,
+    a asercje liczyły ich WYSTĄPIENIA (`== 2`). Taki kształt mierzy „czy ktoś zmienił to, co już jest",
+    i jest z definicji ślepy na to, czego jeszcze nie ma: nowy katalog z `*.tf` przechodzi obok, a licznik
+    zostaje zielony, bo dwa wystąpienia nadal są dwa. Zmierzone dwa razy — najpierw `iam-bootstrap`
+    (dostał lintera, nigdy `fmt`/`validate`), potem `violations-sink` (nie dostał NIC i przepuścił błąd
+    składni HCL przez cały pipeline, 2026-08-13). Pytanie „czy każdy stack ma bramkę" wolno zadać
+    wyłącznie zbiorowi wziętemu z rzeczywistości, nie z tej samej listy, którą się bada.
+
+    `.terraform/` odpada, bo to katalog roboczy `init`-a (kopie modułów mają własne `*.tf`), a nie stack.
+    """
+    return sorted(
+        d.name for d in root.iterdir()
+        if d.is_dir() and not d.name.startswith(".") and any(d.glob("*.tf"))
+    )
+
+
 def strip_heredocs(text: str) -> str:
     """Usuwa treść heredoców, zostawiając sam kod.
 
@@ -547,6 +566,34 @@ def test_jeden_plik_projektow() -> None:
         plik.write_text(kopia)
         for tymczasowy in ("duplikat.json",):
             (ROOT / tymczasowy).unlink(missing_ok=True)
+
+
+def test_kazdy_stack_sie_parsuje() -> None:
+    """Trzy bramki bezkredencjałowe na KAŻDYM stacku wziętym z drzewa — nie na wymienionych z nazwy.
+
+    DLACZEGO osobno od `test_terraform`/`test_iam_bootstrap` (DEC-34): tamte dwie funkcje badają TREŚĆ
+    swojego stacku (renderer, granty, backend) i przez to istnieją per stack, z nazwy. Stack, którego
+    nikt nie dopisał, nie ma więc ani sekcji, ani bramki — i tak przeszedł `violations-sink`: powstał
+    z pełnym `versions.tf`, sinkami org-level i IAM, a jedynym miejscem, gdzie jego błąd składni mógł
+    wyjść, była ręczna sesja człowieka z `roles/logging.configWriter` na organizacji. Ta funkcja pyta
+    o minimum wspólne — czy HCL się w ogóle parsuje i czy jest sformatowany — dla każdego katalogu
+    z `*.tf`, więc nowy stack jest objęty w dniu powstania, bez dopisywania czegokolwiek tutaj.
+    """
+    print("\n== kazdy stack sie parsuje (bramki bezkredencjalowe) ==")
+    if not have("terraform"):
+        check("terraform dostepny", False, "brak terraform na PATH")
+        return
+    stacki = stacki_terraform(ROOT)
+    # Bez tej asercji pusta lista (przebudowa układu repo) dałaby sekcję bez ani jednego sprawdzenia.
+    check("sa stacki do sprawdzenia (petla nizej nie jest pusta)", len(stacki) >= 2, f"stacki: {stacki}")
+    for stack in stacki:
+        d = ROOT / stack
+        p = sh(["terraform", f"-chdir={d}", "fmt", "-check", "-recursive"])
+        check(f"{stack}: fmt -check", p.returncode == 0, p.stdout + p.stderr)
+        p = sh(["terraform", f"-chdir={d}", "init", "-backend=false", "-input=false"])
+        check(f"{stack}: init -backend=false", p.returncode == 0, p.stdout[-600:] + p.stderr[-600:])
+        p = sh(["terraform", f"-chdir={d}", "validate"])
+        check(f"{stack}: validate", p.returncode == 0, p.stdout + p.stderr)
 
 
 def test_iam_bootstrap() -> None:
@@ -1948,7 +1995,7 @@ def test_alerty() -> None:
         check("KAZDA polityka na metryce wlasnej czeka na propagacje deskryptora",
               not bez_czekania, str(bez_czekania))
 
-    # 2c. POLITYKA ALERTU I DESKRYPTOR JEJ METRYKI NALEZA DO TEGO SAMEGO STACKU (DEC-34).
+    # 2c. POLITYKA ALERTU I DESKRYPTOR JEJ METRYKI NALEZA DO TEGO SAMEGO STACKU (DEC-35).
     #
     # ASERCJA NA ZMIERZONY DEFEKT, nie na styl. Odtworzenie po awarii 2026-08-13 (apply `31679291426`)
     # padlo na `Error 404: Cannot find metric(s) that match type = "…/network_window_workload"` przy
@@ -1977,7 +2024,7 @@ def test_alerty() -> None:
         for klucz in re.findall(r"local\.metryka\.(\w+)", tresc)
         if klucz not in zadeklarowane
     })
-    check("KAZDA metryka pod polityka alertu ma deskryptor w TYM SAMYM stacku (DEC-34)",
+    check("KAZDA metryka pod polityka alertu ma deskryptor w TYM SAMYM stacku (DEC-35)",
           not bez_deskryptora,
           f"{bez_deskryptora} — deskryptora brak w `terraform/alerts.tf`, wiec metryka powstanie dopiero "
           f"przy pierwszym zapisie producenta. Apply OD ZERA padnie na tej polityce bledem 404 "
@@ -2510,11 +2557,31 @@ def test_lint_and_pinning() -> None:
         check("tflint: preset recommended", 'preset  = "recommended"' in body or 'preset = "recommended"' in body)
 
     wf = (ROOT / ".github/workflows/validate.yml").read_text()
-    check("CI uruchamia tflint na obu stackach",
-          wf.count("tflint --chdir=") == 2, f"wystapien: {wf.count('tflint --chdir=')}")
-    # To jest guard NA GUARD: bez --config krok „tflint" istnieje i nic nie sprawdza.
-    check("CI przekazuje tflint --config (inaczej konfiguracja jest ignorowana)",
-          wf.count('--config="$PWD/.tflint.hcl"') == 2)
+
+    # ZBIÓR STACKÓW BIERZEMY Z DRZEWA, NIE Z WORKFLOW (DEC-34) — inaczej bramka pyta workflow o to samo,
+    # co workflow deklaruje, i przechodzi zawsze. Poprzedni kształt (`wf.count(...) == 2`) był dokładnie
+    # tym: dwa razy przepuścił stack, który powstał już po jego napisaniu.
+    stacki = stacki_terraform(ROOT)
+    # ANTY-TAUTOLOGIA: gdyby `glob` przestał cokolwiek zwracać (przeniesienie katalogów, zmiana układu
+    # repo), pętle niżej wykonałyby ZERO asercji i sekcja świeciłaby na zielono, nie badając niczego.
+    check("selftest widzi stacki Terraforma w rozpakowanym repo (petle nizej nie sa puste)",
+          len(stacki) >= 2 and "terraform" in stacki, f"stacki: {stacki}")
+
+    wyzwalacz = wf.split("jobs:", 1)[0]
+    for stack in stacki:
+        # Bramka, ktora nie odpala sie na zmianie w katalogu, ktory sama sprawdza, jest bramka tylko
+        # z nazwy — zmierzone trzy razy na tym samym pliku (patrz komentarze w `validate.yml`).
+        check(f"validate.yml wyzwala sie na zmianie w `{stack}/`",
+              f'"{stack}/**"' in wyzwalacz, wyzwalacz)
+        for komenda, opis in ((f"-chdir={stack} fmt", "fmt"),
+                              (f"-chdir={stack} init -backend=false", "init bez backendu"),
+                              (f"-chdir={stack} validate", "validate")):
+            check(f"CI uruchamia terraform {opis} na `{stack}`", komenda in wf, f"brak: {komenda}")
+        # To jest guard NA GUARD: bez `--config` krok „tflint" istnieje i nic nie sprawdza (patrz naglowek
+        # `.tflint.hcl`), wiec pytamy o CALE wywolanie razem z konfiguracja, a nie o samo `--chdir`.
+        check(f"CI uruchamia tflint z `--config` na `{stack}`",
+              f'tflint --chdir={stack} --config="$PWD/.tflint.hcl"' in wf, wf)
+
     check("CI ustawia prog severity na notice (regulyo dokumentacji sa Notice)",
           "--minimum-failure-severity=notice" in wf)
     check("pre-commit ma hook terraform_tflint",
@@ -2616,7 +2683,7 @@ def test_lint_and_pinning() -> None:
     if init.returncode != 0:
         return
 
-    for stack in ["terraform", "iam-bootstrap"]:
+    for stack in stacki:
         p = sh(["tflint", f"--chdir={stack}", f"--config={ROOT}/.tflint.hcl",
                 "--minimum-failure-severity=notice"], cwd=ROOT)
         # Po udanym `--init` „plugin not found" nie jest juz stanem srodowiska, tylko realna awaria bramki —
@@ -6080,6 +6147,7 @@ def main() -> int:
     test_samodzielnosc()
     test_terraform()
     test_jeden_plik_projektow()
+    test_kazdy_stack_sie_parsuje()
     test_iam_bootstrap()
     test_deny_check()
     test_contract()

@@ -393,7 +393,7 @@ resource "google_monitoring_metric_descriptor" "zmiany_poza_pipelinem" {
 # `roles/logging.configWriter`. Odtworzenie od zera w kolejności „repo perimetru najpierw" padało więc
 # ZAWSZE, a `depends_on` przez granicę dwóch stanów Terraforma nie istnieje.
 #
-# NIEZMIENNIK, KTÓRY Z TEGO ZOSTAJE (DEC-34): polityka alertu i deskryptor jej metryki należą do TEGO
+# NIEZMIENNIK, KTÓRY Z TEGO ZOSTAJE (DEC-35): polityka alertu i deskryptor jej metryki należą do TEGO
 # SAMEGO stacku. Producent odpowiada za PUNKTY, nigdy za ISTNIENIE metryki. Bramka: selftest §alerty.
 #
 # DRUGI SKUTEK, GROŹNIEJSZY OD CZERWONEGO APPLY: bez deskryptora martwy-człowiek tej polityki
