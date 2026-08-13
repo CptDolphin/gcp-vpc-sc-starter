@@ -14,6 +14,7 @@ Jeden dokument na jeden moment — liczby świadomie nie wypisujemy, bo utrzymyw
 | [6 — Układ repozytoriów](6-uklad-repozytoriow.md) | architekt pyta o skalę: plik na projekt czy jeden `projects.yml` przy 100–200 projektach |
 | [7 — Alerty granicy](7-alerty.md) | któryś alert właśnie odpalił — procedura per objaw; albo dokładasz alert i szukasz, gdzie dopisać kotwicę |
 | [8 — Zmiany ręczne](8-zmiany-reczne.md) | zmieniasz coś, czego nie obsługuje żaden formularz: wniosek ręczny architekta, profil w katalogu, access level (dodanie i **uzbrojenie**), `restricted_services` |
+| [9 — Karta wejścia](9-karta-wejscia.md) | **wchodzisz do cudzej organizacji**: gotowy do wysłania zestaw pytań o stan zastany, uprawnienia i cudze procesy — z konsekwencją każdego „nie" i mapą odpowiedź→knob |
 
 Decyzje, na których stoi całość — z odrzuconymi wariantami — są w [`0-decyzje.md`](0-decyzje.md).
 Kod odsyła do nich skrótem `DEC-<numer>`; numeracja `DEC-` jest rozłączna z `D1`…`D5`, którymi
