@@ -58,6 +58,33 @@ jobs:
           echo "count=$count" >> "$GITHUB_OUTPUT"
           cat expired.txt >> "$GITHUB_STEP_SUMMARY"
 
+      # TOKEN APPA MINTOWANY W PRZEBIEGU — dokladnie ten sam mechanizm i ten sam powod, co w kanale
+      # wejsciowym (DEC-22). Ten workflow zostal wtedy pominiety i przez to NIE MOGL zrobic nic (DEC-49).
+      #
+      # ZMIERZONE (2026-08-13, #1950, pierwszy w historii przebieg z realnie wygaslym czlonkiem): krok
+      # znalezienia wygasnietych zadzialal (`count=1`, wpis usuniety z pliku, commit powstal), galaz
+      # `offboard/expired-<run_id>` zostala WYPCHNIETA — i dopiero wtedy tworzenie pull requesta padlo:
+      #
+      #     ##[error]GitHub Actions is not permitted to create or approve pull requests.
+      #
+      # Czyli mechanizm wygasania konczyl sie STANEM POLOWICZNYM: galaz w repozytorium, zadnego pull
+      # requesta, zadnego zgloszenia do wlasciciela. Nie wyszlo to nigdy na jaw, bo do tego dnia zaden
+      # czlonek nie przekroczyl `review_by` i krok byl zawsze `skipped` — przebieg zielony, mechanizm
+      # martwy. Ustawienie „Allow GitHub Actions to create and approve pull requests" NIE jest naprawa:
+      # daje Actions rowniez prawo ZATWIERDZANIA pull requestow, a PR otwarty `GITHUB_TOKEN`-em nie
+      # zbiera ZADNEGO checka (zmierzone #1977: przebiegi `pull_request` powstaja, ale stoja
+      # `action_required` z `jobs: []`, a PR jest `MERGEABLE`). Pull request, ktory ZDEJMUJE ochrone
+      # z projektu, poszedlby wtedy do scalenia bez ani jednej bramki.
+      - name: mint the App installation token (when the App is configured)
+        id: app
+        if: steps.find.outputs.count != '0' && vars.INTAKE_APP_ID != ''
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.INTAKE_APP_ID }}
+          private-key: ${{ secrets.INTAKE_APP_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
       # The PR is a PROPOSAL, not an execution: the owner has the review window to say "still needed" and
       # push a new review_by instead. Removing a member is itself a change to the boundary, so it goes
       # through the same gates as adding one.
@@ -65,6 +92,15 @@ jobs:
         if: steps.find.outputs.count != '0'
         uses: peter-evans/create-pull-request@c5a7806660adbe173f04e3e038b0ccdcd758773c # v6.1.0
         with:
+          # Token Appa, gdy jest; `github.token` w przeciwnym razie. Odczyt pola nieobecnego w kontekscie
+          # daje w wyrazeniach GitHub Actions wartosc pusta, nie blad — wiec brak aplikacji degraduje
+          # kanal do GLOSNEJ awarii (ta z komunikatu wyzej), a nie do cichego pominiecia.
+          token: ${{ steps.app.outputs.token || github.token }}
+          # LISTA DOZWOLONYCH SCIEZEK, NIE ZAKAZANYCH — ta sama poprawka, co w kanale wejsciowym (#2037),
+          # ktora tego workflowa wtedy nie objela. Bez `add-paths` akcja stage'uje CALE drzewo robocze:
+          # zmierzone w tym samym przebiegu #1950 — commit offboardingowy niosl `expired.txt`, czyli
+          # artefakt kroku wyzej, obok jedynej zmiany, ktora mial niesc.
+          add-paths: perimeter/projects.yaml
           branch: offboard/expired-${{ github.run_id }}
           title: "offboard: ${{ steps.find.outputs.count }} member(s) past their review date"
           commit-message: "offboard: remove members whose review_by has passed"

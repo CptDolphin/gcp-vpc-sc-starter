@@ -167,6 +167,11 @@ def bootstrap() -> None:
         # przebiegu. Zielony `apply` na regule egzekwowanej tego nie dowodzi (DEC-6, DEC-45).
         "tools/weryfikacja_po_apply.py",
         "tools/perimeter_to_policy.py", "tools/brownfield_import.sh",
+        # Druga polowa dryfu: obiekt DOPISANY do granicy poza pipeline'em. `terraform plan` go nie widzi
+        # i nie zobaczy — szkielet niesie `ignore_changes` na szesciu listach, a zasoby granularne
+        # powstaja z `for_each` po deklaracji, wiec obiekt spoza deklaracji nie ma instancji w stanie
+        # (DEC-48).
+        "tools/dryf_nieobjete.py",
         # Sonda EGRESS uruchamiana WEWNATRZ perimetru — jedyny tor mierzacy kierunek wyjscia.
         # `boundary-probe.yml` wola z runnera CI i mierzy WYLACZNIE ingress; "wewnatrz" jest wlasnoscia
         # SIECI, nie tozsamosci, wiec egressu nie da sie zmierzyc bez maszyny w projekcie czlonkowskim
@@ -2038,11 +2043,32 @@ def test_poswiadczenie_kanalu() -> None:
     """
     print("\n== poswiadczenie kanalu wejsciowego (DEC-22) ==")
 
-    # Trzy workflow, a nie dwa: `intake-rebase.yml` FORCE-PUSHUJE galezie kanalu, wiec decyduje o tym,
+    # KTORE WORKFLOW SPRAWDZAMY — WYPROWADZONE Z TRESCI, NIE WYPISANE Z PAMIECI.
+    #
+    # Do #1950 stala tu wyliczanka trzech nazw i przez to pomijala `expiry-sweep.yml` — kanal, ktory
+    # otwiera pull request ZDEJMUJACY ochrone z projektu. Zostal jako jedyny na `github.token` i przez
+    # cale swoje istnienie nie mogl otworzyc pull requesta w ogole (`GitHub Actions is not permitted to
+    # create or approve pull requests`, zmierzone na pierwszym przebiegu z realnie wygaslym czlonkiem:
+    # galaz WYPCHNIETA, pull requesta brak). Nikt tego nie zauwazyl, bo do tego dnia zaden czlonek nie
+    # przekroczyl `review_by`, wiec krok byl zawsze `skipped`, a przebieg zielony.
+    #
+    # Wyliczanka nazw jest bramka, ktora chroni dokladnie tyle, ile ktos pamietal w dniu jej pisania (DEC-49).
+    # Zbior wyprowadzony z tresci obejmuje sam z siebie kazdy NASTEPNY kanal otwierajacy pull requesta.
+    wszystkie = sorted((ROOT / ".github/workflows").glob("*.yml"))
+    OTWIERA_PR = re.compile(r"peter-evans/create-pull-request@|gh pr create\b")
+    otwieraja_pr = {p.name for p in wszystkie if OTWIERA_PR.search(bez_komentarzy(p.read_text()))}
+
+    # Detektor, ktory nic nie znajduje, zazieleniloby cala petle nizej — wiec pytamy go najpierw o to,
+    # czy w ogole widzi kanaly, o ktorych wiemy, ze istnieja.
+    check("detektor workflowow otwierajacych pull requesta cokolwiek znajduje",
+          len(otwieraja_pr) >= 3 and "expiry-sweep.yml" in otwieraja_pr, str(sorted(otwieraja_pr)))
+
+    # `intake-rebase.yml` pull requestow NIE TWORZY — FORCE-PUSHUJE ich galezie, wiec decyduje o tym,
     # czy pull request zostanie PONOWNIE sprawdzony po przepisaniu go na nowa baze. Zostawiony na
-    # `github.token` niesie nowy commit ze starymi wynikami bramek.
+    # `github.token` niesie nowy commit ze starymi wynikami bramek. Dolaczony jawnie, bo zaden detektor
+    # „kto otwiera PR" go nie zlapie.
     pliki = {nazwa: (ROOT / f".github/workflows/{nazwa}").read_text()
-             for nazwa in ("intake.yml", "external-intake.yml", "intake-rebase.yml")}
+             for nazwa in sorted(otwieraja_pr | {"intake-rebase.yml"})}
 
     for nazwa, tresc in pliki.items():
         wf = yaml.safe_load(tresc)
@@ -2087,10 +2113,26 @@ def test_poswiadczenie_kanalu() -> None:
               i_konsument is not None and i_mint < i_konsument,
               f"mint={i_mint}, konsument={i_konsument}")
 
-    # NIGDZIE — nie tylko w trzech plikach wyzej. Sekret z gotowym tokenem, do ktorego wraca jeden
+    # `add-paths` = lista DOZWOLONYCH sciezek. Bez niej `create-pull-request` stage'uje CALE drzewo
+    # robocze, czyli wszystko, co kroki wyzej zapisaly na dysk. Zmierzone dwa razy, w dwoch kanalach:
+    # pull request onboardingowy niosl `stan/contract.json` i skompilowany `.pyc` (#2037), a commit
+    # offboardingowy — `expired.txt`, artefakt wlasnego kroku wyszukania (#1950). Zaden check nie pyta,
+    # KTORE pliki pull request dodaje, wiec to jedyne miejsce, w ktorym da sie to zamknac.
+    bez_add_paths = []
+    for nazwa in sorted(otwieraja_pr):
+        wf = yaml.safe_load((ROOT / f".github/workflows/{nazwa}").read_text())
+        for job in wf["jobs"].values():
+            for krok in job["steps"]:
+                if not str(krok.get("uses", "")).startswith("peter-evans/create-pull-request@"):
+                    continue
+                if not (krok.get("with") or {}).get("add-paths"):
+                    bez_add_paths.append(f"{nazwa}: {krok.get('name')}")
+    check("kazdy krok otwierajacy pull requesta niesie `add-paths` (allow-lista, nie deny-lista)",
+          not bez_add_paths, str(bez_add_paths))
+
+    # NIGDZIE — nie tylko w plikach wyzej. Sekret z gotowym tokenem, do ktorego wraca jeden
     # workflow, wraca do calego trybu awarii: wartosc bez wlasciciela i bez daty waznosci, ktora
     # w tym repozytorium znaczy `Contents: write` na granicy.
-    wszystkie = sorted((ROOT / ".github/workflows").glob("*.yml"))
     z_sekretem = {p.name: gotowy_token_w_sekrecie(p.read_text()) for p in wszystkie}
     z_sekretem = {k: v for k, v in z_sekretem.items() if v}
     check("zaden workflow nie oczekuje GOTOWEGO tokenu w sekrecie repozytorium",
@@ -2138,6 +2180,151 @@ def test_poswiadczenie_kanalu() -> None:
               znosi_brak_appa(probka) == ma_fallback, str(pozycje_poswiadczenia(probka)))
         check(f"anty-tautologia — gotowy token w sekrecie: {opis}",
               bool(gotowy_token_w_sekrecie(probka)) == ma_sekret, str(gotowy_token_w_sekrecie(probka)))
+
+
+# ----------------------------------------- druga polowa dryfu: obiekty spoza pipeline'u (#1950)
+# Narzedzie URUCHAMIANE, nie ogladane, i karmione wsadami o ZNANYM werdykcie. Detektor, ktory zawsze
+# mowi „czysto", jest nieodroznialny od wylaczonego — a wlasnie tak wygladal `drift.yml` przez osiem
+# kolejnych nocy: zielono, bo `terraform plan` nie ma jak zobaczyc obiektu, ktorego nie ma w stanie.
+
+def _wsad_dryfu(katalog: pathlib.Path, poziomy: list, czlonkowie: dict, reguly: dict,
+                zywe_poziomy: list, zywi_czlonkowie: dict, zywe_reguly: dict) -> list:
+    """Trzy pliki JSON dla `dryf_nieobjete.py`. Zwraca argumenty wywolania.
+
+    `poziomy`/`czlonkowie`/`reguly` opisuja DEKLARACJE (plan JSON), reszta — ZYWA granice.
+    """
+    POLITYKA = "accessPolicies/123456789012"
+    zasoby = [{"type": "google_access_context_manager_access_level",
+               "address": f'…level["{n}"]', "values": {"name": f"{POLITYKA}/accessLevels/{n}"}}
+              for n in poziomy]
+    for etap, typ in (("enforced", "google_access_context_manager_service_perimeter_resource"),
+                      ("dry-run", "google_access_context_manager_service_perimeter_dry_run_resource")):
+        zasoby += [{"type": typ, "address": "…member", "values": {"resource": r}}
+                   for r in czlonkowie.get(etap, [])]
+    for (etap, kierunek), typ in (
+            (("enforced", "ingress"), "google_access_context_manager_service_perimeter_ingress_policy"),
+            (("enforced", "egress"), "google_access_context_manager_service_perimeter_egress_policy"),
+            (("dry-run", "ingress"),
+             "google_access_context_manager_service_perimeter_dry_run_ingress_policy"),
+            (("dry-run", "egress"),
+             "google_access_context_manager_service_perimeter_dry_run_egress_policy")):
+        zasoby += [{"type": typ, "address": "…rule", "values": {}}
+                   for _ in range(reguly.get((etap, kierunek), 0))]
+
+    plan = {"planned_values": {"root_module": {"resources": zasoby}}}
+    zywe_lvl = [{"name": f"{POLITYKA}/accessLevels/{n}"} for n in zywe_poziomy]
+    perimetr = {"name": f"{POLITYKA}/servicePerimeters/ai_core"}
+    for etap, klucz in (("enforced", "status"), ("dry-run", "spec")):
+        perimetr[klucz] = {
+            "resources": zywi_czlonkowie.get(etap, []),
+            "ingressPolicies": [{} for _ in range(zywe_reguly.get((etap, "ingress"), 0))],
+            "egressPolicies": [{} for _ in range(zywe_reguly.get((etap, "egress"), 0))],
+        }
+    sciezki = []
+    for nazwa, tresc in (("plan.json", plan), ("poziomy.json", zywe_lvl), ("perimetr.json", perimetr)):
+        (katalog / nazwa).write_text(json.dumps(tresc))
+        sciezki.append(str(katalog / nazwa))
+    return ["--plan-json", sciezki[0], "--poziomy-json", sciezki[1], "--perimetr-json", sciezki[2]]
+
+
+def test_dryf_nieobjete() -> None:
+    """Czy detektor obiektow spoza pipeline'u ZAPALA na dopisku i MILCZY na stanie zgodnym.
+
+    DLACZEGO OSOBNE NARZEDZIE, A NIE MOCNIEJSZY `terraform plan`. Szkielet perimetru MUSI niesc
+    `ignore_changes` na szesciu listach (inaczej szkielet i zasoby granularne kasuja sobie nawzajem
+    zawartosc przy kazdym apply), a zasoby granularne powstaja z `for_each` po deklaracji. Obiekt
+    dopisany do granicy poza pipeline'em nie ma wiec instancji w stanie — nie ma czego odswiezyc.
+    To NIE JEST do naprawienia w planie; to jest do naprawienia obok niego (DEC-48).
+    """
+    print("\n== obiekty spoza pipeline'u (druga polowa dryfu) ==")
+    narzedzie = str(ROOT / "tools/dryf_nieobjete.py")
+
+    ZGODNY = dict(poziomy=["corp_network", "eu_only"],
+                  czlonkowie={"enforced": ["projects/111"], "dry-run": ["projects/111", "projects/222"]},
+                  reguly={("enforced", "ingress"): 2, ("dry-run", "ingress"): 3, ("dry-run", "egress"): 1})
+    ZYWY_ZGODNY = dict(zywe_poziomy=["corp_network", "eu_only"],
+                       zywi_czlonkowie={"enforced": ["projects/111"],
+                                        "dry-run": ["projects/111", "projects/222"]},
+                       zywe_reguly={("enforced", "ingress"): 2, ("dry-run", "ingress"): 3,
+                                    ("dry-run", "egress"): 1})
+
+    # (opis, nadpisania zywej strony, spodziewany kod, fragment, ktory MUSI stac w raporcie)
+    PRZYPADKI = [
+        ("stan zgodny — detektor MILCZY", {}, 0, "Brak obiektow spoza pipeline'u"),
+        ("access level utworzony obok pipeline'u",
+         dict(zywe_poziomy=["corp_network", "eu_only", "recznie_dodany"]), 2, "recznie_dodany"),
+        ("projekt dolozony recznie do konfiguracji EGZEKWOWANEJ",
+         dict(zywi_czlonkowie={"enforced": ["projects/111", "projects/999"],
+                               "dry-run": ["projects/111", "projects/222"]}), 2,
+         "czlonek spoza pipeline'u (enforced): projects/999"),
+        ("projekt dolozony recznie do konfiguracji DRY-RUN",
+         dict(zywi_czlonkowie={"enforced": ["projects/111"],
+                               "dry-run": ["projects/111", "projects/222", "projects/999"]}), 2,
+         "czlonek spoza pipeline'u (dry-run): projects/999"),
+        ("regula ingress dopisana do konfiguracji egzekwowanej",
+         dict(zywe_reguly={("enforced", "ingress"): 3, ("dry-run", "ingress"): 3,
+                           ("dry-run", "egress"): 1}), 2, "regul ingress (enforced)"),
+        ("regula egress dopisana do konfiguracji dry-run",
+         dict(zywe_reguly={("enforced", "ingress"): 2, ("dry-run", "ingress"): 3,
+                           ("dry-run", "egress"): 2}), 2, "regul egress (dry-run)"),
+        # KIERUNEK JEST JEDEN — i to jest decyzja, nie niedoróbka. Brak po stronie chmury (poziom
+        # skasowany, regula usunieta) melduje `terraform plan` jako `to add`; zdublowanie tego tutaj
+        # dawaloby dwa zgloszenia na jeden objaw.
+        ("brak po stronie chmury nalezy do PLANU, nie tutaj — detektor milczy",
+         dict(zywe_poziomy=["corp_network"],
+              zywe_reguly={("enforced", "ingress"): 1, ("dry-run", "ingress"): 3,
+                           ("dry-run", "egress"): 1}), 0, "Brak obiektow spoza pipeline'u"),
+        ("pusta granica przy pustej deklaracji to nie jest nadmiar",
+         dict(zywe_poziomy=["corp_network", "eu_only"],
+              zywi_czlonkowie={}, zywe_reguly={}), 0, "Brak obiektow spoza pipeline'u"),
+    ]
+    with tempfile.TemporaryDirectory() as tmp:
+        kat = pathlib.Path(tmp)
+        for opis, nadpisania, kod, fragment in PRZYPADKI:
+            zywy = dict(ZYWY_ZGODNY)
+            zywy.update(nadpisania)
+            args = _wsad_dryfu(kat, **ZGODNY, **zywy)
+            p = sh([sys.executable, narzedzie] + args)
+            check(f"dryf_nieobjete: {opis} -> kod {kod}", p.returncode == kod,
+                  f"kod {p.returncode}: {p.stdout[-300:]}{p.stderr[-300:]}")
+            check(f"dryf_nieobjete: {opis} -> raport nazywa rzecz po imieniu",
+                  fragment in p.stdout, p.stdout[-400:])
+
+        # FAIL-CLOSED. Nieczytelny wsad NIE MOZE dac zera: zero znaczy „porownalem i nie ma roznic".
+        # To jest ta sama roznica, co miedzy „nie ma dryfu" a „nie sprawdzilem" — cala tresc #1950.
+        (kat / "smiec.json").write_text("{ to nie jest json")
+        args = _wsad_dryfu(kat, **ZGODNY, **ZYWY_ZGODNY)
+        for i, opis in ((1, "plan"), (3, "poziomy"), (5, "perimetr")):
+            zle = list(args)
+            zle[i] = str(kat / "smiec.json")
+            p = sh([sys.executable, narzedzie] + zle)
+            check(f"dryf_nieobjete: nieczytelny wsad ({opis}) -> kod 1, nie 0",
+                  p.returncode == 1 and "NIE DA SIE ORZEC" in p.stderr,
+                  f"kod {p.returncode}: {p.stderr[-300:]}")
+        zle = list(args)
+        zle[1] = str(kat / "nie-ma-takiego-pliku.json")
+        p = sh([sys.executable, narzedzie] + zle)
+        check("dryf_nieobjete: brak pliku wsadu -> kod 1, nie 0",
+              p.returncode == 1, f"kod {p.returncode}: {p.stderr[-200:]}")
+
+        # `planned_values` kontra `resource_changes`: na czystym planie ten drugi jest PUSTY, wiec
+        # detektor zbudowany na nim meldowalby KAZDY zywy obiekt jako nadmiar. Bramka na ksztalcie wsadu.
+        (kat / "bez-planned.json").write_text(json.dumps({"resource_changes": []}))
+        zle = list(args)
+        zle[1] = str(kat / "bez-planned.json")
+        p = sh([sys.executable, narzedzie] + zle)
+        check("dryf_nieobjete: plan bez `planned_values` -> kod 1 z nazwaniem przyczyny",
+              p.returncode == 1 and "planned_values" in p.stderr, p.stderr[-200:])
+
+    # WORKFLOW REALNIE GO WOLA — i sklada oba werdykty jednym warunkiem. Narzedzie, ktorego nikt nie
+    # uruchamia, jest dokumentacja, nie bramka (ta sama lekcja co pre-flight wolany przez nic, DEC-24).
+    wf = (ROOT / ".github/workflows/drift.yml").read_text()
+    check("drift.yml wola `tools/dryf_nieobjete.py`", "tools/dryf_nieobjete.py" in wf, wf[:200])
+    check("drift.yml zglasza, gdy ZAPALI KTORYKOLWIEK z dwoch detektorow",
+          "steps.plan.outputs.code == '2' || steps.nieobjete.outputs.code == '2'" in wf,
+          str(re.findall(r"if:.*outputs\.code.*", wf)))
+    check("drift.yml produkuje `plan.json` (`show -json`), bez ktorego inwentarza nie ma z czym porownac",
+          "show -json tfplan.binary" in wf, "")
 
 
 # --------------------------------------------------------------------- monitoring
@@ -7494,6 +7681,7 @@ def main() -> int:
     test_kanal_ticketowy()
     test_swieza_baza()
     test_poswiadczenie_kanalu()
+    test_dryf_nieobjete()
     test_monitoring()
     test_kanaly_check()
     test_alerty()
