@@ -58,7 +58,8 @@ on:
         description: >-
           TEST MODE. Name of a fixture under tests/ (without the .json), used INSTEAD of calling
           ServiceNow. Leave empty in normal operation — see the "test mode" step for what it does and
-          does not let through.
+          does not let through. A run with this input set MARKS ITSELF: annotation, run summary, branch
+          name, pull-request title and label all say the verdict came from a fixture (DEC-42).
         required: false
         default: ""
 
@@ -115,10 +116,30 @@ jobs:
       - name: test mode - resolve the fixture
         id: fixture
         env:
+          # JEDYNE WEJŚCIE TRYBU TESTOWEGO. Żadnej zmiennej repozytorium, żadnego sekretu, żadnego pliku
+          # w drzewie — tryb testowy da się włączyć WYŁĄCZNIE jawnym wejściem zgłoszenia, którego domyślną
+          # wartością jest pusty napis. Selftest pilnuje tego wprost: bramka, którą da się uzbroić
+          # z ustawień repozytorium, jest bramką, o której nikt nie wie, że jest zdjęta.
           FIXTURE: ${{ inputs.fixture }}
+          DIVISION: ${{ inputs.division }}
+          PROJECT_ID: ${{ inputs.project_id }}
         run: |
+          # WSZYSTKIE WYJŚCIA POWSTAJĄ TU, TAKŻE W TRYBIE NORMALNYM — i to jest wybór, nie ozdoba. Gdyby
+          # nazwa gałęzi, tytuł, etykiety i zdanie o pochodzeniu werdyktu stały w kroku otwierającym PR-a
+          # (jak stały), to oznaczenie trybu testowego byłoby ich WARIANTEM, o którym trzeba pamiętać
+          # w każdej przyszłej zmianie tamtego kroku. Tak jest odwrotnie: krok PR-a nie zna trybu i nie
+          # umie go pominąć — czyta gotowe wartości, a jedynym miejscem, w którym rozstrzyga się „test czy
+          # wniosek", jest ten krok.
           if [ -z "$FIXTURE" ]; then
-            echo "path=" >> "$GITHUB_OUTPUT"
+            {
+              echo "path="
+              echo "tryb=normalny"
+              echo "galaz=onboard/${DIVISION}-${PROJECT_ID}"
+              echo "tytul=onboard: ${DIVISION} / ${PROJECT_ID} (dry-run)"
+              echo "etykiety=onboarding, dry-run"
+              echo "zrodlo=(verified against the ServiceNow API, not against the dispatch payload)"
+              echo "baner="
+            } >> "$GITHUB_OUTPUT"
             echo "Tryb normalny: weryfikacja przez API ServiceNow." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
@@ -131,12 +152,45 @@ jobs:
             echo "::error::fixture '$FIXTURE' poza dozwolonym wzorcem ^snow-[a-z0-9-]+\$"; exit 1; }
           [ -f "tests/$FIXTURE.json" ] || {
             echo "::error::tests/$FIXTURE.json nie istnieje na galezi domyslnej"; exit 1; }
-          echo "path=tests/$FIXTURE.json" >> "$GITHUB_OUTPUT"
+          # NAZWA GAŁĘZI TEŻ NIESIE ZNACZNIK, mimo że zostaje pod `onboard/`. Prefiks jest tu granicą
+          # zasięgu bota przepisującego zgłoszenia (`intake-rebase.yml` bierze `onboard/*` + etykietę
+          # `onboarding`) — zostaje, żeby sprzątanie i werdykty działały tak samo; etykieta `onboarding`
+          # NIE zostaje, więc przebieg testowy nie wchodzi temu botowi pod force-push.
+          delimiter="baner-${RANDOM}-$$"  # `date +%N` nie jest przenosne (BSD)
+          {
+            echo "path=tests/$FIXTURE.json"
+            echo "tryb=testowy"
+            echo "galaz=onboard/test-${DIVISION}-${PROJECT_ID}"
+            echo "tytul=[TRYB TESTOWY] onboard: ${DIVISION} / ${PROJECT_ID} (dry-run) — NIE MERGOWAC"
+            echo "etykiety=dry-run, tryb-testowy"
+            echo "zrodlo=(NIE zweryfikowano w ServiceNow — werdykt pochodzi z fixture'u \`tests/$FIXTURE.json\`)"
+            echo "baner<<$delimiter"
+            echo "> [!WARNING]"
+            echo "> **TRYB TESTOWY KANALU — TO NIE JEST WNIOSEK O WEJSCIE DO GRANICY.** Werdykt o zatwierdzeniu"
+            echo "> wydano na pliku \`tests/$FIXTURE.json\` z galezi domyslnej, a **nie** na instancji ServiceNow."
+            echo "> Ten pull request powstal, zeby zmierzyc kanal end-to-end. Nie merguj go."
+            echo ""
+            echo "$delimiter"
+          } >> "$GITHUB_OUTPUT"
           {
             echo "### TRYB TESTOWY"
             echo "System rekordu zastapiony fixture'em \`tests/$FIXTURE.json\` (tresc z galezi domyslnej)."
             echo "Projekt jest ograniczony przez \`u_project_id\` w tym fixturze — patrz komentarz w workflow."
+            echo "Werdykt tego przebiegu **nie jest** dowodem na zgode w systemie rekordu."
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # KROK, KTORY ISTNIEJE PO TO, ZEBY BYLO GO WIDAC. Lista krokow przebiegu jest pierwsza rzecza, ktora
+      # widzi ktokolwiek otwierajacy zielony przebieg; adnotacja `::warning::` jest druga. Do tej pory jedynym
+      # sladem trybu testowego w gornej czesci przebiegu byla NAZWA kroku „test mode - resolve the fixture",
+      # ktora w trybie normalnym wyglada tak samo (wykonuje sie zawsze i konczy zielono). Zmierzone: przebieg
+      # z fixture'em otworzyl pull requesta, ktorego opis twierdzil „verified against the ServiceNow API" —
+      # zdanie nieprawdziwe dla tego przebiegu i nieodroznialne od prawdziwego.
+      - name: WERDYKT NA MATERIALE TESTOWYM - system rekordu NIE zostal zapytany
+        if: steps.fixture.outputs.tryb == 'testowy'
+        env:
+          SCIEZKA: ${{ steps.fixture.outputs.path }}
+        run: |
+          echo "::warning title=TRYB TESTOWY - WERDYKT Z FIXTURE'U::Zatwierdzenie potwierdzono plikiem $SCIEZKA z galezi domyslnej, a NIE instancja ServiceNow. Pull request tego przebiegu jest testem kanalu, nie wnioskiem - nie merguj go."
 
       # THE payload is DATA, never authorization. A dispatch is exactly as trustworthy as the token that
       # sent it, and tokens leak. We call ServiceNow back and ask the system of record whether this ticket
@@ -148,15 +202,20 @@ jobs:
           SNOW_TOKEN: ${{ secrets.SNOW_TOKEN }}
           TICKET: ${{ inputs.snow_ticket }}
           PROJECT_ID: ${{ inputs.project_id }}
+          # Zatwierdzający ze zgłoszenia — wejście PIĄTEJ kontroli (`zatwierdzający != wnioskodawca`).
+          # Flaga jest w narzędziu WYMAGANA: kontrola, którą wyłącza się pominięciem argumentu, jest
+          # kontrolą wyłączoną, a tego nie widać ani w logu przebiegu, ani w diffie zgłoszenia.
+          APPROVED_BY: ${{ inputs.approved_by }}
           # Przez `env:`, NIE przez `${{ }}` w ciele `run:`. Wartość wyrażenia wklejona do skryptu jest
           # kodem, a nie argumentem — to ta sama zasada, którą external-intake.yml stosuje do payloadu.
           FIXTURE_PATH: ${{ steps.fixture.outputs.path }}
         run: |
           if [ -n "$FIXTURE_PATH" ]; then
             python3 tools/snow_verify.py --ticket "$TICKET" --expect-project "$PROJECT_ID" \
-              --offline-fixture "$FIXTURE_PATH"
+              --approver "$APPROVED_BY" --offline-fixture "$FIXTURE_PATH"
           else
-            python3 tools/snow_verify.py --ticket "$TICKET" --expect-project "$PROJECT_ID"
+            python3 tools/snow_verify.py --ticket "$TICKET" --expect-project "$PROJECT_ID" \
+              --approver "$APPROVED_BY"
           fi
 
       # The entry is APPENDED to the shared perimeter/projects.yaml (DEC-12). The script refuses when an
@@ -378,12 +437,18 @@ jobs:
           # RESTRICTION — the intake channel changes member declarations and nothing else, so an
           # artefact nobody predicted still has no way in.
           add-paths: perimeter/projects.yaml
-          branch: onboard/${{ inputs.division }}-${{ inputs.project_id }}
-          title: "onboard: ${{ inputs.division }} / ${{ inputs.project_id }} (dry-run)"
+          # GALAZ, TYTUL, ETYKIETY I ZDANIE O POCHODZENIU WERDYKTU POCHODZA Z KROKU FIXTURE'U, nie stad.
+          # Ten krok nie wie, czy przebieg byl testowy, i nie ma jak o tym zapomniec — a poprzednio wiedzial
+          # o tym TYLKO krok fixture'u, wiec pull request przebiegu testowego byl nieodroznialny od wniosku:
+          # ta sama nazwa galezi, ten sam tytul, te same etykiety i opis twierdzacy „verified against the
+          # ServiceNow API" (zdanie nieprawdziwe dla przebiegu, ktory ServiceNow nie zapytal). DEC-42.
+          branch: ${{ steps.fixture.outputs.galaz }}
+          title: ${{ steps.fixture.outputs.tytul }}
           commit-message: "onboard: add ${{ inputs.project_id }} to the dry-run configuration"
           body: |
+            ${{ steps.fixture.outputs.baner }}
             Opened automatically from ServiceNow **${{ inputs.snow_ticket }}**
-            (verified against the ServiceNow API, not against the dispatch payload).
+            ${{ steps.fixture.outputs.zrodlo }}.
 
             The project joins the **dry-run configuration only**: violations are logged, nothing is blocked
             and the project is not protected yet. After a clean observation window a second PR promotes it
@@ -393,7 +458,7 @@ jobs:
             - [ ] the project really belongs to this division
             - [ ] the requested profiles match the described use case
             - [ ] pre-flight is green (Private Google Access, DNS on the restricted VIP)
-          labels: onboarding, dry-run
+          labels: ${{ steps.fixture.outputs.etykiety }}
 
       # NO HALF-STATE. `create-pull-request` pushes the branch BEFORE it calls the pull-request API, so a
       # refusal at that call leaves a branch carrying a member file and no pull request pointing at it —
@@ -404,7 +469,10 @@ jobs:
         if: failure() && steps.pr.outcome == 'failure'
         env:
           GH_TOKEN: ${{ github.token }}
-          BRANCH: onboard/${{ inputs.division }}-${{ inputs.project_id }}
+          # Ta sama nazwa, ktora wypchnal krok wyzej — inaczej sprzatanie szukaloby galezi, ktorej nigdy nie
+          # bylo, a werdykt „galezi brak" wysylalby czytajacego w strone wyscigu transportu. Zapasowa wartosc
+          # zostaje na wypadek, gdyby krok fixture'u nie doszedl do skutku: werdykt ma sie degradowac, nie znikac.
+          BRANCH: ${{ steps.fixture.outputs.galaz || format('onboard/{0}-{1}', inputs.division, inputs.project_id) }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           # Baza, z ktorej realnie poszedl push. Pusta = krok „swieza baza" nie doszedl do skutku, wiec
           # spadamy na commit ze startu przebiegu — werdykt ma sie degradowac, a nie znikac.

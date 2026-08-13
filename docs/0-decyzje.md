@@ -2914,3 +2914,54 @@ a ona pyta o **kształt** zmiany, nie o to, kto ją przeczytał.
 | uznać zielony `apply` za wystarczający dowód i opisać tylko kroki | to jest dokładnie stan sprzed tego dokumentu: cztery scenariusze **z kodem i dowodem, bez procedury**, a przy tym cztery zmierzone awarie, których zielony apply nie odróżnił od sukcesu |
 | dorobić mechanizm zatwierdzania dla profilu, access levelu i `restricted_services` na wzór `egress_approvals` | trzy nowe wpisy do utrzymania, wprowadzone razem z pierwszą procedurą, która ich dotyczy — zanim wiadomo, czy nazwany zatwierdzający w procedurze wystarcza. Ryzyko jest znane i nazwane; mechanizm powstanie, gdy okaże się, że nazwanie nie działa, a nie „na wszelki wypadek" |
 | wymagać pary kanarków przy KAŻDEJ z czterech procedur | para mierzy access level i tylko on ma tryb awarii „obiekt wygląda kompletnie i nie autoryzuje nikogo, a wpuszczenia nie widać w logu". Dla członka, profilu i listy usług tańszy odczyt (`describe`) odpowiada na to samo pytanie — wymóg pary byłby tam rytuałem, nie kontrolą |
+
+---
+
+## DEC-42 — Kanał ticketowy zostaje na fixturach, a fixture przestaje udawać system rekordu
+
+**Decyzja.** Kanał ServiceNow **nie czeka na żywą instancję** i nie udaje, że ją miał. Trzy rzeczy naraz:
+
+1. **Fixture jest KONTRAKTEM, nie odpowiedzią systemu rekordu.** Każdy `tests/snow-*.json` niesie pole
+   `_material_testowy`, a `snow_verify.py` bez tego pola **odmawia** (rc=2) i przedrukowuje znacznik
+   w każdej linii werdyktu. Kontrakt zapytania (endpoint, `sysparm_fields`, kształt odpowiedzi, pola,
+   na których stoi werdykt, i lista „czego to NIE dowodzi") stoi w `docs/5-servicenow-intake.md` §8.
+2. **Przebieg w trybie testowym oznacza się sam** — własnym krokiem w liście kroków, adnotacją
+   `::warning`, sekcją w podsumowaniu, prefiksem gałęzi `onboard/test-…`, tytułem `[TRYB TESTOWY] … —
+   NIE MERGOWAC`, etykietą `tryb-testowy` **zamiast** `onboarding` i banerem `[!WARNING]` w opisie
+   pull requesta. Wszystkie te wartości powstają w kroku rozstrzygającym fixture; krok otwierający
+   pull requesta tylko je czyta, więc nie zna trybu i nie umie o nim zapomnieć.
+3. **Piąta kontrola: zatwierdzający != wnioskodawca**, fail-closed — brak pola tożsamości albo `sys_id`
+   zamiast loginu kończy się odmową z nazwaniem pola, nie cichym przepuszczeniem.
+
+**Dlaczego.** Kanał przeszedł end-to-end i to jest prawda o **transporcie**, nie o **kontrakcie**: krok
+„zweryfikuj ticket u źródła" porównywał zgłoszenie z plikiem w repozytorium. Zmierzone konsekwencje, obie
+na żywym przebiegu, nie w rozważaniach:
+
+- pull request przebiegu testowego był **nieodróżnialny od wniosku** — ta sama gałąź, tytuł i etykiety,
+  a w opisie zdanie „verified against the ServiceNow API, not against the dispatch payload", które dla
+  tego przebiegu było **nieprawdziwe**. Recenzent czytający taki PR nie miał jak zobaczyć, że werdykt
+  o zatwierdzeniu wydał plik z `tests/`;
+- narzędzie **czytało pole, którego jego własne zapytanie nie mogło przynieść**: dot-walk
+  (`assignment_group.name`) Table API zwraca wyłącznie na jawne zamówienie w `sysparm_fields`, a zapytanie
+  prosiło o samo `sysparm_query`. Na żywej instancji ta bramka odrzuciłaby **każdy** ticket — czyli fixture
+  nie tylko nie dowodził kształtu, ale opisywał kształt, którego to zapytanie nigdy by nie dostało.
+
+Druga obserwacja jest tu argumentem rozstrzygającym: dopóki nikt nie zapyta prawdziwej instancji, każda
+„zielona" ścieżka tego kanału jest zielona **wobec własnych założeń**. Odpowiedzią nie jest jednak bramka
+napisana z wyobrażenia o API — tylko rozdzielenie dwóch rzeczy, które dotąd wyglądały tak samo: **dowodu**
+(przebieg wobec systemu rekordu) i **testu** (przebieg wobec pliku w repozytorium). Ryzyko zostaje, ale
+przestaje być niewidoczne, a warunek uruchomienia kanału w nowym środowisku jest zapisany jako **jeden
+odczyt** (§8.4), nie jako projekt.
+
+**Asymetria, która pozwala dołożyć piątą kontrolę mimo niepotwierdzonego kontraktu.** Bramka pisana
+z wyobrażenia o API jest nie do przyjęcia, gdy produkuje **zielony** werdykt o nieznanej wartości. Ta
+produkuje **czerwony**: gdy pola tożsamości nie ma albo ma inny kształt, kanał odmawia i mówi, którego pola
+nie znalazł. Wymusza to potwierdzenie kontraktu **przed** uruchomieniem, zamiast przepuszczać wnioski
+w nadziei, że nazwy się zgadzają.
+
+| odrzucone | dlaczego |
+|---|---|
+| poczekać z kanałem na instancję developerską i dopiero wtedy cokolwiek zmieniać | rejestracja instancji to krok dla **człowieka** (konto osobiste, regulamin), a instancja hibernuje i bywa odbierana po ~10 dniach bez logowania — dowód „na żywo" wygasałby sam. Do tego PDI potwierdza kontrakt **platformy**, a nie nazwy pól własnych organizacji docelowej (`u_project_id`), więc nie znosi wymogu pomiaru u niej. Czekanie kosztowało nas natomiast to, co widać wyżej: przebieg testowy udający wniosek |
+| uznać kanał za niedostarczony i wyłączyć go do czasu pomiaru | ciężar dowodu i tak przenosimy na kanał dywizji (pięć przelotów na żywo), ale wyłączenie kanału ticketowego zabrałoby jedyny sposób mierzenia jego ścieżki transportowej — a to ona wyprodukowała ostatnie trzy defekty (wyścig o gałąź, token PR-a, sprzątanie po odmowie) |
+| zostawić fixture bez znacznika i opisać ograniczenie wyłącznie w dokumentacji | tak było. Ograniczenie stało w `tests/README.md` i w docstringu narzędzia, a mimo to przebieg testowy otworzył pull requesta twierdzącego coś przeciwnego. Dokumentacja, której nie widać w miejscu podejmowania decyzji, nie jest kontrolą |
+| dopisać piątą kontrolę jako odczyt `sysapproval_approver` (rekord approvalu) | drugie wywołanie o **równie niepotwierdzonym** kontrakcie, tyle że dwa razy droższe w utrzymaniu. Zamyka payload kłamiący o zatwierdzającym — i dlatego stoi w §8.3 jako nazwana luka do zmierzenia, a nie jako zielona bramka o nieznanej wartości |
