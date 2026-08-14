@@ -2921,13 +2921,13 @@ def test_alerty() -> None:
     # Katalog liczony jako zaległy, którego apply NIE uruchamia, daje WIECZNĄ zaległość: licznik rośnie,
     # apply nigdy nie rusza, alert `apply zalega` pali się bez winnego i po tygodniu zostaje wyciszony.
     #
-    # DLACZEGO NIE RÓWNOŚĆ, choć asercja tak brzmiała do DEC-55. Bo równość była KOINCYDENCJĄ, nie
+    # DLACZEGO NIE RÓWNOŚĆ, choć asercja tak brzmiała do DEC-56. Bo równość była KOINCYDENCJĄ, nie
     # niezmiennikiem: obie listy znaczyły co innego i przez przypadek miały tę samą treść. Wyzwalacz
     # `apply.yml` odpowiada na pytanie „czy trzeba jeszcze raz przepuścić BRAMKI" (a bramki czytają
     # `tools/`, `policy/`, `schemas/`, `docs/`, `.github/`), a `--sciezki` obserwatora na pytanie „czy
     # DEKLARACJA GRANICY rozjechała się z zastosowanym stanem". Literówka w `docs/` uruchamia apply
     # i słusznie — ale nie jest zaległością granicy, więc liczona jako zaległość byłaby fałszywym
-    # alarmem. Odkąd wyzwalacz pokrywa wejścia własnych bramek (DEC-55), równość wymuszałaby jedno
+    # alarmem. Odkąd wyzwalacz pokrywa wejścia własnych bramek (DEC-56), równość wymuszałaby jedno
     # z dwojga: albo fałszywe zaległości, albo zwężenie wyzwalacza z powrotem do stanu bez bramek.
     #
     # Kierunek nośny zostaje więc jeden — zawieranie — i jest sprawdzany ostrzej niż poprzednia

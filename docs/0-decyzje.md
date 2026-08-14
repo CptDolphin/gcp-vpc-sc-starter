@@ -3591,7 +3591,7 @@ wdrożenie i płaci się go cicho: rozjazdem wersji w dowodzie, który wygląda 
 | pinować też `python` | `.tool-versions` pinuje łatkę (`3.12.7`), a `setup-python` dostaje `3.12` i ma prawo wziąć najnowszą łatkę. To różna **granulacja**, nie rozjazd; wyrównanie oznaczałoby pinowanie łatki w CI bez powodu |
 | ufać, że `setup-terraform` z pustym wejściem zawiodłoby głośno | zmierzone: nie zawodzi. Pusta wartość to dla tej akcji „weź default", a default to `latest` — czyli najgorszy możliwy wynik przy najbardziej zielonym przebiegu |
 
-## DEC-55 — Zbiór wejść bramki bierze się z DRZEWA; filtr `paths:` jest częścią bramki, nie jej oprawą
+## DEC-56 — Zbiór wejść bramki bierze się z DRZEWA; filtr `paths:` jest częścią bramki, nie jej oprawą
 
 **Decyzja.** Filtr `paths:` każdego workflowa MUSI pokrywać pliki, które ten workflow realnie czyta.
 Pilnuje tego `tools/paths_pokrycie_check.py`, uruchamiany w `bramki-tresci`, czyli na **obu torach** —
