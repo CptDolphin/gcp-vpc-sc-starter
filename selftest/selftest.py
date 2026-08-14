@@ -3328,6 +3328,82 @@ def zrodla_z_pinami() -> dict:
     return out
 
 
+# ------------------------------------------- jedna akcja = jedna wersja W MATERIALE WDROZENIA (DEC-53)
+# `rozjazdy_pinow` wyzej pyta, czy komentarz KLAMIE. Dwie rozne wersje tej samej akcji, kazda z prawdziwym
+# komentarzem, nie sa klamstwem — i slusznie tamta bramka ich nie zglasza (ma na to wprost probke
+# anty-tautologii). Zostaje jednak drugie pytanie, ktorego nie zadaje nic: czy wdrozenie dostaje material
+# jednorodny. Te dwa pytania trzeba rozdzielic, bo maja rozne odpowiedzi i rozne skutki.
+#
+# MECHANIZM, KTORY TO PRODUKUJE — zmierzony, nie teoretyczny. Dependabot widzi `.github/workflows/*.yml`
+# i pliki `action.yml`. Szablon lezy w `template/**/*.yml.example`, czyli POZA jego zasiegiem. Skutek jest
+# jednokierunkowy i sam sie odtwarza:
+#   * piny w szablonie zostaja na wartosci z dnia, w ktorym plik powstal — nikt ich nie wybral, po prostu
+#     nikt ich nie rusza;
+#   * repo wdrozone (rozpakowane, wiec W zasiegu) dostaje podbicie w pierwszym tygodniowym cyklu;
+#   * nowy plik szablonu pisany PO tym podbiciu kopiuje sie z wdrozenia i przynosi wersje nowa — obok
+#     starych, ktorych nikt nie ruszyl.
+# Tak powstal rozjazd `google-github-actions/auth`: piec workflowow na v2.1.13, dwa na v3.0.0, przy
+# wdrozeniu jednorodnym na v3.0.0. Przeciek idzie tez W DRUGA STRONE: plik wniesiony ze startera wnosi
+# do wdrozenia pin, ktory Dependabot juz tam wycofal (zmierzone na `checkout` — jedno wdrozenie mialo
+# v4.4.0 w trzech plikach przyniesionych szablonem i v7.0.1 w pozostalych siedemnastu).
+#
+# DLACZEGO NIE `groups`/`ignore` W DEPENDABOCIE. To narzedzie po zlej stronie granicy. Konfiguracja
+# Dependabota dziala w repo WDROZONYM — a tam materiał jest jednorodny wlasnie dlatego, ze Dependabot
+# tam siega. Rozjazd siedzi w szablonie, ktorego zadne ustawienie w tym pliku nie sprawi widocznym,
+# bo problemem jest widocznosc SCIEZKI, nie polityka grupowania. `ignore` byloby wrecz szkodliwe:
+# zamrozilo by wdrozenie na starszym pinie szablonu, czyli rozwiazalo rozjazd w strone gorsza.
+#
+# POWIERZCHNIA TO DRZEWO ROZPAKOWANE, NIE STARTER. Pytanie brzmi „co dostaje wdrozenie", wiec pytamy
+# material wyjsciowy `install.sh`. Drzewo startera zawiera dodatkowo `selftest/` z probkami, ktore z
+# premedytacja skladaja rozjazd (dowodza, ze bramka gryzie) — bramka liczaca je jako realne byla by
+# czerwona na tresci poprawnej, dokladnie tak jak pelne sprawdzenie cytowan decyzji na drzewie startera.
+#
+# BRAMKA JEST ZAPADKA, NIE ZAKAZEM. Rejestr nizej to stan ZMIERZONY w dniu wpisania, nie ideal: piec
+# akcji stoi dzis na dwoch wersjach naraz i kazda z nich ma wlasny blast-radius (podbicie `setup-terraform`
+# v3 -> v4 to nie ta sama zmiana, co podbicie akcji uwierzytelniajacej). Porownanie jest na ROWNOSC, w obie
+# strony: nowy rozjazd czerwieni, a rozjazd DOMKNIETY i niewykreslony z rejestru — tez, zeby lista dlugu
+# nie przezyla dlugu. Dopisanie tu wpisu jest wiec czynnoscia swiadoma, a nie sposobem uciszenia bramki.
+ROZJAZDY_WERSJI_UZNANE = {
+    "actions/checkout": ("v4.4.0", "v7.0.1"),
+    "actions/setup-python": ("v5.6.0", "v7.0.0"),
+    "actions/upload-artifact": ("v4.6.2", "v7.0.1"),
+    "google-github-actions/setup-gcloud": ("v2.2.1", "v3.0.1"),
+    "hashicorp/setup-terraform": ("v3.1.2", "v4.0.1"),
+}
+
+
+def rozjazdy_wersji(zrodla: dict) -> dict:
+    """Akcje stojace w jednym materiale na WIECEJ NIZ JEDNEJ wersji. Zwraca {akcja: (tag, tag, ...)}.
+
+    Liczymy rozne SHA-e, bo to one decyduja o wykonywanym kodzie; tag sluzy tylko do nazwania wyniku.
+    Pin bez komentarza wersji jest pomijany — ten sam powod, co w `rozjazdy_pinow`: nie deklaruje wersji,
+    wiec nie da sie o nim powiedziec, ktora to jest, bez pytania sieci (swiadomie tego nie robimy).
+    """
+    po_akcji: dict = {}
+    for _, tresc in sorted(zrodla.items()):
+        for m in PIN_Z_KOMENTARZEM.finditer(tresc):
+            if not m.group("tag"):
+                continue
+            po_akcji.setdefault(m.group("akcja"), {})[m.group("sha")] = m.group("tag")
+    return {akcja: tuple(sorted(set(po_sha.values())))
+            for akcja, po_sha in sorted(po_akcji.items()) if len(po_sha) > 1}
+
+
+def zrodla_rozpakowane() -> dict:
+    """Pliki ROZPAKOWANEGO repo z przypieta akcja — czyli dokladnie ten material, ktory dostaje wdrozenie."""
+    out = {}
+    for p in sorted(ROOT.rglob("*")):
+        if ".git" in p.parts or not p.is_file():
+            continue
+        try:
+            tresc = p.read_text()
+        except (UnicodeDecodeError, OSError):
+            continue
+        if PIN_Z_KOMENTARZEM.search(tresc):
+            out[str(p.relative_to(ROOT))] = tresc
+    return out
+
+
 def test_lint_and_pinning() -> None:
     """tflint (jeśli jest) + guardy na to, czego brak nie widać w zielonym przebiegu.
 
@@ -3419,6 +3495,25 @@ def test_lint_and_pinning() -> None:
                                      for m in PIN_Z_KOMENTARZEM.finditer(t)}) >= 6,
           f"plikow z pinem: {len(zrodla)}")
 
+    # --- jedna akcja = jedna wersja w materiale wdrozenia (naglowek `ROZJAZDY_WERSJI_UZNANE` ma powody) ---
+    material = zrodla_rozpakowane()
+    check("skan wersji oglada material ROZPAKOWANY, nie drzewo startera (petla nie jest pusta)",
+          len(material) >= 10 and any(n.startswith(".github/workflows/") for n in material),
+          f"plikow rozpakowanych z pinem: {sorted(material)}")
+    biezace = rozjazdy_wersji(material)
+    nowe = {a: v for a, v in biezace.items() if ROZJAZDY_WERSJI_UZNANE.get(a) != v}
+    domkniete = {a: v for a, v in ROZJAZDY_WERSJI_UZNANE.items() if biezace.get(a) != v}
+    check("material wdrozenia nie zyskal NOWEGO rozjazdu wersji akcji",
+          not nowe, f"nieuznane rozjazdy: {nowe}")
+    check("rejestr uznanych rozjazdow nie przezyl swojego dlugu (wykresl domkniete)",
+          not domkniete, f"w rejestrze, a juz jednorodne albo inne: {domkniete}")
+    # Akcja uwierzytelniajaca wymienia OIDC na tozsamosc majaca prawo ZMIENIC granice organizacji — to
+    # ostatnie miejsce, w ktorym „nie wiadomo, ktora wersja realnie startuje" jest do przyjecia. Pytamy
+    # o nia z nazwy, zeby wpis do rejestru wyzej nigdy jej nie zwolnil po cichu.
+    check("akcja uwierzytelniajaca stoi w calym materiale na JEDNEJ wersji",
+          "google-github-actions/auth" not in biezace,
+          f"wersje auth: {biezace.get('google-github-actions/auth')}")
+
     # ---------------------------------------------------------------- ANTY-TAUTOLOGIA
     # SHA-e sa tu syntetyczne i sklejane w locie, a nie wpisane literalnie — inaczej `zrodla_z_pinami()`
     # znalazloby WLASNE probki tego testu jako realne piny startera i zglosilo je jako rozjazd.
@@ -3452,6 +3547,31 @@ def test_lint_and_pinning() -> None:
     for opis, probka, oczekiwany in ROZBROJONE:
         check(f"anty-tautologia — rozjazd pinow: {opis}",
               bool(rozjazdy_pinow(probka)) == oczekiwany, str(rozjazdy_pinow(probka)))
+
+    # Te same probki przepuszczone przez DRUGIE pytanie. Puenta jest w pierwszych dwoch wierszach:
+    # ksztalt, ktory `rozjazdy_pinow` slusznie przepuszcza (dwie wersje, oba komentarze prawdziwe), jest
+    # dla `rozjazdy_wersji` wlasnie tym, czego szuka — i odwrotnie, klamstwo o wersji przy JEDNYM kodzie
+    # nie jest niejednorodnoscia. Gdyby obie funkcje odpowiadaly tak samo, jedna z nich bylaby zbedna.
+    WERSJE_ROZBROJONE = [
+        ("dwie ROZNE wersje tej samej akcji — tego `rozjazdy_pinow` nie zglasza, a to jest sedno tej bramki",
+         {"a.yml": f"      - uses: actions/checkout@{A} # v4.4.0\n",
+          "b.yml": f"      - uses: actions/checkout@{B} # v7.0.1\n"}, True),
+        ("jeden SHA pod dwoma numerami wersji — klamstwo o wersji, ale material jest JEDNORODNY",
+         {"w.yml": f"      - uses: actions/checkout@{A} # v4.4.0\n"
+                   f"      - uses: actions/checkout@{A} # v7.0.1\n"}, False),
+        ("ten sam pin powtorzony w wielu plikach",
+         {"a.yml": f"      - uses: actions/checkout@{A} # v4.4.0\n",
+          "b.yml": f"      - uses: actions/checkout@{A} # v4.4.0\n"}, False),
+        ("dwie ROZNE akcje na roznych wersjach (klucz to akcja, nie numer)",
+         {"a.yml": f"      - uses: google-github-actions/auth@{A} # v3.0.0\n"
+                   f"      - uses: google-github-actions/setup-gcloud@{B} # v2.2.1\n"}, False),
+        ("goly SHA obok pinu z komentarzem — bez deklaracji wersji nie ma czym rozjechac",
+         {"a.yml": f"      - uses: actions/checkout@{A}\n"
+                   f"      - uses: actions/checkout@{B} # v7.0.1\n"}, False),
+    ]
+    for opis, probka, oczekiwany in WERSJE_ROZBROJONE:
+        check(f"anty-tautologia — rozjazd wersji: {opis}",
+              bool(rozjazdy_wersji(probka)) == oczekiwany, str(rozjazdy_wersji(probka)))
 
     # `have()` nie wystarcza: `tflint` bywa shimem menedżera wersji, który istnieje na PATH i pada przy
     # uruchomieniu (brak przypiętej wersji). Wtedy FAIL mówiłby o konfiguracji tflinta, nie o kodzie startera.

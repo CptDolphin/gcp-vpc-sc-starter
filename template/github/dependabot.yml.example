@@ -4,6 +4,15 @@
 # DLACZEGO to jest wpisane do startera, a nie „do włączenia później": pinowanie SHA bez mechanizmu aktualizacji
 # jest gorsze niż tag. Tag przynajmniej dostaje poprawki bezpieczeństwa sam; martwy pin nie dostaje nic, a
 # wygląda na kontrolę bezpieczeństwa. To jest ta sama pułapka co bramka, która nic nie sprawdza.
+#
+# CZEGO TEN PLIK NIE ZAŁATWIA — i nie da się tego naprawić jego ustawieniami (DEC-53). Dependabot widzi
+# `.github/workflows/*.yml` i pliki `action.yml`. Piny stojące w SZABLONIE, z którego to repo powstało, są
+# poza jego zasięgiem, więc zostają tam na wartości z dnia, w którym plik szablonu powstał — i wracają tutaj
+# przy każdej synchronizacji, także wtedy, gdy Dependabot już je stąd wycofał. Zmierzone: plik przyniesiony
+# szablonem cofnął w jednym wdrożeniu `actions/checkout` o trzy wersje główne, przy zielonych bramkach.
+# To jest problem WIDOCZNOŚCI ŚCIEŻKI, nie polityki grupowania: ani `groups`, ani `ignore` nie zobaczą pliku,
+# którego Dependabot nie czyta, a `ignore` dodatkowo zamroziłoby to repo na starszym pinie szablonu.
+# Jednorodności materiału pilnuje więc asercja po stronie startera (`rozjazdy_wersji`), nie ten plik.
 
 version: 2
 updates:
