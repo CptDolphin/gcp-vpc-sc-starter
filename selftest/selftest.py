@@ -3482,6 +3482,124 @@ def zrodla_rozpakowane() -> dict:
     return out
 
 
+# ------------------------------------- wersje NARZEDZI: jeden plik, a reszta materialu jest jego kopia
+# `tool-versions.example` mowi o sobie „Jedno zrodlo prawdy o wersjach" — i przez caly czas nikt tego nie
+# mierzyl. Zmierzone (#2079): jedyna bramka startera czytala `.tool-versions` w KORZENIU startera, ktorego
+# tam nigdy nie bylo. `grep` padal, ale krok konczyl sie ZIELONO z pustym wyjsciem, wiec `setup-terraform`
+# bral swoj default (`latest`) — renderer perimetru byl dowodzony na innej wersji niz ta, ktora uruchomi
+# wdrozenie w szesciu workflowach. Deklaracja „jedno zrodlo prawdy" byla prawdziwa jako zamiar i falszywa
+# jako fakt; ta bramka zamienia ja w fakt.
+#
+# POWIERZCHNIA TO DRZEWO ROZPAKOWANE — ten sam powod, co przy DEC-53. Pytanie brzmi „co dostaje wdrozenie",
+# wiec pytamy material wyjsciowy `install.sh`. Drzewo startera zawiera dodatkowo probki i przyklady, ktore
+# z premedytacja skladaja niezgodne wartosci.
+#
+# WZORZEC JEST MECHANIZMEM, ZBIOR PLIKOW JEST WYPROWADZONY. Lista nazw plikow w komentarzu („szesc
+# workflowow, `narzedzia/action.yml`, `validate.yml`") zgnilaby przy pierwszym nowym pliku — dokladnie tak,
+# jak zgnila deklaracja zakresu rejestru decyzji (DEC-30). Skanujemy cale drzewo i pytamy o wzorzec, wiec
+# plik powstaly jutro jest objety z dnia, w ktorym powstaje.
+#
+# CZEGO SWIADOMIE NIE PYTAMY: `python`. `.tool-versions` pinuje go z lata (`3.12.7`), a `setup-python`
+# dostaje `3.12` i ma prawo wziac najnowsza latke — to rozna GRANULACJA, nie rozjazd, i wyrownanie ich
+# oznaczaloby pinowanie latki w CI bez powodu.
+WERSJE_W_MATERIALE = {
+    "terraform": re.compile(r"^\s*terraform_version:\s*\"(?P<wersja>[0-9][^\"]*)\"", re.M),
+    "tflint": re.compile(r"^\s*tflint_version:\s*v?(?P<wersja>[0-9]\S*)", re.M),
+    "conftest": re.compile(r"^\s*CONFTEST_WERSJA:\s*\"(?P<wersja>[0-9][^\"]*)\"", re.M),
+}
+
+
+def pinowane_wersje(plik: pathlib.Path) -> dict:
+    """`.tool-versions` jako slownik. Komentarz i pusta linia sa pomijane; pusty wynik rozstrzyga wolajacy."""
+    out = {}
+    for linia in plik.read_text().splitlines():
+        czlony = linia.split("#", 1)[0].split()
+        if len(czlony) >= 2:
+            out[czlony[0]] = czlony[1]
+    return out
+
+
+def literaly_wersji(drzewo: pathlib.Path) -> dict:
+    """{narzedzie: {wersja: [pliki]}} — kazde wystapienie literalu wersji narzedzia w drzewie."""
+    znalezione: dict = {n: {} for n in WERSJE_W_MATERIALE}
+    for p in sorted(drzewo.rglob("*")):
+        if ".git" in p.parts or not p.is_file():
+            continue
+        try:
+            tresc = p.read_text()
+        except (UnicodeDecodeError, OSError):
+            continue
+        for narzedzie, wzorzec in WERSJE_W_MATERIALE.items():
+            for m in wzorzec.finditer(tresc):
+                znalezione[narzedzie].setdefault(m.group("wersja"), []).append(str(p.relative_to(drzewo)))
+    return znalezione
+
+
+def test_wersje_narzedzi() -> None:
+    """Kazdy literal wersji w materiale wdrozenia = wpis w `.tool-versions`; wlasne CI startera bez literalow."""
+    print("\n== wersje narzedzi (jedno zrodlo prawdy) ==")
+
+    tv = ROOT / ".tool-versions"
+    check("rozpakowane repo ma `.tool-versions`", tv.exists())
+    if not tv.exists():
+        return
+    pinowane = pinowane_wersje(tv)
+    # Pusty odczyt to nie „zero rozjazdow", tylko brak wsadu — a bramka bez wsadu jest zielona zawsze.
+    check("`.tool-versions` daje sie odczytac i nie jest pusty",
+          all(pinowane.get(n) for n in WERSJE_W_MATERIALE), f"odczytane: {pinowane}")
+
+    znalezione = literaly_wersji(ROOT)
+    for narzedzie, wzorzec in sorted(WERSJE_W_MATERIALE.items()):
+        trafienia = znalezione[narzedzie]
+        # ANTY-TAUTOLOGIA NA POWIERZCHNI: zero trafien znaczy, ze wzorzec przestal cokolwiek lapic
+        # (zmiana nazwy wejscia akcji, przeniesienie plikow) — czyli petla nizej wykonalaby ZERO asercji
+        # i sekcja swiecilaby na zielono, nie badajac niczego. To jest ten sam tryb awarii, ktory ta
+        # bramka w ogole zamyka, wiec nie wolno mu tu wrocic.
+        check(f"material ma na czym sprawdzic wersje `{narzedzie}` (wzorzec cokolwiek lapie)",
+              bool(trafienia), f"wzorzec: {wzorzec.pattern}")
+        oczekiwana = pinowane.get(narzedzie)
+        if not trafienia or not oczekiwana:
+            continue
+        rozjazd = {w: sorted(set(pliki)) for w, pliki in trafienia.items() if w != oczekiwana}
+        check(f"kazdy literal wersji `{narzedzie}` w materiale = `{oczekiwana}` z `.tool-versions`",
+              not rozjazd, f"inne wersje: {rozjazd}")
+
+    # DRUGA STRONA TEJ SAMEJ PRAWDY — WLASNE CI STARTERA. Rozpakowanie go nie tworzy (`install.sh` czyta
+    # `template/`, `docs/` i `AGENTS.md`), wiec petla wyzej NIGDY go nie zobaczy — a defekt #2079 siedzial
+    # dokladnie tam. Pytamy o dwie rzeczy naraz, bo osobno kazda da sie spelnic pozornie: (a) czy workflow
+    # czyta plik wersji, (b) czy nie trzyma wlasnych literalow, ktore moglyby sie od niego odkleic.
+    # To jest sprawdzenie TEKSTU. Ze na PATH stoi realnie ta wersja, dowodzi krok „potwierdz wersje
+    # terraforma na PATH" w samym workflowie — tekst i zachowanie sa tu rozdzielone celowo.
+    wlasne = STARTER / ".github/workflows/selftest.yml"
+    tresc_wlasnego = wlasne.read_text()
+    check("wlasna bramka startera czyta wersje z `template/tool-versions.example`",
+          "template/tool-versions.example" in tresc_wlasnego)
+    check("wlasna bramka startera potwierdza wersje terraforma na PATH, nie tylko na wejsciu akcji",
+          "terraform version -json" in tresc_wlasnego)
+    swoje = {n: sorted({m.group("wersja") for m in w.finditer(tresc_wlasnego)})
+             for n, w in WERSJE_W_MATERIALE.items()}
+    swoje = {n: v for n, v in swoje.items() if v}
+    check("wlasna bramka startera nie trzyma wlasnych literalow wersji", not swoje, f"literaly: {swoje}")
+
+    # ---------------------------------------------------------------- ANTY-TAUTOLOGIA
+    # Wzorce sa tu sklejane z czlonow, a nie wpisane w calosci — inaczej `literaly_wersji` znalazloby
+    # WLASNE probki tego testu, gdyby kiedys puscic skan na drzewie startera. Ten sam zabieg, co przy
+    # syntetycznych SHA-ach w `test_lint_and_pinning`.
+    with tempfile.TemporaryDirectory(prefix="vpcsc-wersje-") as tmp:
+        atrapa = pathlib.Path(tmp)
+        (atrapa / "zgodny.yml").write_text('  ' + 'terraform_version' + ': "1.15.5"\n')
+        (atrapa / "rozjazd.yml").write_text('  ' + 'terraform_version' + ': "1.14.0"\n')
+        wynik = literaly_wersji(atrapa)
+        check("rozbrojenie: skan WIDZI dwie rozne wersje tego samego narzedzia",
+              sorted(wynik["terraform"]) == ["1.14.0", "1.15.5"], f"{wynik['terraform']}")
+        check("rozbrojenie: skan NIE zmyśla trafien dla narzedzia, ktorego w drzewie nie ma",
+              wynik["conftest"] == {} and wynik["tflint"] == {}, f"{wynik}")
+        (atrapa / ".tool-versions").write_text("terraform 1.15.5\n# komentarz\nconftest 0.56.0\n")
+        odczyt = pinowane_wersje(atrapa / ".tool-versions")
+        check("rozbrojenie: odczyt `.tool-versions` pomija komentarz i czyta pary",
+              odczyt == {"terraform": "1.15.5", "conftest": "0.56.0"}, f"{odczyt}")
+
+
 def test_lint_and_pinning() -> None:
     """tflint (jeśli jest) + guardy na to, czego brak nie widać w zielonym przebiegu.
 
@@ -8129,6 +8247,7 @@ def main() -> int:
     test_acm_naming()
     test_access_levels_ksztalt()
     test_access_levels_uzbrojenie()
+    test_wersje_narzedzi()
     test_lint_and_pinning()
     test_rego()
     test_control_plane_lista()

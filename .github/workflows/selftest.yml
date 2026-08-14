@@ -31,25 +31,61 @@ jobs:
         with:
           python-version: "3.12"
 
-      # Wersja terraforma jest pinowana w .tool-versions startera i MUSI się z nią zgadzać: `terraform test`
-      # i provider-defined functions to floor całego stacku, a cicha zmiana wersji zmienia wynik bramek.
-      - name: odczytaj pinowaną wersję terraforma
+      # ŹRÓDŁEM WERSJI JEST MATERIAŁ SZABLONOWY, a nie osobny plik startera — `template/tool-versions.example`
+      # to dokładnie te bajty, które `install.sh` kładzie wdrożeniu jako `.tool-versions`. Bramka biegnie
+      # więc na wersji, którą wdrożenie realnie uruchomi — z definicji, a nie przez zgodność dwóch deklaracji.
+      #
+      # CO BYŁO ZŁE (#2079). Poprzedni kształt czytał `.tool-versions` w KORZENIU startera — pliku, którego
+      # tam nigdy nie było (`git log --all -- .tool-versions` pusty). `grep` padał, ale krok kończył się
+      # ZIELONO, wyjście było puste, a `setup-terraform` brał swój default (`latest`). Renderer perimetru —
+      # obiekt org-plane — był dowodzony na innej wersji niż ta z sześciu workflowów szablonu. Komentarz
+      # w tym samym kroku twierdził dokładnie odwrotnie, że wersja „MUSI się zgadzać".
+      #
+      # DLACZEGO NIE `.tool-versions` W KORZENIU STARTERA. Byłby DRUGĄ deklaracją tej samej prawdy i nic
+      # nie mierzyłoby różnicy między nią a szablonem — czyli ta sama klasa błędu, tyle że przesunięta
+      # o jeden plik. Kosztem jest to, że sam starter nie ma pliku dla `mise`/`asdf`; w zamian jest
+      # jednoznacznie jedno miejsce, w którym wersję się zmienia (AGENTS.md §Wersje narzędzi).
+      #
+      # FAIL-CLOSED. Brak pliku i pusty odczyt są tu BŁĘDEM, nie stanem „nie ma czego sprawdzać" —
+      # bo bramka bez wsadu przechodzi każdy test pozytywny i nie chroni niczego.
+      - name: odczytaj pinowane wersje narzędzi
         id: wersje
-        run: echo "terraform=$(grep '^terraform ' .tool-versions | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+        run: |
+          plik=template/tool-versions.example
+          [ -f "$plik" ] || { echo "::error::brak $plik — nie ma skąd wziąć wersji narzędzi"; exit 1; }
+          for narzedzie in terraform conftest tflint; do
+            wersja=$(awk -v n="$narzedzie" '$1 == n { print $2; exit }' "$plik")
+            [ -n "$wersja" ] || { echo "::error::$plik: brak wpisu '$narzedzie'"; exit 1; }
+            echo "$narzedzie=$wersja" >> "$GITHUB_OUTPUT"
+            echo "$narzedzie $wersja" >> "$GITHUB_STEP_SUMMARY"
+          done
 
       - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
         with:
           terraform_version: ${{ steps.wersje.outputs.terraform }}
           terraform_wrapper: false # wrapper psuje kody wyjścia, na których stoi selftest
 
+      # DOWÓD, NIE DEKLARACJA. Podanie wersji na wejściu akcji nie jest tym samym, co wersja stojąca na
+      # PATH — a defekt, który ta poprawka zamyka, polegał właśnie na tym, że wejście było puste, a przebieg
+      # zielony. Pytamy więc binarny, nie konfigurację, i porównujemy z pinem.
+      - name: potwierdź wersję terraforma na PATH
+        run: |
+          zmierzona=$(terraform version -json | python3 -c 'import json,sys; print(json.load(sys.stdin)["terraform_version"])')
+          echo "terraform na PATH: $zmierzona (pin: ${{ steps.wersje.outputs.terraform }})" | tee -a "$GITHUB_STEP_SUMMARY"
+          [ "$zmierzona" = "${{ steps.wersje.outputs.terraform }}" ] \
+            || { echo "::error::na PATH stoi terraform $zmierzona, a pin mówi ${{ steps.wersje.outputs.terraform }}"; exit 1; }
+
       - name: narzędzia
+        env:
+          CONFTEST: ${{ steps.wersje.outputs.conftest }}
+          TFLINT: ${{ steps.wersje.outputs.tflint }}
         run: |
           pip install --quiet pyyaml check-jsonschema
           curl -sSfL -o /tmp/conftest.tar.gz \
-            https://github.com/open-policy-agent/conftest/releases/download/v0.56.0/conftest_0.56.0_Linux_x86_64.tar.gz
+            "https://github.com/open-policy-agent/conftest/releases/download/v${CONFTEST}/conftest_${CONFTEST}_Linux_x86_64.tar.gz"
           tar -xzf /tmp/conftest.tar.gz -C /tmp conftest && sudo mv /tmp/conftest /usr/local/bin/
           curl -sSfL -o /tmp/tflint.zip \
-            https://github.com/terraform-linters/tflint/releases/download/v0.63.1/tflint_linux_amd64.zip
+            "https://github.com/terraform-linters/tflint/releases/download/v${TFLINT}/tflint_linux_amd64.zip"
           unzip -q /tmp/tflint.zip -d /tmp && sudo mv /tmp/tflint /usr/local/bin/
           bash <(curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash) \
             > /dev/null && sudo mv ./actionlint /usr/local/bin/

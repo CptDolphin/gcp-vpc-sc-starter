@@ -3542,3 +3542,51 @@ deklaracją; bramki treści startera walidują strukturę workflow, a nie to, cz
 | bramka uruchamiana na drzewie startera, nie na rozpakowanym | `selftest/` zawiera próbki, które **z premedytacją** składają rozjazd (dowodzą, że asercja gryzie). Bramka licząca je jako realne byłaby czerwona na treści poprawnej — ta sama pułapka, co pełne sprawdzenie cytowań decyzji na drzewie startera (DEC-30) |
 | zakaz bezwzględny: zero rozjazdów, naprawiamy wszystkie od ręki | pięć innych akcji stoi dziś na dwóch wersjach naraz, a każda ma własny blast-radius — podbicie `hashicorp/setup-terraform` v3 → v4 to nie ta sama zmiana, co podbicie akcji uwierzytelniającej. Zapadka z rejestrem porównywanym na równość nazywa dług, blokuje szósty rozjazd i wymusza wykreślenie wpisu przy domknięciu; zakaz bez pomiaru wymusiłby pięć niesprawdzonych podbić naraz |
 | zapytać sieci, jaki tag ma wskazany SHA | ta paczka jest świadomie hermetyczna (DEC-30). Sieć dałaby albo bramkę flaky, albo SKIP — czyli bramkę tylko z nazwy. Porównanie materiału samego ze sobą wystarcza: rozjazd jest własnością zbioru pinów, nie faktem o świecie zewnętrznym |
+
+---
+
+## DEC-54 — Wersje narzędzi bierze się z materiału szablonowego; osobny plik w korzeniu startera byłby drugą deklaracją tej samej prawdy
+
+**Decyzja.** Jedynym źródłem wersji narzędzi jest `template/tool-versions.example` — ten sam plik, który
+`install.sh` kładzie wdrożeniu jako `.tool-versions`. Czyta go **własne CI startera** (`selftest.yml`:
+terraform, conftest, tflint) i sprawdza asercja `test_wersje_narzedzi` w selfteście: każdy literał wersji
+w drzewie **rozpakowanym** musi być równy wpisowi z `.tool-versions`, a własna bramka startera nie może
+trzymać literałów w ogóle. W korzeniu startera **nie ma** `.tool-versions` i to jest wybór, nie zaniedbanie.
+
+**Dlaczego w ogóle.** Krok odczytu wersji czytał `.tool-versions` w korzeniu startera — pliku, którego tam
+nigdy nie było (`git log --all -- .tool-versions` pusty od pierwszego commita). `grep` padał, ale krok
+kończył się **zielono**, wyjście było puste, a `hashicorp/setup-terraform` z pustym wejściem instalował
+swój default, czyli `latest`. Renderer perimetru — obiekt org-plane, którego plan zmienia granicę całej
+organizacji — był więc dowodzony na wersji **innej** niż ta, którą uruchamia sześć workflowów szablonu
+(`terraform_version: "1.15.5"`). Komentarz w tym samym kroku twierdził dokładnie odwrotnie: że wersja
+„MUSI się zgadzać". Deklaracja „jedno źródło prawdy o wersjach" z nagłówka `tool-versions.example` była
+prawdziwa jako zamiar i fałszywa jako fakt — nic jej nie mierzyło.
+
+Klasa jest ta sama, co przy DEC-30 i DEC-53: **mechanizm, który przy braku wsadu kończy się sukcesem.**
+Sam kod wyjścia niczego tu nie rozstrzygał, bo brak wejścia nie jest błędem dla `setup-terraform` — jest
+domyślnym trybem. Dlatego poprawka ma dwie połowy i obie są konieczne: fail-closed przy odczycie
+(brak pliku i brak wpisu = `exit 1`) **oraz** potwierdzenie wersji odczytane z binarnego na PATH
+(`terraform version -json`), a nie z wejścia akcji. Pierwsza połowa pilnuje, żeby wsad istniał; druga —
+żeby to, co istnieje, było tym, co realnie się uruchomiło.
+
+**Dlaczego materiał szablonowy, a nie plik startera.** Pytanie brzmi „czy bramka biegnie na wersji, którą
+uruchomi wdrożenie". Przy czytaniu z `template/tool-versions.example` odpowiedź jest **definicyjna**:
+wdrożenie dostaje bajt w bajt ten plik, więc rozjazd nie ma jak powstać. Przy osobnym `.tool-versions`
+w korzeniu startera odpowiedź byłaby **warunkowa** — prawdziwa dopóty, dopóki ktoś pilnuje zgodności dwóch
+plików. Nikt by nie pilnował: dokładnie ta konstrukcja (deklaracja obok materiału, bez pomiaru różnicy)
+wyprodukowała defekt, który ta decyzja zamyka.
+
+**Cena i kto ją płaci.** Starter nie ma pliku, z którego `mise`/`asdf` wzięłyby wersję dla powłoki
+w jego własnym drzewie — kto pracuje nad starterem, ustawia wersję sam (`AGENTS.md` §Niezmienniki wskazuje
+plik). To jest koszt jednorazowy dla autora startera. Wariant odwrotny przenosi koszt na **każde**
+wdrożenie i płaci się go cicho: rozjazdem wersji w dowodzie, który wygląda na zielony.
+
+**Odrzucone alternatywy.**
+
+| wariant | dlaczego nie |
+|---|---|
+| `.tool-versions` w korzeniu startera (spójne z konwencją `mise`/`asdf`) | druga deklaracja tej samej prawdy, bez niczego, co mierzy różnicę — czyli ta sama klasa błędu przesunięta o jeden plik. Żeby była bezpieczna, musiałaby mieć własną bramkę porównującą ją z szablonem; ta bramka byłaby zbędna, gdyby plik był jeden |
+| zostawić odczyt, dołożyć samo `[ -n "$v" ] || exit 1` | zamienia cichą pustkę na czerwień, ale na drzewie startera plik nadal nie istnieje, więc bramka byłaby czerwona **zawsze** — a bramka zawsze czerwona uczy wszystkich ją ignorować (ten sam argument stoi w nagłówku `starter-drift`) |
+| jawna zmienna `env: TERRAFORM_WERSJA` w workflowie | literał wraca, tylko pod inną nazwą, i odkleja się od szablonu przy pierwszym podbiciu. Dodatkowo nie odpowiada na pytanie o conftest i tflint, które mają dokładnie ten sam problem |
+| pinować też `python` | `.tool-versions` pinuje łatkę (`3.12.7`), a `setup-python` dostaje `3.12` i ma prawo wziąć najnowszą łatkę. To różna **granulacja**, nie rozjazd; wyrównanie oznaczałoby pinowanie łatki w CI bez powodu |
+| ufać, że `setup-terraform` z pustym wejściem zawiodłoby głośno | zmierzone: nie zawodzi. Pusta wartość to dla tej akcji „weź default", a default to `latest` — czyli najgorszy możliwy wynik przy najbardziej zielonym przebiegu |
