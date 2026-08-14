@@ -3487,3 +3487,58 @@ które go używają". To zamierzone: to jest dokładnie pytanie, na które wdro�
 | zostawić poziom, ale z `unarmed_accepted_until` | data wymusza powrót do decyzji, której nie ma po co odkładać: alternatywa DEC-29 jest rozstrzygnięta, a wygasanie zamieniłoby ją w przypomnienie o samej sobie |
 | usunąć przy okazji także profil `corp-user-console-access` | profil nie istnieje w organizacji i ma zmierzony dowód działania. Usunięcie go kosztowałoby ten dowód, a nie zdjęło żadnej fałszywej kontroli |
 | poluzować bramkę `vpcsc.perimeter`, żeby przepuściła kasowanie | niepotrzebne od DEC-33 — a gdyby było potrzebne, byłoby to trwałe osłabienie kontroli w zamian za jednorazowe sprzątnięcie |
+
+---
+
+## DEC-53 — Jedna akcja = jedna wersja w materiale, który starter wysyła; pilnuje tego zapadka, nie Dependabot
+
+**Decyzja.** Materiał rozpakowywany do wdrożenia stoi na **jednej wersji każdej akcji**. Akcja
+uwierzytelniająca (`google-github-actions/auth`) jedzie w całości na v3.0.0 — siedem pinów w pięciu
+workflowach przeniesionych z v2.1.13. Jednorodności pilnuje asercja selftestu `rozjazdy_wersji`,
+uruchamiana na **drzewie rozpakowanym**, z rejestrem `ROZJAZDY_WERSJI_UZNANE` porównywanym **na równość**:
+nowy rozjazd czerwieni, a rozjazd domknięty i niewykreślony z rejestru — również.
+
+**Dlaczego jednorodność, a nie „split z notką".** Split nie był niczyim wyborem, tylko skutkiem
+widoczności ścieżek. Dependabot czyta `.github/workflows/*.yml` i pliki `action.yml`; szablon leży
+w `template/**/*.yml.example`, czyli poza jego zasięgiem. Piny szablonu zostają więc na wartości z dnia,
+w którym plik powstał, a repo wdrożone — rozpakowane, czyli w zasięgu — dostaje podbicie w pierwszym
+tygodniowym cyklu. Notka „split jest świadomy" musiałaby brzmieć: *wysyłamy v2.1.13 wiedząc, że nasz
+własny `dependabot.yml` podniesie to do v3.0.0 w ciągu tygodnia*. To nie jest decyzja, to jest zdanie
+sprzeczne z materiałem, który stoi obok w tym samym archiwum.
+
+Przeciek idzie też w drugą stronę i to jest gorsza połowa: plik wniesiony ze startera **przywraca do
+wdrożenia pin, który Dependabot już tam wycofał**. Zmierzone na `actions/checkout` — jedno wdrożenie ma
+v4.4.0 w trzech plikach przyniesionych szablonem i v7.0.1 w pozostałych siedemnastu. Rozjazd w szablonie
+nie zostaje więc w szablonie.
+
+**Dlaczego akurat v3.0.0 i dlaczego to jest tanie.** Rozstrzygnięte pomiarem, nie komentarzem przy pinie
+(ten potrafił kłamać — DEC-30 powstał z tej samej klasy błędu):
+
+* **v2.1.13 i v3.0.0 wydano tego samego dnia, 24 minuty po sobie.** Pięć workflowów nie było „o dwie
+  wersje główne z tyłu w czasie" — oba piny pochodzą z jednego popołudnia;
+* **cała powierzchnia łamiąca v3.0.0** to usunięcie trzech wejść (`retries`, `backoff`, `backoff_limit`)
+  oraz `node20` → `node24`. Trzy usunięte wejścia były w v2 **już martwe** — miały
+  `deprecationMessage: „This field is no longer used"`. Pozostałe 15 wejść i 5 wyjść są identyczne;
+* **żadne z nich nie występuje w tym repozytorium ani razu** (pomiar: 0 trafień). Realnie używane są
+  `workload_identity_provider`, `service_account` oraz `token_format` w obserwatorze — wszystkie
+  nietknięte;
+* **`node24` dotyczy runnera, nie kodu.** Na runnerach hostowanych bez znaczenia; wdrożenie na
+  self-hosted wymaga runnera ≥ 2.327.1. Szablon jedzie `ubuntu-latest`, więc to jest ostrzeżenie dla
+  odtwarzającego, nie warunek.
+
+**Dowód, że to uwierzytelnia — z przebiegów, nie z rozumowania.** Wdrożenie stało już na v3.0.0 z
+**bajt w bajt tymi samymi** blokami `with:`. Dla każdego z pięciu przenoszonych workflowów istnieje
+zielony przebieg, w którym krok akcji uwierzytelniającej ma `conclusion: success` — łącznie 10 kroków
+`Run`/`Post Run`, w tym na torze mutującym granicę (`apply`, `break-glass`). Sam podbity SHA byłby
+deklaracją; bramki treści startera walidują strukturę workflow, a nie to, czy on się uwierzytelnia.
+
+**Odrzucone alternatywy.**
+
+| wariant | dlaczego nie |
+|---|---|
+| split zostaje, powód dopisany przy każdym z pięciu pinów | notka musiałaby zaprzeczać `dependabot.yml` wysyłanemu w tym samym archiwum (wyżej). Utrwala też stan, którego nikt nie wybrał, w formie wyglądającej na wybór |
+| `groups`/`ignore` w `dependabot.yml` szablonu | **narzędzie po złej stronie granicy.** Konfiguracja działa w repo wdrożonym, a tam materiał jest jednorodny właśnie dlatego, że Dependabot tam sięga. Rozjazd siedzi w szablonie i żadne ustawienie w tym pliku go nie zobaczy, bo problemem jest widoczność ścieżki, nie polityka grupowania. `ignore` byłoby wręcz szkodliwe: zamroziłoby wdrożenie na starszym pinie szablonu |
+| rozszerzyć `rozjazdy_pinow` (DEC-30) zamiast osobnej asercji | to są dwa różne pytania o różnych odpowiedziach. Tamta bramka pyta, czy komentarz **kłamie**; dwie prawdziwe wersje kłamstwem nie są i ma na to wprost próbkę anty-tautologii. Zlanie ich zabrałoby możliwość świadomego trzymania dwóch wersji tam, gdzie to uzasadnione |
+| bramka uruchamiana na drzewie startera, nie na rozpakowanym | `selftest/` zawiera próbki, które **z premedytacją** składają rozjazd (dowodzą, że asercja gryzie). Bramka licząca je jako realne byłaby czerwona na treści poprawnej — ta sama pułapka, co pełne sprawdzenie cytowań decyzji na drzewie startera (DEC-30) |
+| zakaz bezwzględny: zero rozjazdów, naprawiamy wszystkie od ręki | pięć innych akcji stoi dziś na dwóch wersjach naraz, a każda ma własny blast-radius — podbicie `hashicorp/setup-terraform` v3 → v4 to nie ta sama zmiana, co podbicie akcji uwierzytelniającej. Zapadka z rejestrem porównywanym na równość nazywa dług, blokuje szósty rozjazd i wymusza wykreślenie wpisu przy domknięciu; zakaz bez pomiaru wymusiłby pięć niesprawdzonych podbić naraz |
+| zapytać sieci, jaki tag ma wskazany SHA | ta paczka jest świadomie hermetyczna (DEC-30). Sieć dałaby albo bramkę flaky, albo SKIP — czyli bramkę tylko z nazwy. Porównanie materiału samego ze sobą wystarcza: rozjazd jest własnością zbioru pinów, nie faktem o świecie zewnętrznym |
