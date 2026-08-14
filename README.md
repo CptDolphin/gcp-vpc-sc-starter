@@ -119,7 +119,7 @@ dywizji**, realny `validate-local.sh` uruchomiony na `examples/division-repo/vpc
 na treść stacku IAM, kontraktu, nazwy obiektów ACM i pinowanie akcji.
 
 Testy są w połowie **negatywne** i to jest sedno: sprawdzają, że bramka **PADA** na złym wejściu — promocja
-przed oknem obserwacji, baseline bez `aiplatform`, plan z `ANY_IDENTITY`/`method: "*"`, ticket bez
+przed oknem obserwacji, baseline bez usługi zadeklarowanej jako niezmiennik, plan z `ANY_IDENTITY`/`method: "*"`, ticket bez
 zatwierdzenia, podmiana projektu w payloadzie, przekroczony budżet atrybutów, projekt płaszczyzny sterowania
 wciągany do perimetru. Bramka, która nigdy nie odrzuca, przechodzi każdy test pozytywny i nie chroni niczego.
 

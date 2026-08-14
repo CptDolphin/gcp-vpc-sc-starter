@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://example.com/vpc-sc/policy.schema.json",
   "title": "Perimeter baseline",
-  "description": "Baseline perimetru — własność centralna. Schema pilnuje kształtu; to, że aiplatform nie może z tej listy wypaść, pilnuje osobno reguła OPA baseline_locked (schema nie widzi, co było wcześniej).",
+  "description": "Baseline perimetru — własność centralna. Schema pilnuje KSZTAŁTU; tego, czy `restricted_services` pokrywa zadeklarowany `baseline_required_services`, pilnują reguły OPA i precondition Terraforma — JSON Schema nie umie porównać dwóch pól ze sobą (DEC-50).",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -67,10 +67,18 @@
         "type": "string",
         "pattern": "^[a-z0-9.-]+\\.googleapis\\.com$"
       },
-      "contains": {
-        "const": "aiplatform.googleapis.com"
+      "uniqueItems": true,
+      "description": "Usługi objęte granicą. KTÓRE z nich są niezmiennikiem tego wdrożenia, mówi `baseline_required_services` — schema nie ma jak porównać dwóch pól, więc pokrycie sprawdzają OPA i precondition Terraforma (DEC-50)."
+    },
+    "baseline_required_services": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9.-]+\\.googleapis\\.com$"
       },
-      "description": "Vertex AI chroniony od dnia zero — `contains` czyni z tego warunek składniowy, nie ustalenie ustne."
+      "uniqueItems": true,
+      "description": "Usługi, których wypadnięcie z `restricted_services` ma być BŁĘDEM PLANU. Klucz nieobecny = [\"aiplatform.googleapis.com\"] (zachowanie sprzed DEC-50, żeby sync startera nie zmieniał zachowania stojących wdrożeń). PUSTA LISTA JEST ODRZUCANA (`minItems: 1`) — perimetr bez ani jednego niezmiennika nikomu niczego nie obiecuje; to jedyny warunek z tej pary, który schema umie wypowiedzieć sama."
     },
     "vpc_accessible_services": {
       "type": "object",

@@ -3886,13 +3886,44 @@ def test_rego() -> None:
     p = sh(["conftest", "test", "--policy", "policy", "--namespace", "vpcsc.onboarding", "bad-promotion.json"], cwd=ROOT)
     check("promocja przed oknem obserwacji jest ODRZUCANA", p.returncode != 0, p.stdout[-800:])
 
-    # NEGATYW: usunięcie aiplatform z baseline'u musi zostać odrzucone (to jest powód istnienia perimetru).
+    # NEGATYW: usunięcie z baseline'u usługi ZADEKLAROWANEJ jako niezmiennik musi zostać odrzucone —
+    # to jest powód istnienia perimetru. Usługę bierzemy Z DEKLARACJI (`baseline_required_services`),
+    # a nie z literału wpisanego tutaj: literał w teście czyniłby z tego asercję o naszym labie, a nie
+    # o mechanizmie, i przestałby cokolwiek mierzyć u wdrożenia chroniącego co innego (DEC-50).
     doc2 = json.loads(decl.stdout)
-    doc2["policy"]["restricted_services"] = [s for s in doc2["policy"]["restricted_services"]
-                                             if s != "aiplatform.googleapis.com"]
+    zadeklarowane = doc2["policy"].get("baseline_required_services") or ["aiplatform.googleapis.com"]
+    usunieta = zadeklarowane[0]
+    doc2["policy"]["restricted_services"] = [s for s in doc2["policy"]["restricted_services"] if s != usunieta]
     (ROOT / "bad-baseline.json").write_text(json.dumps(doc2))
     p = sh(["conftest", "test", "--policy", "policy", "--namespace", "vpcsc.onboarding", "bad-baseline.json"], cwd=ROOT)
-    check("baseline bez aiplatform jest ODRZUCANY", p.returncode != 0, p.stdout[-800:])
+    check(f"baseline bez zadeklarowanej uslugi ({usunieta}) jest ODRZUCANY", p.returncode != 0, p.stdout[-800:])
+
+    # NEGATYW: pusta deklaracja niezmiennika. Perimetr bez ani jednego niezmiennika przechodzi każdy test
+    # pozytywny i nie obiecuje nikomu niczego — bez tej asercji „przenieśliśmy warunek do YAML-a" znaczyłoby
+    # w praktyce „da się go wyłączyć jedną pustą listą".
+    doc3 = json.loads(decl.stdout)
+    doc3["policy"]["baseline_required_services"] = []
+    (ROOT / "bad-baseline-pusty.json").write_text(json.dumps(doc3))
+    p = sh(["conftest", "test", "--policy", "policy", "--namespace", "vpcsc.onboarding", "bad-baseline-pusty.json"], cwd=ROOT)
+    check("pusta lista baseline_required_services jest ODRZUCANA", p.returncode != 0, p.stdout[-800:])
+
+    # NEGATYW: deklaracja wskazująca usługę spoza `restricted_services` opisuje ochronę, której nie ma.
+    doc4 = json.loads(decl.stdout)
+    doc4["policy"]["baseline_required_services"] = ["sqladmin.googleapis.com"]
+    (ROOT / "bad-baseline-klamie.json").write_text(json.dumps(doc4))
+    p = sh(["conftest", "test", "--policy", "policy", "--namespace", "vpcsc.onboarding", "bad-baseline-klamie.json"], cwd=ROOT)
+    check("deklaracja wskazujaca usluge spoza restricted_services jest ODRZUCANA", p.returncode != 0, p.stdout[-800:])
+
+    # ANTY-TAUTOLOGIA (i cały powód, dla którego DEC-50 w ogóle powstał): wdrożenie chroniące CO INNEGO
+    # niż to repozytorium — cudzy perimetr przejęty brownfieldem — deklaruje swój baseline i MA PRZEJŚĆ.
+    # Trzy negatywy wyżej przeszłaby także bramka odrzucająca wszystko; ta asercja to rozstrzyga.
+    doc5 = json.loads(decl.stdout)
+    obce = [s for s in doc5["policy"]["restricted_services"] if s != "aiplatform.googleapis.com"]
+    doc5["policy"]["restricted_services"] = obce
+    doc5["policy"]["baseline_required_services"] = [obce[0]]
+    (ROOT / "obcy-baseline.json").write_text(json.dumps(doc5))
+    p = sh(["conftest", "test", "--policy", "policy", "--namespace", "vpcsc.onboarding", "obcy-baseline.json"], cwd=ROOT)
+    check(f"obcy baseline BEZ aiplatform (niezmiennik = {obce[0]}) PRZECHODZI", p.returncode == 0, p.stdout[-1200:])
 
     # --- anty-samo-zablokowanie: projekty płaszczyzny sterowania -------------------------------------
     # Jedyny tryb awarii tego repozytorium, którego `git revert` NIE COFA: projekt z bucketem stanu wciągnięty

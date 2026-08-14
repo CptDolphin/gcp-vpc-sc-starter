@@ -32,8 +32,8 @@ perimeter:
 # Usługi objęte granicą. aiplatform = Vertex AI (Agent Engine, RAG Engine, Vector Search, Model Garden).
 # DLACZEGO nie samo aiplatform: Vertex realnie czyta i pisze przez inne API — model z GCS, dane z BigQuery,
 # obrazy treningowe z Artifact Registry, notebooki przez notebooks. Perimetr chroniący tylko aiplatform
-# zostawia dane w miejscu, z którego i tak da się je wyprowadzić. Guard OPA (baseline_locked.rego) blokuje
-# usunięcie aiplatform z tej listy.
+# zostawia dane w miejscu, z którego i tak da się je wyprowadzić. Które z tych usług NIE MOGĄ z tej listy
+# wypaść, mówi `baseline_required_services` niżej — nie kod bramek.
 # ZMIANA TEJ LISTY MA WŁASNĄ PROCEDURĘ — docs/8-zmiany-reczne.md §8.4. Powód, dla którego nie jest to
 # zwykła edycja YAML-a: lista nie jest per członek, więc dotyka WSZYSTKICH naraz i w obu konfiguracjach,
 # a usunięcie usługi zdejmuje ochronę bez odpalenia jakiegokolwiek alertu.
@@ -45,6 +45,31 @@ restricted_services:
   - notebooks.googleapis.com
   - logging.googleapis.com
   - monitoring.googleapis.com
+
+# NIEZMIENNIK BASELINE'U — USŁUGI, KTÓRYCH WYPADNIĘCIE Z `restricted_services` MA BYĆ BŁĘDEM PLANU.
+#
+# CO TO ZMIENIA WOBEC „wpisane w kodzie". Do DEC-50 warunek brzmiał dosłownie „baseline musi zawierać
+# aiplatform.googleapis.com" i stał ZASZYTY w PIĘCIU miejscach naraz (`terraform/perimeter.tf`
+# precondition, `terraform/tests/renderer.tftest.hcl`, `policy/perimeter.rego`, `policy/onboarding.rego`,
+# `schemas/policy.schema.json`). Niezmiennik jest słuszny i zostaje — zmienia się to, KTO go wypowiada:
+# wdrożenie deklaruje SWÓJ baseline tutaj, a bramki sprawdzają zgodność z tym, co zadeklarowano.
+# Powód praktyczny: na cudzym perimetrze chroniącym inne usługi (brownfield, docs/4-brownfield-import.md)
+# `plan` nie ruszał w ogóle, więc pierwszą czynnością przejmującego byłby fork logiki bramki.
+#
+# DWA WARUNKI, KTÓRE CZYNIĄ Z TEGO NIEZMIENNIK, A NIE OZDOBĘ (egzekwowane w każdej warstwie):
+#   * lista NIE MOŻE BYĆ PUSTA — perimetr bez ani jednego niezmiennika nikomu niczego nie obiecuje;
+#   * każdy wpis MUSI realnie występować w `restricted_services` wyżej — inaczej deklaracja kłamie
+#     i wygląda na ochronę, której nie ma.
+#
+# KLUCZ NIEOBECNY = `["aiplatform.googleapis.com"]`, czyli zachowanie sprzed DEC-50. Ta wartość domyślna
+# istnieje wyłącznie po to, żeby wdrożenie zsynchronizowane ze starterem NIE zmieniło zachowania w chwili
+# scalenia: `policy.yaml` jest plikiem środowiska i sync go nie dotyka, więc klucz wymagany zaczerwieniłby
+# każde już stojące repo. Nowe wdrożenia deklarują tu swoje usługi wprost.
+#
+# ZMIANA TEJ LISTY = ZMIANA OBIETNICY GRANICY, nie refaktor. Idzie tą samą ścieżką review co
+# `restricted_services` (CODEOWNERS Security, docs/8-zmiany-reczne.md §8.4).
+baseline_required_services:
+  - aiplatform.googleapis.com
 
 # vpc_accessible_services = co wolno wołać Z WNĘTRZA perimetru. Trzymamy 1:1 z restricted_services.
 # DLACZEGO 1:1: pod-skopowana lista cicho psuje bootstrap workloadów (usługa objęta granicą, ale

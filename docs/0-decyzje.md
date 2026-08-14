@@ -3323,3 +3323,65 @@ nie objął.
 | dopisać `expiry-sweep.yml` do listy trzech nazw w selfteście | zamyka ten przypadek i nie zamyka klasy. Następny kanał otwierający pull requesta znów zależałby od czyjejś pamięci — a to jest dokładnie ten tryb awarii, który tu naprawiamy |
 | trzymać gotowy token instalacji w sekrecie | token instalacji wygasa po GODZINIE: sekret działałby do końca dnia i milkł nazajutrz, bez zmiany w kodzie, która by to tłumaczyła. Sekret trzyma klucz prywatny, token powstaje na przebieg (DEC-22) |
 | zamiast pull requesta usuwać członka od razu | usunięcie projektu z konfiguracji egzekwowanej **zdejmuje z niego ochronę**. To jest zmiana granicy i idzie przez te same bramki, co dodanie — pull request jest PROPOZYCJĄ, a okno przeglądu należy do właściciela |
+
+---
+
+## DEC-50 — Niezmiennik baseline'u jest DEKLARACJĄ wdrożenia, nie literałem w kodzie bramki
+
+**Decyzja.** `perimeter/policy.yaml` dostaje klucz `baseline_required_services` — listę usług, których
+wypadnięcie z `restricted_services` jest błędem planu. Wszystkie warstwy bramki czytają **tę samą
+deklarację**: `precondition` w `terraform/perimeter.tf`, test renderera `terraform/tests/renderer.tftest.hcl`,
+reguła OPA na deklaracjach (`policy/onboarding.rego`) i reguła OPA na planie (`policy/perimeter.rego`,
+przez `conftest --data perimeter/policy.yaml`). `schemas/policy.schema.json` pilnuje kształtu listy.
+Klucz nieobecny = `["aiplatform.googleapis.com"]`, czyli zachowanie sprzed tej decyzji.
+
+Niezmiennikiem — czyli tym, czego deklaracja **nie może** obejść — zostają dwa warunki, egzekwowane
+w każdej warstwie: lista **nie może być pusta**, a każdy jej wpis **musi realnie występować**
+w `restricted_services`.
+
+**Dlaczego.** Warunek „baseline musi zawierać `aiplatform.googleapis.com`" był zaszyty w **pięciu**
+miejscach naraz. Zgłoszenie defektu wymieniało trzy, przegląd znalazł czwarte (`policy.schema.json`
+z `contains.const`), a piątym okazał się `renderer.tftest.hcl` — sama liczba miejsc jest tu argumentem:
+literał powielony pięciokrotnie rozjeżdża się przy pierwszej zmianie, a każda warstwa świeci wtedy
+na zielono, broniąc czegoś innego niż sąsiednia.
+
+Rozstrzygnął jednak nie kształt kodu, tylko pomiar: ćwiczenie przejęcia istniejącego perimetru
+(brownfield, `docs/4-brownfield-import.md`) pokazało, że na granicy chroniącej **inne** usługi
+`terraform plan` **nie rusza w ogóle**. Krok 2 tej procedury każe przepisać rzeczywistość do pliku —
+i zrobienie dokładnie tego wywracało niezmiennik. Dwie zasady repozytorium stały w sprzeczności,
+a jedynym wyjściem była edycja Terraforma, dwóch reguł Rego i schematu, czyli **materiału, który
+starter synchronizuje**: pierwszą czynnością przejmującego byłby fork logiki bramki, a każda kolejna
+synchronizacja próbowałaby ten fork cofnąć.
+
+To jest ta sama klasa defektu, co „lista trzech nazw plików" w bramce poświadczenia (DEC-49): warunek
+poprawny w dniu wpisania, wypowiedziany jako WYLICZENIE zamiast jako pytanie o właściwość — więc
+milknący w chwili, w której świat przestaje pasować do listy.
+
+**Co ta zmiana świadomie POGARSZA.** Uczynienie niezmiennika konfigurowalnym osłabia go: usunięcie
+usługi **z samej deklaracji** przechodzi bramki, dopóki lista zostaje niepusta. Nie da się tego zamknąć
+maszyną — deklaracja jest miejscem, w którym organizacja wypowiada intencję, a maszyna sprawdza wyłącznie
+zgodność konfiguracji z tą intencją. Ogranicznikiem jest więc proces, nie kod: plik leży pod CODEOWNERS
+Security i zmiana tej listy idzie tą samą ścieżką review co zmiana `restricted_services`
+(`docs/8-zmiany-reczne.md` §8.4). Dlatego oba warunki („niepusta" i „realnie obecna") są wymagane
+w każdej warstwie, a nie zostawione do rozważenia: bez nich deklaracja przestaje być niezmiennikiem
+i staje się przełącznikiem.
+
+**Dowód, że bramka nadal broni.** Para asercji, obie wymagane — sam negatyw przechodzi bramka odrzucająca
+wszystko, sam pozytyw przechodzi bramka wyłączona:
+
+| wejście | oczekiwanie |
+| --- | --- |
+| usługa zadeklarowana usunięta z `restricted_services` | **odrzucone**, komunikat wymienia usługę z nazwy |
+| `baseline_required_services: []` | **odrzucone** ze zdaniem, dlaczego pusta lista nie jest „brakiem niezmienników" |
+| deklaracja wskazuje usługę spoza `restricted_services` | **odrzucone** (deklaracja opisująca ochronę, której nie ma) |
+| obcy baseline (bez `aiplatform`) spójny z własną deklaracją | **przechodzi** — przed tą decyzją padał, i to jest cały defekt |
+
+**Co odrzucono i dlaczego.**
+
+| wariant | dlaczego nie |
+| --- | --- |
+| zostawić literał, a brownfieldowi kazać edytować pięć miejsc | procedura przejęcia mówiłaby „zacznij od forka bramki", a sync startera cofałby ten fork po cichu, bo diff wyglądałby na wyrównanie do szablonu. Rozjazd wychodziłby wtedy nie na przeglądzie, tylko przy następnym `plan` |
+| usunąć bramkę baseline'u w całości | jedyny tryb awarii, o który tu chodzi, jest NIEMY: perimetr bez swojej usługi wygląda w konsoli na włączony i chroni to, o co nikt nie prosił. Bramka, której brak widać dopiero po incydencie, jest bramką potrzebną |
+| warunkować niezmiennik na `manage_skeleton` (wyłączać go w brownfieldzie) | `policy.yaml` jest dokumentem, na którym stoją WSZYSTKIE guardy, także wtedy, gdy Terraform nie zarządza szkieletem. Wyłączenie warunku dla brownfielda daje wdrożenie przejmujące bez ani jednego niezmiennika — czyli dokładnie ten stan, przed którym broni akapit wyżej |
+| klucz **wymagany** zamiast domyślnego | `policy.yaml` jest plikiem środowiska i synchronizacja startera go nie dotyka. Klucz wymagany zaczerwieniłby każde stojące wdrożenie w chwili scalenia, a naprawa polegałaby na dopisaniu wartości, którą i tak dostaje z domyślnej. Cena: literał `aiplatform.googleapis.com` zostaje w kodzie jako **wartość domyślna** — ale domyślną da się nadpisać deklaracją, a warunku `precondition` nie dało się |
+| trzymać deklarację w zmiennej Terraforma zamiast w `policy.yaml` | zmienną widzi wyłącznie Terraform. Dwie reguły OPA i schemat czytają `policy.yaml` i nie mają dostępu do `tfvars` — warunek znów rozszedłby się na dwa źródła, tyle że po nowej linii podziału |

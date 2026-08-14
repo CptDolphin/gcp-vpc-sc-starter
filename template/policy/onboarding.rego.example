@@ -19,12 +19,34 @@ import rego.v1
 
 # --- baseline ---------------------------------------------------------------------------------------
 
-# Vertex AI jest powodem istnienia perimetru. Ta reguła działa NIEZALEŻNIE od trybu brownfield: nawet gdy
-# Terraform nie zarządza szkieletem, policy.yaml jest dokumentem, na którym opierają się wszystkie guardy —
-# ciche wyjęcie aiplatform zamieniłoby je w atrapę.
+# Usługi, dla których perimetr powstał, są POWODEM jego istnienia i nie mogą wypaść z baseline'u. Reguła
+# działa NIEZALEŻNIE od trybu brownfield: nawet gdy Terraform nie zarządza szkieletem, policy.yaml jest
+# dokumentem, na którym opierają się wszystkie guardy — ciche wyjęcie usługi zamieniłoby je w atrapę.
+#
+# KTÓRE usługi — mówi DEKLARACJA `baseline_required_services`, nie ta reguła (DEC-50). Do DEC-50 stał tu
+# literał `aiplatform.googleapis.com`, przez co wdrożenie chroniące co innego musiało zacząć od forka
+# bramki.
+#
+# Klucz nieobecny = zachowanie sprzed DEC-50. `policy.yaml` jest plikiem środowiska, więc synchronizacja
+# startera go nie dotyka — klucz wymagany zaczerwieniłby każde już stojące wdrożenie w chwili scalenia.
+default baseline_wymagane := ["aiplatform.googleapis.com"]
+
+baseline_wymagane := input.policy.baseline_required_services if {
+	count(input.policy.baseline_required_services) > 0
+}
+
+# Pusta lista NIE oznacza „bez niezmienników" — oznacza plik, którego autor wyłączył bramkę i nie zapisał
+# tego nigdzie jako decyzji. Perimetr bez ani jednego niezmiennika przechodzi każdy test i nie obiecuje
+# nikomu niczego, a `default` wyżej sam z siebie tego nie złapie (pusta lista jest poprawną listą).
 deny contains msg if {
-	not "aiplatform.googleapis.com" in input.policy.restricted_services
-	msg := "policy.yaml: restricted_services musi zawierać aiplatform.googleapis.com (Vertex AI chroniony od dnia zero, DEC-1)"
+	count(input.policy.baseline_required_services) == 0
+	msg := "policy.yaml: baseline_required_services jest pustą listą — perimetr bez ani jednego niezmiennika nie obiecuje nikomu niczego. Wypisz usługi, których wypadnięcie z restricted_services ma być błędem (klucz nieobecny = aiplatform.googleapis.com)"
+}
+
+deny contains msg if {
+	some s in baseline_wymagane
+	not s in input.policy.restricted_services
+	msg := sprintf("policy.yaml: restricted_services musi zawierać %q — usługa jest zadeklarowana w baseline_required_services jako niezmiennik tego perimetru (DEC-1, DEC-50)", [s])
 }
 
 # --- członkowie -------------------------------------------------------------------------------------

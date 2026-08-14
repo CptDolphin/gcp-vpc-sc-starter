@@ -325,8 +325,30 @@ uprawnienia_zadeklarowane(b) := {[op.service, p] |
 
 # --- baseline w planie ------------------------------------------------------------------------------
 
-# Gdy Terraform zarządza szkieletem (greenfield / po imporcie), plan MUSI nadal chronić Vertex AI.
-# Przy brownfield ten zasób w planie nie występuje i regułę pokrywa onboarding.rego na policy.yaml.
+# Gdy Terraform zarządza szkieletem (greenfield / po imporcie), plan MUSI nadal chronić to, dla czego
+# perimetr powstał. Przy brownfield ten zasób w planie nie występuje i regułę pokrywa onboarding.rego
+# na policy.yaml.
+#
+# LISTA POCHODZI Z DEKLARACJI, nie stąd (DEC-50) — `conftest … --data perimeter/policy.yaml` wnosi
+# `policy.yaml` do `data`, tak samo jak `data.baseline_ingress` wyżej. Do DEC-50 stał tu literał
+# `aiplatform.googleapis.com` i był jednym z PIĘCIU miejsc, które trzeba było edytować, żeby przejąć
+# perimetr chroniący co innego.
+#
+# BEZ `--data` reguła zachowuje się jak przed DEC-50 (wymaga aiplatform) — degradacja w stronę bezpieczną:
+# brak deklaracji nie może znaczyć „brak niezmiennika".
+default baseline_wymagane := ["aiplatform.googleapis.com"]
+
+baseline_wymagane := data.baseline_required_services if {
+	count(data.baseline_required_services) > 0
+}
+
+# Pusta deklaracja jest ODRZUCANA wprost, a nie cicho zastępowana wartością domyślną: inaczej komunikat
+# mówiłby o braku `aiplatform` komuś, kto tej usługi w ogóle nie chroni, i wysłał go w złą stronę.
+deny contains msg if {
+	count(data.baseline_required_services) == 0
+	msg := "perimeter/policy.yaml: baseline_required_services jest pustą listą — perimetr bez ani jednego niezmiennika nie obiecuje nikomu niczego"
+}
+
 deny contains msg if {
 	some r in input.planned_values.root_module.resources
 	r.type == "google_access_context_manager_service_perimeter"
@@ -334,8 +356,9 @@ deny contains msg if {
 		object.get(r.values, "status", []),
 		object.get(r.values, "spec", []),
 	)
-	not "aiplatform.googleapis.com" in object.get(cfg, "restricted_services", [])
-	msg := sprintf("%s: konfiguracja perimetru bez aiplatform.googleapis.com w restricted_services", [r.address])
+	some s in baseline_wymagane
+	not s in object.get(cfg, "restricted_services", [])
+	msg := sprintf("%s: konfiguracja perimetru bez %s w restricted_services (usługa zadeklarowana w policy.yaml §baseline_required_services)", [r.address, s])
 }
 
 # --- operacje destrukcyjne --------------------------------------------------------------------------
