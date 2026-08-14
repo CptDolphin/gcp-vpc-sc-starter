@@ -8,7 +8,7 @@ ani jednym, ani drugim. Ten plik zamienia tabele „pole -> skad -> co, gdy brak
 pierwszego (§2) w kod, ktory te tabele EGZEKWUJE.
 
 DLACZEGO NIE ZACZYNAMY OD FORMATU PLIKU, TYLKO OD PYTANIA „SKAD WSAD". Pomiar na zywej organizacji
-(runbook weryfikacji §9.47, powtorzony i rozszerzony w §9.68) mowi rzecz, ktora rozstrzyga ksztalt tego
+(runbook weryfikacji §9.47, powtorzony i rozszerzony w §9.70) mowi rzecz, ktora rozstrzyga ksztalt tego
 narzedzia: **zaden kanal po stronie chmury nie produkuje `owner_group` ani `profiles`**. Etykiety
 projektu nie niosa wlasciciela, `roles/owner` rozwiazuje sie do `user:` (zly typ), a folder-rodzic jest
 proxy DYWIZJI, nie grupy. Inwentarz chmury oddaje wiec dokladnie POLOWE wpisu — te mechaniczna — i to
@@ -24,7 +24,7 @@ Konsekwencja jest taka, ze narzedzie, ktore „jakos" wypelni brakujace pola, je
 Dlatego jedyna dopuszczalna reakcja na brak danych to ODMOWA WYSTAWIENIA WPISU i przekazanie projektu
 na liste „do przypisania". Nigdy placeholder, nigdy domysl, nigdy „uzupelnisz pozniej".
 
-CZTERY TRYBY AWARII ZMIERZONE NA ZYWYM API, KTORE TEN PLIK MUSI PRZEZYC (§9.68)
+CZTERY TRYBY AWARII ZMIERZONE NA ZYWYM API, KTORE TEN PLIK MUSI PRZEZYC (§9.70)
 
   1. ODCZYT INWENTARZA ZAWODZI CICHO W STRONE „PUSTO". `gcloud asset search-all-resources` przy
      wylaczonym API pisze `[]` NA STDOUT i zwraca `rc=1`. Parser czytajacy sam stdout widzi wtedy
@@ -169,7 +169,7 @@ def czytaj_inwentarz_z_pliku(sciezka) -> list:
         raise BladWejscia(
             f"{sciezka}: inwentarz jest PUSTY. To nie jest wynik, to awaria odczytu — organizacja "
             f"wchodzaca pod granice ma projekty z definicji, a `gcloud asset search-all-resources` "
-            f"przy wylaczonym API pisze dokladnie `[]` na stdout i zwraca rc=1 (zmierzone, §9.68).")
+            f"przy wylaczonym API pisze dokladnie `[]` na stdout i zwraca rc=1 (zmierzone, §9.70).")
     return dane
 
 
@@ -268,7 +268,7 @@ def profile_z_wiersza(wiersz: dict) -> list:
 def czytaj_tabele_folderow(sciezka) -> dict:
     """Tabela folder->dywizja. UTRZYMUJE JA CZLOWIEK i to jest jej cala wartosc.
 
-    Zmierzone (§9.47, potwierdzone na 24 projektach w §9.68): folder jest proxy dywizji, ale nazwa
+    Zmierzone (§9.47, potwierdzone na 24 projektach w §9.70): folder jest proxy dywizji, ale nazwa
     folderu nia nie jest — tlumaczenie jest decyzja organizacyjna, ktorej chmura nie przechowuje.
     Automatyczne wyprowadzenie dywizji z nazwy folderu bylo rozwazane i odrzucone: dawaloby dywizje
     zalezna od literowki w nazwie folderu, czyli identyfikator zasobu Terraforma (`<dywizja>-<projekt>`)
