@@ -578,6 +578,27 @@ runs:
       shell: bash
       run: python3 tools/snow_symulator_kontrakt.py
 
+    # FILTR `paths:` JEST CZĘŚCIĄ BRAMKI, A NIE JEJ OPRAWĄ — i przez pierwszy tydzień nikt go nie pilnował.
+    #
+    # Ta sama pomyłka wyszła w tym repozytorium PIĘĆ razy pod rząd (§9.45 runbooka: `iam-bootstrap/**`,
+    # `contrib/**`+`tools/**`, `.github/actions/**`, `violations-sink/**`, `docs/**`+`.starter-sync`)
+    # i za każdym razem wykryto ją tym samym komunikatem — `no checks reported on the branch` — czyli
+    # PO fakcie i ręcznie. Lekarstwem było za każdym razem dopisanie jednej linii do listy. Lista nazw
+    # utrzymywana z pamięci obok mechanizmu, który z niej korzysta, nie przestaje się rozjeżdżać od tego,
+    # że poprawiono ją po raz piąty; szósty raz przyszedł tą samą drogą i objął sześć wejść naraz.
+    #
+    # DLACZEGO TA BRAMKA STOI TUTAJ, a nie w osobnym kroku `validate.yml`: `bramki-tresci` jest wołane
+    # przez OBA tory — `validate.yml` (pull request) i `apply.yml` (push na `main`). Bramka pilnująca
+    # wyzwalaczy, która sama stałaby wyłącznie na torze `pull_request`, byłaby własnym kontrprzykładem.
+    #
+    # `--self-test` mierzy OBA kierunki (matcher, odsiewanie cytatów, fail-closed deklaracji wyjątków),
+    # bo bramka, która nigdy nie odrzuca, przechodzi każdy test pozytywny.
+    - name: guard - filtry paths pokrywaja wejscia bramek
+      shell: bash
+      run: |
+        python3 tools/paths_pokrycie_check.py --self-test
+        python3 tools/paths_pokrycie_check.py
+
     # ZNACZNIK „WSZYSTKIE BRAMKI TREŚCI SIĘ WYKONAŁY". Musi stać jako OSTATNI krok orzekający — na nim
     # i na znaczniku narzędzi stoi cała klasyfikacja werdyktu niżej. Nie da się go postawić „mniej więcej
     # na końcu": bramka, po której go przestawiono, przestaje wpływać na werdykt, choć nadal czerwieni job.
