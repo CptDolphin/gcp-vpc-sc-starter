@@ -78,6 +78,49 @@ def stacki_terraform(root: pathlib.Path) -> list[str]:
     )
 
 
+# ----------------------------------------------- powierzchnia wykonywalna: JEDNO zrodlo listy (#2073)
+#
+# DLACZEGO to nie jest `glob("*.yml")` powtorzony w jedenastu miejscach. GitHub Actions traktuje `.yml`
+# i `.yaml` IDENTYCZNIE — workflow nazwany `promocja-masowa.yaml` BIEGNIE. Bramka widzaca tylko `*.yml`
+# nie widzi go wcale, czyli plik jest WYKONYWANY i NIESPRAWDZANY. Zmierzone na kopii drzewa: wsad
+# z `uses: napastnik/exfiltruj-oidc@main` w pliku `.yaml` przeszedl bramke pinowania SHA na ZIELONO,
+# podczas gdy sasiednia bramka w tym samym pliku (`grep -r … .github`) tego samego wsadu NIE przeoczyla.
+#
+# Stawka nie jest hipotetyczna: pinowanie SHA to jedyna kontrola lancucha dostaw dla akcji obcych,
+# a kod z niepinowanego tagu biegnie z tokenem OIDC konta mutujacego granice CALEJ organizacji.
+# Ten sam glob decydowal tez o tym, czy workflow moze wziac `id-token: write` bez WIF i czy moze
+# zawierac klucz konta uslugowego — obie asercje byly slepe na to samo rozszerzenie.
+#
+# To ta sama klasa, co `stacki_terraform()` wyzej (DEC-34): lista wyprowadza sie z RZECZYWISTOSCI,
+# zamiast byc przepisywana obok mechanizmu, ktory z niej korzysta. Tam ryzykiem byl nowy KATALOG,
+# tutaj — inne ROZSZERZENIE tego samego pliku. Dwunasta kopia globu bylaby dwunasta okazja do pomylki.
+def workflowy(korzen: pathlib.Path) -> list[pathlib.Path]:
+    """Pliki workflow — z DRZEWA i w OBU rozszerzeniach, ktore GitHub honoruje."""
+    return sorted({p for wz in ("*.yml", "*.yaml") for p in (korzen / ".github/workflows").glob(wz)})
+
+
+def akcje_zlozone(korzen: pathlib.Path) -> list[pathlib.Path]:
+    """Definicje akcji zlozonych — `action.yml` ORAZ `action.yaml` (GitHub przyjmuje oba tak samo)."""
+    return sorted({p for wz in ("*/action.yml", "*/action.yaml")
+                   for p in (korzen / ".github/actions").glob(wz)})
+
+
+def powierzchnia_wykonywalna(korzen: pathlib.Path) -> list[pathlib.Path]:
+    """Wszystko, co GitHub URUCHOMI: workflowy + akcje zlozone."""
+    return workflowy(korzen) + akcje_zlozone(korzen)
+
+
+def rglob_wykonywalne(katalog: pathlib.Path) -> list[pathlib.Path]:
+    """REKURENCYJNIE wszystkie YAML-e pod katalogiem — oba rozszerzenia.
+
+    Uzywane tam, gdzie pytanie brzmi „czy gdziekolwiek pod `.github` jest jeszcze jedna kopia",
+    a nie „ktore pliki GitHub uruchomi". Rekursja byla tu wybrana swiadomie (lista przepisana do testu
+    przestaje widziec siodmy plik w dniu, w ktorym ktos go doda) — i dokladnie ten zamysl psul `*.yml`,
+    bo przywracal slepote, ktorej `rglob` mial nie miec.
+    """
+    return sorted({p for wz in ("*.yml", "*.yaml") for p in katalog.rglob(wz)})
+
+
 def strip_heredocs(text: str) -> str:
     """Usuwa treść heredoców, zostawiając sam kod.
 
@@ -2135,7 +2178,7 @@ def test_poswiadczenie_kanalu() -> None:
     #
     # Wyliczanka nazw jest bramka, ktora chroni dokladnie tyle, ile ktos pamietal w dniu jej pisania (DEC-49).
     # Zbior wyprowadzony z tresci obejmuje sam z siebie kazdy NASTEPNY kanal otwierajacy pull requesta.
-    wszystkie = sorted((ROOT / ".github/workflows").glob("*.yml"))
+    wszystkie = workflowy(ROOT)
     OTWIERA_PR = re.compile(r"peter-evans/create-pull-request@|gh pr create\b")
     otwieraja_pr = {p.name for p in wszystkie if OTWIERA_PR.search(bez_komentarzy(p.read_text()))}
 
@@ -3541,8 +3584,7 @@ def test_lint_and_pinning() -> None:
     # jedyny plik akcji, który uruchamia się w CUDZYM repozytorium — czyli ostatni, który wolno zostawić
     # bez guardu na pinowanie.
     uses = []
-    for f in (list((ROOT / ".github/workflows").glob("*.yml"))
-              + sorted((ROOT / ".github/actions").glob("*/action.yml"))
+    for f in (powierzchnia_wykonywalna(ROOT)
               + [STARTER / ".github/actions/contrib/action.yml"]):
         # Zakotwiczone na początku linii: `uses:` pojawia się też WEWNĄTRZ wzorca grepa w guardzie CI,
         # a niezakotwiczony wzorzec wyciągał stamtąd fragmenty regexa i zgłaszał je jako nieprzypięte akcje.
@@ -3553,6 +3595,69 @@ def test_lint_and_pinning() -> None:
     check("guard na pinowanie jest w CI", "actions pinned to a SHA" in tekst_wykonywany("validate.yml"))
     check("jest dependabot (pin bez aktualizacji to martwy pin)",
           (ROOT / ".github/dependabot.yml").exists())
+
+    # --- GUARD PINOWANIA URUCHAMIANY, NIE OGLADANY (#2073) --------------------------------------------
+    #
+    # Asercja wyzej sprawdza DRZEWO wlasnym wzorcem. Nie mowi nic o tym, czy guard, ktory pojedzie
+    # w CI wdrozenia, ten sam wsad ZOBACZY — a to sa dwie rozne rzeczy i wlasnie one sie rozjechaly.
+    # Zmierzone: guard czytal `.github/workflows/*.yml`, wiec plik `promocja-masowa.yaml` z niepinowana
+    # akcja przechodzil na ZIELONO, podczas gdy sasiedni guard w tym samym pliku (`grep -r … .github`)
+    # ten sam plik lapal. Dlatego bramke EKSTRAHUJEMY z akcji i URUCHAMIAMY na wsadach.
+    krok_pin = next((k for k in (yaml.safe_load(
+        (ROOT / ".github/actions/bramki-tresci/action.yml").read_text())["runs"]["steps"])
+        if "pinned to a SHA" in str(k.get("name", ""))), None)
+    check("guard pinowania da sie wyodrebnic z akcji bramek", krok_pin is not None)
+    if krok_pin is not None:
+        with tempfile.TemporaryDirectory() as td:
+            piach = pathlib.Path(td)
+            (piach / ".github/workflows").mkdir(parents=True)
+            (piach / ".github/actions/x").mkdir(parents=True)
+            skrypt = piach / "pin.sh"
+            skrypt.write_text(krok_pin["run"])
+            czysty = ("name: ok\non: [push]\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n"
+                      "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n")
+            (piach / ".github/workflows/ok.yml").write_text(czysty)
+            (piach / ".github/actions/x/action.yml").write_text(
+                "name: x\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: echo ok\n")
+
+            def guard() -> subprocess.CompletedProcess:
+                return sh(["bash", "--noprofile", "--norc", "-eo", "pipefail", str(skrypt)], cwd=piach)
+
+            # POZYTYW: czyste drzewo przechodzi i MOWI, ile plikow zbadalo. Bez licznika „zero naruszen"
+            # jest nieodroznialne od „zero zbadanych" — dwa przeciwne stany o tym samym kolorze.
+            p = guard()
+            check("guard pinowania: czyste drzewo -> zielono i podaje liczbe zbadanych plikow",
+                  p.returncode == 0 and re.search(r"\b2 plikow zbadanych", p.stdout),
+                  (p.stdout + p.stderr)[-300:])
+
+            # NEGATYW `.yaml`: dokladnie ten wsad, ktory przechodzil przed poprawka. Komunikat MUSI
+            # niesc nazwe pliku z rozszerzeniem — inaczej werdykt mowi „linia 8" i nie mowi, gdzie.
+            zly = piach / ".github/workflows/promocja-masowa.yaml"
+            zly.write_text("name: promocja\non: [push]\njobs:\n  apply:\n    runs-on: ubuntu-latest\n"
+                           "    permissions: { id-token: write, contents: read }\n    steps:\n"
+                           "      - uses: napastnik/exfiltruj-oidc@main\n")
+            p = guard()
+            check("guard pinowania: niepinowana akcja w pliku `.yaml` -> CZERWONO z nazwa pliku",
+                  p.returncode != 0 and "promocja-masowa.yaml" in p.stdout, (p.stdout + p.stderr)[-400:])
+            zly.unlink()
+
+            # NEGATYW `action.yaml`: akcje zlozone tez wolaja akcje obce, a glob `*/action.yml` ich nie widzial.
+            (piach / ".github/actions/x/action.yaml").write_text(
+                "name: y\nruns:\n  using: composite\n  steps:\n"
+                "    - uses: napastnik/druga@v1\n")
+            p = guard()
+            check("guard pinowania: niepinowana akcja w `action.yaml` -> CZERWONO",
+                  p.returncode != 0 and "action.yaml" in p.stdout, (p.stdout + p.stderr)[-400:])
+            (piach / ".github/actions/x/action.yaml").unlink()
+
+            # ZEROWE POKRYCIE: „zbadalam 0 plikow" jest bledem, nie sukcesem. Poprzednia wersja
+            # (`2>/dev/null … || true`) meldowala tu ZIELONO — bramka, ktora nic nie zbadala.
+            for f in (piach / ".github/workflows").iterdir():
+                f.unlink()
+            (piach / ".github/actions/x/action.yml").unlink()
+            p = guard()
+            check("guard pinowania: ZEROWE pokrycie -> CZERWONO (cichy brak pokrycia to nie sukces)",
+                  p.returncode != 0 and "ZERO files" in p.stdout, (p.stdout + p.stderr)[-300:])
 
     # --- komentarz wersji nie moze klamac o SHA-u (naglowek `PIN_Z_KOMENTARZEM` ma pomiar i powody) ---
     zrodla = zrodla_z_pinami()
@@ -5834,7 +5939,7 @@ def test_terraform_bez_wrappera() -> None:
     """
     print("\n== terraform bez wrappera (kody wyjscia) ==")
     bez = []
-    for plik in sorted((ROOT / ".github/workflows").glob("*.yml")):
+    for plik in workflowy(ROOT):
         tekst = plik.read_text()
         if "setup-terraform" not in tekst:
             continue
@@ -5846,7 +5951,7 @@ def test_terraform_bez_wrappera() -> None:
 
 def test_workflows() -> None:
     print("\n== workflows ==")
-    wf = sorted((ROOT / ".github/workflows").glob("*.yml"))
+    wf = workflowy(ROOT)
     check("czternascie workflow po rozpakowaniu", len(wf) == 14, str([f.name for f in wf]))
 
     if have("actionlint"):
@@ -5964,7 +6069,7 @@ def test_workflows() -> None:
         return "\n".join(str(k.get("run") or "") for k, _ in kroki_workflow(wf))
 
     ogladane, bez_stanu = [], []
-    for plik in sorted((ROOT / ".github/workflows").glob("*.yml")):
+    for plik in workflowy(ROOT):
         wykonywane = komendy(plik.name)
         # Interesują nas WYŁĄCZNIE ścieżki, które oceniają PEŁNY zbiór członków regułami onboardingu.
         # `contrib/validate-local.sh` buduje wejście po swojemu (jeden zgłaszany członek) i dlatego tu
@@ -6068,7 +6173,7 @@ def test_workflows() -> None:
     # przy pierwszym uruchomieniu, czyli w awarii. Porownujemy wiec zbiory, a nie obecnosc pojedynczych
     # napisow: dopisanie nowej drogi zapisujacej granice bez wiazania IAM ma czerwienic selftest.
     srodowiska_apply = set()
-    for f in sorted((ROOT / ".github/workflows").glob("*.yml")):
+    for f in workflowy(ROOT):
         doc = yaml.safe_load(f.read_text()) or {}
         for job in (doc.get("jobs") or {}).values():
             if not isinstance(job, dict):
@@ -6252,7 +6357,13 @@ def tekst_wykonywany(nazwa_workflow: str) -> str:
         tekst = plik.read_text()
         czesci.append(tekst)
         for uses in re.findall(r"^\s*-?\s*uses:\s*(\./\S+)", tekst, re.M):
-            dolacz(ROOT / uses[2:] / "action.yml")
+            # OBA rozszerzenia, jak w `akcja_lokalna` (#2073). Twarde `action.yml` cicho zwracalo NIC,
+            # gdy akcja lokalna nazywa sie `action.yaml` — a `dolacz` na nieistniejacym pliku po prostu
+            # wraca. Skutek: asercja tekstowa nie widziala tresci akcji i PRZECHODZILA, bo szukanej
+            # frazy „nie ma". Bramka slepa na rozszerzenie milczy tak samo jak bramka spelniona.
+            baza = ROOT / uses[2:]
+            for n in ("action.yml", "action.yaml"):
+                dolacz(baza / n)
 
     dolacz(sciezka)
     return "\n".join(czesci)
@@ -7527,7 +7638,7 @@ def test_werdykt_i_narzedzia() -> None:
     # pierwszej poprawce — a poprawka jest tu suma kontrolna i komunikat werdyktu, czyli akurat te rzeczy,
     # ktorych brak jest niewidoczny do dnia awarii. Liczymy po CALYM `.github`, nie po liscie plikow:
     # lista przepisana do testu przestaje widziec siodmy plik w dniu, w ktorym ktos go doda.
-    kopie = sorted(p.relative_to(ROOT) for p in (ROOT / ".github").rglob("*.yml")
+    kopie = sorted(p.relative_to(ROOT) for p in rglob_wykonywalne(ROOT / ".github")
                    if "conftest" in p.read_text() and "releases/download" in p.read_text())
     check("pobranie conftest stoi WYLACZNIE w akcji `narzedzia` (zero kopii `curl`-a)",
           kopie == [pathlib.Path(".github/actions/narzedzia/action.yml")], f"kopie={kopie}")
@@ -7620,8 +7731,7 @@ def test_werdykt_i_narzedzia() -> None:
     # dokladnie przed slowami, dla ktorych ten tytul istnieje. Asercja idzie po CALEJ powierzchni
     # wykonywalnej, nie po jednym pliku: to jest wlasnosc skladni, wiec dotyczy kazdej adnotacji.
     zle = []
-    for plik in sorted([*(ROOT / ".github/workflows").glob("*.yml"),
-                        *(ROOT / ".github/actions").glob("*/action.yml")]):
+    for plik in powierzchnia_wykonywalna(ROOT):
         for tyt in re.findall(r"::error title=([^:]*)::", plik.read_text()):
             if "," in tyt or "%" in tyt:
                 zle.append(f"{plik.relative_to(ROOT)}: {tyt!r}")
@@ -7633,7 +7743,7 @@ def test_werdykt_i_narzedzia() -> None:
     # — czyli tam, gdzie czerwien czyta ktos SPOZA tego repozytorium — nie istnieje. Lista jest wyliczana
     # z plikow (kto wola `conftest test`), a nie wpisana: wpisana przestalaby widziec piaty kanal.
     bez_werdyktu = []
-    for plik in sorted((ROOT / ".github/workflows").glob("*.yml")):
+    for plik in workflowy(ROOT):
         tekst = plik.read_text()
         if "conftest test" not in tekst:
             continue
@@ -7694,9 +7804,51 @@ def test_werdykt_i_narzedzia() -> None:
         p = sh(["python3", "tools/continue_on_error_check.py"], cwd=ROOT)
         check("continue_on_error_check: flaga w akcji bramek -> czerwono MIMO powodu i `id`",
               p.returncode != 0 and "ZAKAZANE" in p.stdout, p.stdout[-400:])
+
+        # (e) ROZSZERZENIE `.yaml` (#2073). GitHub honoruje je tak samo jak `.yml`, wiec plik BIEGNIE.
+        #     Guard widzacy tylko `*.yml` nie widzial go wcale — jedna linijka w pliku o „drugim"
+        #     rozszerzeniu czynila caly zestaw bramek doradczym, a REST API meldowalo `success`.
+        #
+        #     OBA pliki wracaja do stanu czystego PRZED tym wsadem. Bez przywrocenia `akcja_bramek`
+        #     naruszenie z przypadku (d) zostaje w drzewie i kolejne wsady czerwienia sie JEGO zasluga —
+        #     czyli przechodza niezaleznie od tego, czy badana wlasciwosc dziala. Test tautologiczny
+        #     wyglada identycznie jak dzialajacy, wiec to sie sprawdza tylko przez sprzatanie.
+        wf.write_text(kopia_wf)
+        akcja_bramek.write_text(kopia_akcji)
+        cichy = ROOT / ".github/workflows/cichy.yaml"
+        cichy.write_text("name: cichy\non: [pull_request]\njobs:\n  rozbrojenie:\n"
+                         "    runs-on: ubuntu-latest\n    steps:\n      - continue-on-error: true\n"
+                         "        uses: ./.github/actions/bramki-tresci\n")
+        try:
+            p = sh(["python3", "tools/continue_on_error_check.py"], cwd=ROOT)
+            check("continue_on_error_check: WIDZI plik `.yaml` (nie tylko `.yml`)",
+                  p.returncode != 0 and "cichy.yaml" in p.stdout, p.stdout[-400:])
+        finally:
+            cichy.unlink(missing_ok=True)
+
+        # (f) WYRAZENIE `${{ … }}`. Najgrozniejszy z trzech przypadkow, bo plik JEST skanowany: guard go
+        #     otwieral, czytal te linie i mimo to przepuszczal, bo `prawda()` porownywalo napis
+        #     z {"true","1","yes"}. Statycznie nieocenialne znaczy „nie wiem", a „nie wiem" != „false".
+        wf.write_text(kopia_wf.replace(
+            "    steps:\n",
+            "    steps:\n      - name: proba\n"
+            "        continue-on-error: ${{ github.event_name == 'push' }}\n        run: 'true'\n", 1))
+        p = sh(["python3", "tools/continue_on_error_check.py"], cwd=ROOT)
+        check("continue_on_error_check: `continue-on-error: ${{ … }}` -> czerwono (nieocenialne != false)",
+              p.returncode != 0, p.stdout[-400:])
+
+        # (g) KONTROLA POZYTYWNA NA LICZNIKU. Werdykt ma mowic, ILE plikow zbadano — bez tego „zero
+        #     naruszen" nie odroznia sie od „zero zbadanych", a to sa dwa przeciwne stany o tym samym
+        #     kolorze. Guard, ktory zbadal 0 plikow, meldowal wczesniej sukces.
+        wf.write_text(kopia_wf)
+        p = sh(["python3", "tools/continue_on_error_check.py"], cwd=ROOT)
+        zbadane = re.search(r"continue-on-error: (\d+) plikow", p.stdout)
+        check("continue_on_error_check: werdykt podaje LICZBE zbadanych plikow, i jest > 0",
+              p.returncode == 0 and zbadane is not None and int(zbadane.group(1)) > 0, p.stdout[-300:])
     finally:
         wf.write_text(kopia_wf)
         akcja_bramek.write_text(kopia_akcji)
+        (ROOT / ".github/workflows/cichy.yaml").unlink(missing_ok=True)
 
 
 
