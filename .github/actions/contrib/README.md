@@ -86,14 +86,22 @@ Akcje w przykładzie są **przypięte SHA-em**, a wersja stoi w komentarzu. To n
 waszym tokenem. Nasza akcja `contrib` też ma być przypięta do **SHA wydania**, nie do `main`; wydania
 publikujemy razem z paczką bramek (`publish-gates.yml`), więc pin nie zostaje w tyle w nieskończoność.
 
+Ostatni krok akcji **wysyła zgłoszenie** do repo perimetru, więc job jedzie dopiero **po merge'u** —
+`types: [closed]` plus `merged == true`. Otwarty pull request nie może go odpalić, bo wtedy każdy, kto
+potrafi otworzyć PR w twoim repozytorium, potrafi wygenerować PR w repozytorium perimetru, zanim
+ktokolwiek zdąży spojrzeć. Zdarzenie `closed` niesie przy tym prawdziwy numer PR-a, który akcja wpisuje
+jako `change_ref` — na `push` numeru nie ma i ślad audytowy wskazywałby przebieg zamiast przeglądu.
+
 ```yaml
 name: vpc-sc-request
 on:
   pull_request:
+    types: [closed]
     paths: ["vpc-sc/**"]
 
 jobs:
   request:
+    if: github.event.pull_request.merged == true # zamkniety BEZ merge'a to odrzucony wniosek, nie zgloszenie
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -106,13 +114,22 @@ jobs:
           owner: ORG
           repositories: gcp-vpc-sc
 
-      - uses: ORG/gcp-vpc-sc/contrib@<SHA_WYDANIA> # np. v1.4.0 — NIE @main
+      # ZE STARTERA, nie z repo perimetru (DEC-21): `uses:` rozwiazuje runner TWOIM `GITHUB_TOKEN`-em na
+      # etapie `Set up job`, zanim wykona sie jakikolwiek krok — token aplikacji jeszcze nie istnieje.
+      # Repo perimetru jest prywatne, wiec wskazanie go konczy sie `Unable to resolve action …,
+      # repository not found` i zerem wykonanych krokow.
+      - uses: ORG/gcp-vpc-sc-starter/.github/actions/contrib@<SHA_WYDANIA> # np. v1.4.0 — NIE @main
         with:
           member-file: vpc-sc/prj-example-vertex-prod.yaml
           perimeter-repo: ORG/gcp-vpc-sc
           app-token: ${{ steps.app.outputs.token }}
           # gates-version: gates-2026.07.30-abc1234   # przypnij, jeśli chcesz powtarzalną walidację
 ```
+
+Chcesz dodatkowo walidować **na każdym pushu do PR-a** (błąd widoczny u siebie w sekundy, a nie
+w odrzuconym wniosku)? Rozdziel to na dwa joby — gotowy wzorzec stoi w
+[`examples/division-repo`](../../../examples/division-repo/github/workflows/vpc-sc-request.yml):
+job walidacyjny **nie woła** akcji `contrib`, bo jej ostatni krok wysyła.
 
 `GITHUB_TOKEN` **nie zadziała** — jest zawężony do repozytorium, w którym powstał. Potrzebna jest GitHub App
 zainstalowana na obu repozytoriach.
