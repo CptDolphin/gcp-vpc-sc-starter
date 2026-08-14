@@ -55,6 +55,12 @@ jobs:
           head=$(gh api "repos/$repo/commits/main" --jq .sha)
           echo "recorded: $mine"
           echo "starter main: $head"
+          # Exported on BOTH paths: the closing step cites this sha as the state it found clean, so that
+          # closing the issue is itself evidence rather than a silent disappearance.
+          {
+            echo "head=$head"
+            echo "repo=$repo"
+          } >> "$GITHUB_OUTPUT"
           if [ "$mine" = "$head" ]; then
             echo "behind=0" >> "$GITHUB_OUTPUT"
             echo "In sync with $repo@$head" >> "$GITHUB_STEP_SUMMARY"
@@ -153,20 +159,92 @@ jobs:
               '`commit:` in the same pull request. Do not promote a member to `enforced` until this is',
               'closed: the gates that produce the evidence for that promotion are part of what is stale.',
             ].join('\n');
-            const open = await github.rest.issues.listForRepo({
-              owner: context.repo.owner, repo: context.repo.repo, state: 'open', labels: 'starter-drift',
+            // `state: 'all'`, NIE `'open'` — bo zgłoszenie bywa zamknięte ręcznie przez człowieka („zrobię
+            // to w przyszłym tygodniu"), a repo nadal jest za starterem. Szukanie wyłącznie wśród otwartych
+            // takiego nie znajdzie i utworzy DRUGIE — a stos identycznych zgłoszeń to to samo, co brak
+            // zgłoszenia (nagłówek tego pliku). Znalezione zamknięte otwieramy z powrotem: stan świata się
+            // nie zmienił, więc zgłoszenie ma być otwarte.
+            const wszystkie = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo, state: 'all', labels: 'starter-drift',
+              per_page: 100,
             });
-            const found = open.data.find(i => i.title === title);
+            const found = wszystkie.data.find(i => i.title === title);
             if (found) {
               await github.rest.issues.update({
-                owner: context.repo.owner, repo: context.repo.repo, issue_number: found.number, body,
+                owner: context.repo.owner, repo: context.repo.repo, issue_number: found.number,
+                body, state: 'open',
               });
+              core.info(`zgłoszenie #${found.number} zaktualizowane (było: ${found.state})`);
             } else {
-              await github.rest.issues.create({
+              const nowe = await github.rest.issues.create({
                 owner: context.repo.owner, repo: context.repo.repo, title, body,
                 labels: ['starter-drift'],
               });
+              core.info(`zgłoszenie #${nowe.data.number} utworzone`);
             }
+
+      # DOMKNIĘCIE CYKLU ŻYCIA ZGŁOSZENIA. Bez tego kroku zgłoszenie było otwierane i aktualizowane, ale
+      # nie zamykało go NIC — a ten sam workflow wpisuje do jego treści zdanie „do not promote a member to
+      # `enforced` until this is closed". Warunek niespełnialny ma dwa wyjścia i oba są złe: operator
+      # trzymający się reguły dosłownie nie promuje nigdy, a operator, który zauważy, że zgłoszenie jest
+      # nieaktualne, nauczy się ignorować CAŁY kanał starter-drift — czyli dokładnie ten tryb śmierci
+      # bramki, przed którym ostrzega nagłówek tego pliku. Zmierzone: zgłoszenie wisiało otwarte cztery dni
+      # z `updatedAt == createdAt`, przy sześciu kolejnych przebiegach zakończonych sukcesem.
+      #
+      # DLACZEGO WARUNEK JEST NA RÓWNOŚĆ Z '0', A NIE `!= '1'`. Puste wyjście (krok przerwany, zmieniona
+      # nazwa wyjścia) NIE JEST stanem „nie ma dryfu". Przy `!= '1'` cisza zamykałaby zgłoszenie, czyli
+      # awaria pomiaru wyglądałaby jak zdrowie — ta sama klasa błędu, co bramka bez wsadu kończąca się
+      # sukcesem. Fail-closed: nie wiem, więc nie zamykam.
+      #
+      # DLACZEGO OBA POWODY NARAZ. Wskaźnik i pokrycie decyzji mogą wystąpić osobno; zamknięcie przy jednym
+      # czystym ukryłoby połowę problemu, i to akurat tę połowę, której podniesienie `commit:` nie naprawia.
+      - name: close the drift issue when there is none
+        if: steps.compare.outputs.behind == '0' && steps.decyzje.outputs.brakujace == '0'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        with:
+          script: |
+            const title = 'starter-drift: this repository is behind the starter';
+            const starter = '${{ steps.compare.outputs.repo }}';
+            const head = '${{ steps.compare.outputs.head }}';
+            const open = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo, state: 'open', labels: 'starter-drift',
+              per_page: 100,
+            });
+            const doZamkniecia = open.data.filter(i => i.title === title);
+            // Brak zgłoszenia to NORMALNY stan (repo w synchronizacji od dawna), a nie awaria — krok ma
+            // wtedy nic nie zrobić i nie wywrócić przebiegu. Wyjątek `404` przy `issues.update` na
+            // nieistniejącym numerze zamieniłby zdrowie w czerwień.
+            if (doZamkniecia.length === 0) {
+              core.info('brak otwartego zgłoszenia starter-drift — nie ma czego zamykać');
+              return;
+            }
+            const powod = [
+              'Closed by the scheduled `starter-drift` run: this repository is no longer behind.',
+              '',
+              `* the commit recorded in \`.starter-sync\` matches \`${starter}\` main: \`${head}\``,
+              '* the set of decisions in `docs/0-decyzje.md` covers the starter',
+              '',
+              'Both had to be clean — either one alone would hide half of the problem. If the repository',
+              'falls behind again, the next run reopens THIS issue rather than filing a new one.',
+              '',
+              `Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+            ].join('\n');
+            for (const zgloszenie of doZamkniecia) {
+              // Komentarz PRZED zamknięciem: zamknięcie bez powodu jest cichym znikaniem, a operator,
+              // który zobaczy zamknięte zgłoszenie bez uzasadnienia, nie ma jak odróżnić „naprawione"
+              // od „ktoś posprzątał tablicę".
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: zgloszenie.number, body: powod,
+              });
+              await github.rest.issues.update({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: zgloszenie.number, state: 'closed', state_reason: 'completed',
+              });
+              core.info(`zgłoszenie #${zgloszenie.number} zamknięte (zgodne z ${starter}@${head})`);
+            }
+            core.summary.addRaw(`Closed ${doZamkniecia.length} starter-drift issue(s); in sync with \`${head}\`.`);
+            await core.summary.write();
 
       # Red, not just an issue. An issue nobody assigned is a note; a red scheduled workflow is visible on
       # the repository's front page and in the operator's notifications.
