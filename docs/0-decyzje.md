@@ -3392,6 +3392,52 @@ wszystko, sam pozytyw przechodzi bramka wyłączona:
 
 ---
 
+## DEC-51 — Jednostką review partii dnia pierwszego jest KLASA KSZTAŁTU i zbiór tożsamości, nie wiersz
+
+**Decyzja.** Partia dnia pierwszego (kilkaset istniejących projektów wchodzących do `dry-run` jednym
+ciągiem) idzie w pull requestach po **≤ 25 wpisów, jedna dywizja na partię**, a przedmiotem review jest
+**podsumowanie**, które `tools/dzien_pierwszy.py` wypisuje razem z wpisami:
+
+* **klasy kształtu** — różne `(dywizja, zestaw profili, zestaw access-leveli)`. Jedna klasa = jedna
+  decyzja autoryzacyjna, niezależnie od tego, ilu członków ją realizuje;
+* **zbiór tożsamości** — wszystkie principale partii, odduplikowane, z liczbą wpisów, w których każdy
+  występuje. Świadomie **poza** klasą kształtu;
+* **odmowy** — projekty, które wpisu nie dostały, z powodem;
+* **rachunek** — obiekty, atrybuty, przewidywany czas apply, zapas budżetu.
+
+Wiersze zostają w diffie i nikt ich nie ukrywa. Zmienia się to, **czego się od recenzenta wymaga**.
+
+**Dlaczego nie wiersz.** Zmierzone na katalogu 300 projektów o mieszance profili z pomiaru rozmiaru
+(100 % serving, 40 % konsola, 15 % trening, 5 % omni, 6 dywizji): **300 wpisów to 35 klas kształtu
+i 24 różne tożsamości**, czyli **59 rzeczy do przejrzenia zamiast 300**. Sześć klas pokrywa 154 wpisy,
+a sześć kont serwisowych występuje po 50 razy każde. Recenzent czytający 300 wierszy sprawdza
+w praktyce, czy narzędzie poprawnie wykonało `join` po `project_id` — czyli robi rzecz, której człowiek
+nie robi dobrze, i nie robi rzeczy, której maszyna za niego nie zrobi.
+
+**Dlaczego tożsamości NIE wchodzą do klasy.** Konta serwisowe są per projekt, więc gdyby wchodziły,
+każdy członek miałby własną klasę i podsumowanie zdegenerowałoby się z powrotem do listy wierszy.
+Gdyby ich nie było nigdzie, review przepuszczałoby dowolną tożsamość pod znaną etykietą profilu — a to
+jest gorsze niż brak podsumowania, bo dawałoby poczucie, że partia została przejrzana. Zbiór tożsamości
+jest tym, co naprawdę wpuszczamy do granicy, i jest raportowany osobno, w całości.
+
+**Dlaczego ≤ 25 i jedna dywizja.** Rozmiar wynika z **czasu odzysku po awarii**, nie z czytelności
+diffa: ~67 obiektów ≈ 2,0 min `apply` przy zmierzonym tempie 33,2 zapisu/min, czyli tyle najwyżej stoi
+strumień i tyle najwyżej trzeba powtórzyć. Jedna dywizja na partię sprawia, że odmowa jednego projektu
+ma jednego adresata. Pre-flight liczy się do tego samego: zmierzone 6,8–9,9 s na projekt, więc partia
+25 to ~3,5 min bramki, a partia 300 to ~42 min w jednym checku pull requesta.
+
+**Odrzucone alternatywy.**
+
+| wariant | dlaczego nie |
+|---|---|
+| jeden pull request na wszystkie kilkaset wpisów | nie do przejrzenia w żadnym sensie tego słowa, a rollback cofa całość razem z częścią poprawną. Przy 300 członkach `apply` trwa ~24 min i przez ten czas trzyma single-flight, czyli blokuje każdy zwykły wniosek |
+| jeden pull request na wpis, jak w strumieniu | kilkaset pull requestów, każdy ze swoim przebiegiem bramek i swoim `apply`; wspólny `perimeter/projects.yaml` daje przy równoległych zgłoszeniach 9 ponowień rebase na 10, a single-flight i tak zserializuje `apply`. Koszt review rośnie, informacja nie |
+| review wyłącznie podsumowania, bez wierszy w diffie | podsumowanie jest wyprowadzane z wpisów przez to samo narzędzie, które je generuje. Ukrycie wierszy zabrałoby jedyne miejsce, w którym da się zauważyć, że narzędzie się myli |
+| klasa kształtu z tożsamościami w środku | jedna klasa na członka — patrz wyżej. Podsumowanie przestaje cokolwiek zwijać |
+| osobny tryb wsadowy pre-flightu, tańszy od per-wnioskowego | **niepotrzebny i zmierzony jako niepotrzebny.** Bramka liczy zbiór wchodzących z porównania deklaracji z żywą granicą, więc kosztuje **jeden** odczyt ACM na przebieg niezależnie od N, a listę perimetrów przekazuje checkom plikiem — pojedynczy check nie woła ACM ani razu. Para na dwóch żywych projektach: tryb wsadowy i per-wnioskowy dały **identyczne werdykty**, łącznie z negatywem (`BŁĄD` na strefach DNS), a wsadowy był przy tym szybszy (13,5 s wobec 16,7 s). Osłabianie bramki nie miałoby czego kupić |
+
+---
+
 ## DEC-52 — Access level `break_glass` znika; rozstrzyga, czy obiekt ISTNIEJE w organizacji, a nie czy jest nieużywany
 
 **Decyzja.** Poziom `break_glass` zostaje **usunięty** z `perimeter/access-levels/corp.yaml`. Profil
