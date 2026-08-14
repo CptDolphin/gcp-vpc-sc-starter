@@ -170,6 +170,23 @@ gh workflow run apply.yml -f promocje="<dywizja>-<project_id>" && gh run watch
 6. **Zmierz po apply** (done = zmierzone). Najpierw ta sama sonda co w kroku 0b, tylko z drugim
    oczekiwaniem — to jest **jedyny** dowód, że granica cokolwiek blokuje:
 
+   > **ZIELONY `apply` NIE JEST CHWILĄ, OD KTÓREJ CZŁONEK JEST CHRONIONY.** Zmierzone na żywej granicy:
+   > maszyna w istniejącej sieci promowanego projektu jest rozpoznawana jako „wewnątrz" po **~14 s** od
+   > zapisu w API, ale **egzekwowanie egressu zapada niatomowo** i droga na zewnątrz **migocze jeszcze
+   > przez ~2 minuty** (ostatnie wywołanie, które wyszło: **+135 s**; czysto dopiero od **+146 s**).
+   > Przez ten czas maszyna czyta z wnętrza perimetru **i** wychodzi na zewnątrz — cała ścieżka
+   > eksfiltracji jest przejezdna, tak jak w oknie świeżej sieci, tylko z innej przyczyny.
+   >
+   > Praktycznie: **nie ogłaszaj promocji za zamkniętą po jednym zielonym przelocie.** Wymagaj **dwóch
+   > kolejnych rund** sondy z zamkniętymi wyjściami — jedna runda „PRZESZŁO" nie odróżnia „domknęło się"
+   > od „trafiłem na punkt egzekwowania, który już wie". Jeśli w tym oknie planujesz cokolwiek wypuścić
+   > z projektu, odczekaj te dwie minuty.
+   >
+   > **Czego to okno NIE jest:** to **nie** jest okno świeżej sieci. Sieć, która w promowanym projekcie
+   > już istniała, jest przypisana do granicy od razu — pomiar nie złapał ani jednej rundy w stanie
+   > `OKNO-SWIEZEJ-SIECI` (0 z 32). Okno świeżej sieci otwiera **`networks create`** w projekcie już
+   > będącym członkiem, a nie wejście projektu do konfiguracji egzekwowanej.
+
 ```bash
 gh workflow run boundary-probe.yml -f project=<PROJEKT_CZLONKA> -f expect=blocked && gh run watch
 ```
