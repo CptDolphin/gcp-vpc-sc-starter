@@ -26,7 +26,7 @@ a nie HCL.
 
 | Niezmiennik | Gdzie egzekwowany | Co się stanie po złamaniu |
 |---|---|---|
-| `aiplatform.googleapis.com` w `restricted_services` | `precondition` w `perimeter.tf` + reguła OPA w `onboarding.rego` | perimeter wygląda na włączony i nie chroni tego, dla czego powstał (DEC-1) |
+| Usługi z `policy.yaml §baseline_required_services` są w `restricted_services`; lista niepusta | `precondition` w `perimeter.tf` + `renderer.tftest.hcl` + reguły OPA w `onboarding.rego` i `perimeter.rego`; kształt pilnuje `schemas/policy.schema.json` | perimeter wygląda na włączony i nie chroni tego, dla czego powstał (DEC-1). **Sam warunek jest DEKLARACJĄ, nie literałem** — do DEC-50 stał zaszyty w tych pięciu miejscach naraz i blokował `plan` na cudzym perimetrze chroniącym co innego, czyli na pierwszym kroku przejęcia brownfieldem |
 | `use_explicit_dry_run_spec = true` **zawsze** | `perimeter.tf` | bez tego nie istnieje członek „tylko w dry-run", czyli nie da się etapować onboardingu (DEC-4) |
 | `lifecycle.ignore_changes` na listach szkieletu | `perimeter.tf` | szkielet i zasoby per-członek biją się o te same listy: każdy apply kasuje to, co dodał poprzedni (DEC-6) |
 | Reguły ingress mają `depends_on` na `access_level` | `rules.tf` + asercja selftestu czytająca `terraform graph` | access level jest referowany po NAZWIE, więc bez tej pozycji graf nie ma krawędzi i `destroy` kasuje poziom, gdy reguła jeszcze go używa: `you must first remove the reference`. Wychodzi dopiero przy offboardingu członka, czyli w momencie, w którym nikt nie chce debugować granicy |

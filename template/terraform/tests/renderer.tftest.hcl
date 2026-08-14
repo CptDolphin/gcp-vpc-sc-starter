@@ -267,13 +267,21 @@ run "access_levels_maja_pelne_nazwy" {
   }
 }
 
-# --- 8. Baseline chroni Vertex AI -------------------------------------------------------------------
-run "baseline_zawiera_aiplatform" {
+# --- 8. Baseline chroni to, co WDROŻENIE zadeklarowało ----------------------------------------------
+# PIĄTE miejsce, w którym do DEC-50 stał literał `aiplatform.googleapis.com` — i najłatwiejsze do
+# przeoczenia, bo zgłoszenie defektu wymieniało trzy, a przegląd znalazł cztery. Test czyta tę samą
+# deklarację co precondition, więc nie może się z nią rozjechać.
+run "baseline_zawiera_zadeklarowane_uslugi" {
   command = plan
 
   assert {
-    condition     = contains(local.restricted_services, "aiplatform.googleapis.com")
-    error_message = "Baseline bez aiplatform.googleapis.com — perimetr nie chroniłby Vertex AI (DEC-1)."
+    condition     = length(local.baseline_required_services) > 0
+    error_message = "policy.yaml §baseline_required_services jest pustą listą — perimetr bez niezmiennika nie obiecuje niczego (DEC-50)."
+  }
+
+  assert {
+    condition     = length(local.baseline_services_missing) == 0
+    error_message = "restricted_services nie pokrywa baseline_required_services: ${join(", ", local.baseline_services_missing)} (DEC-1, DEC-50)."
   }
 
   assert {

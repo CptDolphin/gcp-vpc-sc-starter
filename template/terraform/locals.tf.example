@@ -100,6 +100,21 @@ locals {
   restricted_services = local.policy.restricted_services
   accessible_services = local.policy.vpc_accessible_services.same_as_restricted ? local.policy.restricted_services : []
 
+  # NIEZMIENNIK BASELINE'U CZYTANY Z DEKLARACJI, NIE ZASZYTY W KODZIE (DEC-50).
+  #
+  # Wartość domyślna odtwarza zachowanie sprzed tej decyzji. Jest tu, a nie w `perimeter.tf`, bo czytają
+  # ją DWA miejsca (precondition szkieletu i test renderera) — literał w każdym z nich rozjechałby się przy
+  # pierwszej zmianie i wtedy jedna warstwa broniłaby czegoś innego niż druga, obie na zielono.
+  #
+  # `lookup` na CAŁYM dokumencie polityki, nie `try(local.policy.baseline_required_services, …)`: `try`
+  # połknąłby także błąd typu (klucz obecny, ale np. string zamiast listy), a taki plik ma wywrócić plan,
+  # a nie po cichu wrócić do domyślnej listy — czyli udawać, że deklaracja jest respektowana.
+  baseline_required_services = lookup(local.policy, "baseline_required_services", ["aiplatform.googleapis.com"])
+
+  # Usługi zadeklarowane jako niezmiennik, których w `restricted_services` NIE MA. Niepusty zbiór = błąd;
+  # trzymamy go w locals, żeby komunikat bramki mógł je WYMIENIĆ zamiast mówić „coś się nie zgadza".
+  baseline_services_missing = setsubtract(local.baseline_required_services, local.restricted_services)
+
   # Członkowie egzekwowani = ci ze `stage: enforced`. Reszta istnieje wyłącznie w konfiguracji dry-run.
   enforced_members = { for k, m in local.members : k => m if m.stage == "enforced" }
 
