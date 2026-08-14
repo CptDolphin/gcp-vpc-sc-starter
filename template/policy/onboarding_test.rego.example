@@ -992,13 +992,82 @@ test_promocja_z_rowiesnikiem_bez_potwierdzenia_odrzucona if {
 
 # POZYTYW na tym samym wejściu — dowód, że bramka pyta o POTWIERDZENIE, a nie o obecność drugiego członka.
 test_promocja_z_rowiesnikiem_i_potwierdzeniem_przechodzi if {
-	count(deny) == 0 with input as wejscie_promocji_dec27({"unmeasured_peers_ack": 1})
+	count(deny) == 0 with input as wejscie_promocji_dec27({"unmeasured_peers_ack": ["market-prj-example-vertex-prod"]})
 }
 
-# LICZBA, NIE FLAGA: potwierdzenie wystawione na inny zbiór nie przepuszcza tego. Bez tego testu
-# `unmeasured_peers_ack: 1` na stałe działałoby jak „ignoruj" przy dowolnej liczbie rówieśników.
-test_potwierdzenie_o_zlej_liczbie_odrzucone if {
-	count(deny) > 0 with input as wejscie_promocji_dec27({"unmeasured_peers_ack": 2})
+# --- SEDNO DEC-54: CUDZA ZMIANA NIE UNIEWAŻNIA POTWIERDZENIA -----------------------------------------
+#
+# Ten test jest po to, żeby defekt #2076 nie wrócił. Poprzedni kształt reguły żądał RÓWNOŚCI z liczbą
+# wszystkich pozostałych członków w dry-run, więc dopisanie do `projects.yaml` członka NIEZWIĄZANEGO
+# z tym wnioskiem czerwieniło wniosek już zrecenzowany — na torze apply, czyli po merge'u. Przy jednym
+# wspólnym pliku członków (DEC-12) i ~50 onboardingach miesięcznie to bramka nie do przejścia.
+#
+# Wejście różni się od pozytywu WYŁĄCZNIE jednym dopisanym członkiem. Gdyby ten test kiedykolwiek
+# zaczerwienił, znaczy to, że warunek znów pyta o stan globalny zamiast o decyzję wnioskodawcy.
+obcy_onboarding := object.union(healthy_member, {
+	"division": "ops",
+	"project_id": "prj-example-vertex-ops",
+	"project_number": "333333333333",
+})
+
+test_cudzy_onboarding_nie_uniewaznia_potwierdzenia if {
+	potwierdzony := promowany_dec27({"unmeasured_peers_ack": ["market-prj-example-vertex-prod"]})
+	po_cudzym := object.union(
+		wejscie_z_listy([potwierdzony, rowiesnik_w_dryrun, obcy_onboarding]),
+		ze_stanem(
+			{
+				"risk-prj-example-vertex-dev": "dry-run",
+				"market-prj-example-vertex-prod": "dry-run",
+				"ops-prj-example-vertex-ops": "dry-run",
+			},
+			true,
+		),
+	)
+	count(deny) == 0 with input as po_cudzym
+}
+
+# KONTROLA do testu wyżej: na TYM SAMYM wejściu (z cudzym członkiem) brak potwierdzenia nadal odrzuca.
+# Bez niej „cudzy onboarding nie unieważnia" dałoby się spełnić regułą, która nie pyta już o nic.
+test_cudzy_onboarding_nie_rozbraja_bramki if {
+	po_cudzym := object.union(
+		wejscie_z_listy([promowany_dec27({}), rowiesnik_w_dryrun, obcy_onboarding]),
+		ze_stanem(
+			{
+				"risk-prj-example-vertex-dev": "dry-run",
+				"market-prj-example-vertex-prod": "dry-run",
+				"ops-prj-example-vertex-ops": "dry-run",
+			},
+			true,
+		),
+	)
+	count(deny) > 0 with input as po_cudzym
+}
+
+# ZBIÓR, NIE LICZBA: stara postać pola (liczba) nie jest potwierdzeniem w nowym języku i ma odrzucać
+# GŁOŚNO, komunikatem mówiącym co wpisać. Bez tego migracja objawiałaby się surowym błędem typu ze
+# schematu JSON — prawdziwym, ale nieprowadzącym donikąd.
+test_potwierdzenie_jako_liczba_odrzucone if {
+	count(deny) > 0 with input as wejscie_promocji_dec27({"unmeasured_peers_ack": 1})
+}
+
+# Klucz, który nie wskazuje żadnego członka — literówka albo nazwa sprzed offboardingu. Lista, w której
+# nazwa nic nie znaczy, wygląda w diffie na przemyślaną i nie potwierdza ani jednej pary.
+test_potwierdzenie_wskazujace_nieistniejacego_czlonka_odrzucone if {
+	count(deny) > 0 with input as wejscie_promocji_dec27({"unmeasured_peers_ack": ["market-prj-example-vertex-typo"]})
+}
+
+# Wskazanie SAMEGO SIEBIE: para „członek z samym sobą" nie istnieje, więc taki wpis podbija długość
+# listy, a nie jej treść.
+test_potwierdzenie_wskazujace_samego_siebie_odrzucone if {
+	count(deny) > 0 with input as wejscie_promocji_dec27({"unmeasured_peers_ack": ["risk-prj-example-vertex-dev"]})
+}
+
+# CENA TEJ DECYZJI, ZAPISANA JAKO TEST, a nie jako zdanie w dokumencie: pusta lista PRZECHODZI. Jest
+# oświadczeniem „ten członek nie wymienia ruchu z żadnym z rówieśników zostających w dry-run", nie brakiem
+# odpowiedzi — brak POLA odrzuca test wyżej. Bramka nie dowodzi już, że wnioskodawca obejrzał każdego
+# rówieśnika; dowodzi, że wymienił rówieśników realnych. Kto to zmienia, zmienia decyzję (DEC-54), nie test.
+test_pusta_lista_jest_oswiadczeniem_i_przechodzi if {
+	count(deny) == 0 with input as wejscie_promocji_dec27({"unmeasured_peers_ack": []})
 }
 
 # Pierwsza promocja w organizacji: nikt nie zostaje w dry-run, więc nie ma czego potwierdzać. Gdyby
@@ -1011,13 +1080,40 @@ test_promocja_bez_rowiesnikow_nie_wymaga_potwierdzenia if {
 	count(deny) == 0 with input as dobre
 }
 
-# Potwierdzenie-widmo: zostało w pliku, a opisuje zbiór sprzed zmiany. Wygląda jak żywa deklaracja.
-test_nieaktualne_potwierdzenie_bez_rowiesnikow_odrzucone if {
+# Potwierdzenie-widmo w wariancie „nikt nie zostaje w dry-run": pole wymienia klucz, który nie wskazuje
+# żadnego członka. Sprawdzenie kluczy biegnie NIEZALEŻNIE od liczby rówieśników — inaczej pierwszy członek
+# organizacji byłby jedynym miejscem, w którym wolno wpisać nazwę z powietrza.
+#
+# Miejsce po teście, który przed DEC-54 pilnował „liczba != 0 przy zerze rówieśników". Ten warunek zniknął
+# świadomie: przy zbiorze zamiast licznika nie ma czego przepisywać, a pusta lista jest legalna.
+test_potwierdzenie_widmo_bez_rowiesnikow_odrzucone if {
+	widmo := promowany_dec27({"unmeasured_peers_ack": ["market-prj-example-vertex-prod"]})
 	zle := object.union(
-		object.union(healthy_input, {"members": {"example-prj-example-vertex-dev": promowany_dec27({"unmeasured_peers_ack": 2})}, "members_list": [promowany_dec27({"unmeasured_peers_ack": 2})]}),
+		object.union(healthy_input, {"members": {"example-prj-example-vertex-dev": widmo}, "members_list": [widmo]}),
 		ze_stanem({"example-prj-example-vertex-dev": "dry-run"}, true),
 	)
 	count(deny) > 0 with input as zle
+}
+
+# KOMUNIKAT NIE JEST ŚCIANĄ TEKSTU. Przy kilkuset członkach poprzednia postać wypisywała pełną listę
+# kluczy (`%v` na tablicy) — komunikat na 300 nazw, przez który nie widać zdania, które ma coś zmienić.
+# Test mierzy jedno i drugie: próbka jest przycięta, a licznik pominiętych realny.
+test_komunikat_przycina_liste_rowiesnikow if {
+	rowiesnicy := [object.union(healthy_member, {
+		"division": sprintf("d%02d", [i]),
+		"project_id": sprintf("prj-example-vertex-%02d", [i]),
+		"project_number": sprintf("9999999999%02d", [i]),
+	}) |
+		some i in numbers.range(1, 12)
+	]
+	duze := wejscie_z_listy(array.concat([promowany_dec27({})], rowiesnicy))
+	komunikaty := [msg |
+		some msg in deny with input as duze
+		contains(msg, "unmeasured_peers_ack")
+	]
+	count(komunikaty) == 1
+	contains(komunikaty[0], "…i 7 więcej")
+	not contains(komunikaty[0], "prj-example-vertex-09")
 }
 
 # Po zastosowaniu promocji pytanie „co się zepsuje, jeśli włączymy" nie ma adresata — a rówieśnicy w

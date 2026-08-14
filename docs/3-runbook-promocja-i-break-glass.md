@@ -22,7 +22,7 @@ poza pierwszym i ostatnim — tamte sprawdza osobny workflow i człowiek):
 | Czas w dry-run | `dry_run_min_days` z `policy.yaml` (domyślnie 14) | pole `dry_run_since` w pliku członka |
 | Naruszenia w oknie | **0** w ostatnich `clean_window_days` (domyślnie 7) | `violations.json` z workflow `violations-report` |
 | Raport w ogóle istnieje | wpis dla tego członka | brak wpisu = brak dowodu, nie „zero" |
-| **Zakres ciszy potwierdzony** | `unmeasured_peers_ack` = liczba członków zostających w dry-run | nagłówek `violations.md`; DEC-27 — ruch między dwoma członkami w dry-run NIE MOŻE dać wpisu |
+| **Zakres ciszy potwierdzony** | `unmeasured_peers_ack` = klucze członków zostających w dry-run, z którymi ten członek **wymienia ruch** (pusta lista = z żadnym) | nagłówek `violations.md`; DEC-27 + DEC-54 — ruch między dwoma członkami w dry-run NIE MOŻE dać wpisu |
 | Rzadkie przepływy widziane | ocena człowieka | czy w oknie zmieścił się miesięczny batch / kwartalny job? |
 
 > **Nie skracaj okna „bo zielono od trzech dni".** Dry-run rejestruje tylko to, co faktycznie zaszło.
@@ -129,12 +129,22 @@ gh workflow run violations-report.yml -f days=14
    czy jego projekt rozmawia z którymkolwiek z nich — bo tego pytania raport nie zada za Ciebie.
 
 3. Otwórz PR promocyjny: w pliku członka zmień `stage: dry-run` → `stage: enforced` i dopisz
-   `unmeasured_peers_ack: <liczba z raportu>`. **Nic więcej** — dwa pola, oba wskazane przez raport.
-   Wypełnij sekcję *Evidence* w szablonie PR-a.
+   `unmeasured_peers_ack:` — **listę kluczy** tych członków z raportu, z którymi ten projekt wymienia ruch.
+   **Nic więcej** — dwa pola, oba wskazane przez raport. Wypełnij sekcję *Evidence* w szablonie PR-a.
 
-   Bramka odrzuci liczbę inną niż faktyczna, więc pola nie da się „przeklikać": jeśli między wygenerowaniem
-   raportu a merge'em dołączy kolejna dywizja, promocja staje i wracasz do kroku 1. Po zastosowaniu promocji
-   pole jest historią — usuń je przy najbliższej zmianie pliku, inaczej bramka zgłosi je jako nieaktualne.
+   Pusta lista `[]` jest legalna i jest **oświadczeniem**, że ten projekt nie rozmawia z żadnym z nich —
+   pisz ją dopiero po pytaniu z kroku 1, bo to jedyne zdanie w tym pliku, które ktoś podpisuje własnym
+   `approved_by`. Brak pola zatrzymuje promocję; klucz, który nie wskazuje innego członka (literówka,
+   nazwa sprzed offboardingu, własny klucz), też.
+
+   **Cudzy onboarding NIE unieważnia tej listy** (DEC-54). Dopisanie do `projects.yaml` dywizji, której
+   ten wniosek nie dotyczy, zostawia promocję zieloną — do #2076 czerwieniło ją na torze apply, czyli już
+   po merge'u. Zmienia się to tylko wtedy, gdy wypisany członek **zniknie** z pliku: wtedy klucz przestaje
+   wskazywać kogokolwiek i wracasz do kroku 1.
+
+   Po zastosowaniu promocji pole zostaje w pliku jako **zapis przyjętej decyzji** i nie jest już o nic
+   pytane. Nie usuwaj go rutynowo — to nie jest potwierdzenie, które gnije, tylko lista nazw z datą
+   promocji obok (`change_ref`, `approved_by`).
 
    `violations.json` **dołącza się sam**: `validate.yml` pobiera artefakt `violations` z ostatniego udanego
    przebiegu `violations-report.yml` na gałęzi domyślnej i podaje go regułom OPA. Dlatego krok 1 nie jest
@@ -393,7 +403,9 @@ To jest jedyny wiersz na tej liście, którego **nie da się** naprawić dłużs
 pomiar, tylko o pomiar, który tego zdarzenia nie klasyfikuje. Dlatego:
 
 * raport wypisuje na górze listę członków w dry-run i powtarza ją przy każdym z nich,
-* `promotion_gate` żąda pola `unmeasured_peers_ack` **równego** liczbie tych członków (krok 3 niżej),
+* `promotion_gate` żąda pola `unmeasured_peers_ack` wymieniającego **klucze** tych z nich, z którymi
+  promowany członek wymienia ruch (krok 3 niżej) — zbiór, nie licznik, bo licznik unieważniała każda
+  cudza zmiana w tym samym pliku (DEC-54),
 * **jeśli dywizje rozmawiają ze sobą — promuj je jedną kohortą** (jeden pull request, jeden apply). Wtedy
   wchodzą do konfiguracji egzekwowanej razem, zbiór niemierzalnych rówieśników robi się mniejszy, a przepływ
   między nimi przeżywa promocję. To jest zalecenie, nie wymóg — kohorta wiąże termin każdej dywizji

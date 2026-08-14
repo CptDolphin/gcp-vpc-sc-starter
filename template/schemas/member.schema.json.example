@@ -58,9 +58,13 @@
       "format": "date"
     },
     "unmeasured_peers_ack": {
-      "type": "integer",
-      "minimum": 0,
-      "description": "ILU CZŁONKÓW ZOSTAJE W DRY-RUN PO TEJ PROMOCJI — potwierdzenie, że promujący widział zakres, w którym okno obserwacji było ślepe (DEC-27). Konfiguracja dry-run zawiera wszystkich członków naraz, więc ruch między dwoma członkami w dry-run jest dla niej ruchem WEWNĄTRZ perimetru i nie może wygenerować ani jednego wpisu; promocja przenosi jednego z nich i ten sam przepływ staje się naruszeniem egress (zmierzone, dwie maszyny, ten sam cel). Liczba, nie flaga: zgoda wydana na trzech rówieśników przestaje się zgadzać, gdy do dry-run wejdzie czwarty, i promocja staje ponownie. OPA wymaga tego pola WYŁĄCZNIE w chwili promocji (repo mówi `enforced`, ostatni apply mówił co innego) i wyłącznie gdy taki członek w ogóle istnieje; po zastosowaniu promocji pole jest historią, nie parametrem — wtedy trzeba je usunąć, bo opisuje zbiór sprzed zmiany."
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9-]+$"
+      },
+      "description": "Z KTÓRYMI CZŁONKAMI ZOSTAJĄCYMI W DRY-RUN TEN CZŁONEK WYMIENIA RUCH — potwierdzenie, że promujący świadomie przyjmuje zerwanie tych przepływów (DEC-54, wcześniej DEC-27). Konfiguracja dry-run zawiera wszystkich członków naraz, więc ruch między dwoma członkami w dry-run jest dla niej ruchem WEWNĄTRZ perimetru i nie może wygenerować ani jednego wpisu; promocja przenosi jednego z nich i ten sam przepływ staje się naruszeniem egress (zmierzone, dwie maszyny, ten sam cel). ZBIÓR KLUCZY `<dywizja>-<project_id>`, NIE LICZBA: warunek dotyczy tego członka, więc dopisanie do perimetru kogoś niezwiązanego z wnioskiem nie unieważnia potwierdzenia — poprzedni kształt (równość z liczbą wszystkich rówieśników) unieważniał je przy każdym cudzym onboardingu, co przy jednym wspólnym pliku członków i ~50 wnioskach miesięcznie dawało bramkę nie do przejścia (#2076). PUSTA LISTA JEST LEGALNA i jest oświadczeniem, że ten członek nie wymienia ruchu z żadnym z nich; BRAK POLA odrzuca. OPA wymaga tego pola WYŁĄCZNIE w chwili promocji (repo mówi `enforced`, ostatni apply mówił co innego) i wyłącznie gdy jakikolwiek członek w dry-run w ogóle istnieje. Po zastosowaniu promocji pole zostaje jako ZAPIS przyjętej decyzji i nie jest już o nic pytane — nie jest więc potwierdzeniem, które gnije. MIGRACJA ze starych plików: liczbę zastąp listą kluczy (albo `[]`); wpis z liczbą odrzuca schemat i, z czytelniejszym komunikatem, reguła OPA."
     },
     "review_by": {
       "type": "string",
