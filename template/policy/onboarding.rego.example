@@ -443,15 +443,35 @@ deny contains msg if {
 # zostają na zewnątrz i ten sam przepływ staje się naruszeniem egress. Okno nie było ślepe przez przypadek —
 # było ślepe z konstrukcji, i to dokładnie na przepływach, które promocja zrywa.
 #
-# DLACZEGO LICZBA, A NIE FLAGA — dokładnie z tego samego powodu, co `accept_violations_up_to` wyżej: zgoda na
-# trzech rówieśników nie jest zgodą na czwartego. Gdy do dry-run wejdzie kolejna dywizja, liczba przestaje się
-# zgadzać i promocja staje ponownie, zamiast jechać na zgodzie wydanej dla innego zbioru.
+# DLACZEGO ZBIÓR, A NIE LICZBA (DEC-55 — zmiana wobec pierwotnego kształtu DEC-27).
 #
-# DLACZEGO NIE TWARDA BLOKADA przy niepustym zbiorze: zbiór jest pusty wyłącznie wtedy, gdy promowani są
-# wszyscy naraz. W organizacji z dwudziestoma dywizjami i kilkudziesięcioma projektami miesięcznie oznaczałoby
-# to bramkę, której
-# nie da się przejść nigdy — czyli bramkę, którą się wyłącza. Tu nie chodzi o zakazanie promocji, tylko o to,
-# żeby „czysto" nie dało się napisać bez powiedzenia, WOBEC CZEGO było czysto.
+# Pierwsza wersja żądała pola RÓWNEGO liczbie wszystkich pozostałych członków w dry-run. Ten warunek jest
+# ZDANIEM O CAŁYM PORTFELU, a nie o promowanym członku — więc unieważnia go zmiana, której wnioskodawca nie
+# zrobił i nie widział. Przy jednym wspólnym `projects.yaml` (DEC-12) każdy onboarding rusza ten plik, a przy
+# ~50 wnioskach miesięcznie to ~2-3 unieważnienia dziennie. Bramka biegnie na OBU torach (DEC-16), więc
+# promocja poprawna w chwili merge'u zostawała odrzucona na apply — zmiana leżała w gałęzi domyślnej i nie
+# dało się jej zastosować bez kolejnej edycji tej gałęzi.
+#
+# ZMIERZONE 2026-08-14 (#2076) na żywych deklaracjach tego repozytorium, jednym dopisanym członkiem, którego
+# wniosek t-alpha nie dotyczył: potwierdzenie `3` przestało wystarczać (`unmeasured_peers_ack: 4 (jest: 3)`).
+# To nie jest usterka literałów — to własność warunku „równość z licznikiem globalnym", którą przy trzech
+# członkach widać jako drobiazg, a przy kilkuset jako bramkę nie do przejścia. Bramka nie do przejścia jest
+# bramką, którą się wyłącza — czyli utratą CAŁEJ kontroli, nie jej osłabieniem.
+#
+# CO ZOSTAJE BEZ ZMIAN: nie da się promować bez świadomego przyjęcia niezmierzonych par. Zmienia się
+# JEDNOSTKA przyjęcia. Wnioskodawca wymienia KLUCZE członków, z którymi ten członek wymienia ruch, zamiast
+# przepisywać licznik z raportu. Pusta lista jest legalna i jest OŚWIADCZENIEM („z żadnym z nich nie
+# rozmawiamy"), a nie brakiem odpowiedzi — dlatego brak pola nadal odrzuca.
+#
+# DLACZEGO TO JEST ODPORNE NA CUDZĄ ZMIANĘ. Oba warunki niżej są MONOTONICZNE względem dopisania członka:
+# dopisanie kogokolwiek do `projects.yaml` nie potrafi unieważnić listy, która była poprawna. Warunek
+# „równość z licznikiem" tej własności nie miał i mieć nie mógł.
+#
+# CZEGO TRACIMY — nazwane wprost: bramka NIE dowodzi już, że wnioskodawca obejrzał KAŻDEGO rówieśnika.
+# Dowodzi, że wymienił rówieśników realnych i przyjął ich świadomie. Kompletności nie da się utrzymać
+# w mechanizmie odpornym na cudzą zmianę: „wymień wszystkich" znaczy „przepisz stan globalny", czyli dokładnie
+# to, co ten defekt. Ciężar kompletności przechodzi na raport (pełna lista rówieśników) i na review promocji,
+# a przy skali kilkuset członków na ludzką bramkę mutatora (DEC-17), która stoi w CHWILI skutku.
 #
 # DLACZEGO NIE `promotion_waivers`: tamten wyjątek jest rzadki i należy do Security (policy.yaml). Ten warunek
 # dotyczy KAŻDEJ promocji, a przy ~50 wnioskach miesięcznie stały udział Security kończy się recenzją
@@ -462,31 +482,57 @@ niemierzalni_rowiesnicy(name) := [p |
 	mp.stage != "enforced"
 ]
 
+# Ile kluczy wchodzi do komunikatu. Reszta jako „…i N więcej": przy kilkuset członkach pełna lista jest
+# ścianą tekstu, przez którą nie widać zdania, które ma coś zmienić — a komplet i tak jest w raporcie.
+prog_probki_rowiesnikow := 5
+
+probka_rowiesnikow(name) := concat(", ", sort(niemierzalni_rowiesnicy(name))) if {
+	count(niemierzalni_rowiesnicy(name)) <= prog_probki_rowiesnikow
+}
+
+probka_rowiesnikow(name) := sprintf("%s …i %d więcej", [widoczne, reszta]) if {
+	klucze := sort(niemierzalni_rowiesnicy(name))
+	count(klucze) > prog_probki_rowiesnikow
+	widoczne := concat(", ", array.slice(klucze, 0, prog_probki_rowiesnikow))
+	reszta := count(klucze) - prog_probki_rowiesnikow
+}
+
+# Kształt, nie zawartość: pole ma BYĆ i ma być listą. Stare pliki niosące LICZBĘ wpadają tutaj i dostają
+# komunikat mówiący, co wpisać — a nie surowy błąd typu ze schematu.
+potwierdzenie_jest_lista(m) if is_array(object.get(m, "unmeasured_peers_ack", null))
+
 deny contains msg if {
 	some name, m in input.members
 	m.stage == "enforced"
 	not granica_juz_wlaczona(name)
 	n := count(niemierzalni_rowiesnicy(name))
 	n > 0
-	object.get(m, "unmeasured_peers_ack", -1) != n
+	not potwierdzenie_jest_lista(m)
 	msg := sprintf(
-		"projects.yaml[%s]: po tej promocji %d członków zostaje w dry-run (%v) — przepływy między nimi a tym członkiem NIE MOGŁY dać ani jednego wpisu w oknie, a po promocji staną się naruszeniem egress. Potwierdź, że je przeszedłeś: unmeasured_peers_ack: %d (jest: %v)",
-		[name, n, niemierzalni_rowiesnicy(name), n, object.get(m, "unmeasured_peers_ack", "brak")],
+		"projects.yaml[%s]: po tej promocji %d członków zostaje w dry-run (%s) — przepływy między nimi a tym członkiem NIE MOGŁY dać ani jednego wpisu w oknie, a po promocji staną się naruszeniem egress. Wypisz w `unmeasured_peers_ack` klucze tych, z którymi ten członek wymienia ruch; pusta lista `[]` jest legalna i jest OŚWIADCZENIEM, że z żadnym — pełna lista rówieśników jest w raporcie naruszeń (jest: %v)",
+		[name, n, probka_rowiesnikow(name), object.get(m, "unmeasured_peers_ack", "brak pola")],
 	)
 }
 
-# Potwierdzenie, które przestało cokolwiek potwierdzać. Zostawione po promocji wygląda w pliku jak żywa
-# deklaracja, a opisuje zbiór sprzed zmiany — ten sam tryb awarii, co wyjątek-widmo niżej.
+# Potwierdzenie wskazujące członka, którego nie ma — zwykle literówka w kluczu albo klucz sprzed offboardingu.
+# Fail-loud z tego samego powodu, co wyjątek-widmo niżej: lista, w której nazwa nic nie znaczy, wygląda
+# w diffie na przemyślaną, a nie potwierdza ani jednej pary. Wskazanie SAMEGO SIEBIE jest tym samym błędem:
+# para „członek z samym sobą" nie istnieje, więc taki wpis podbija długość listy, nie jej treść.
 deny contains msg if {
 	some name, m in input.members
 	m.stage == "enforced"
 	not granica_juz_wlaczona(name)
-	count(niemierzalni_rowiesnicy(name)) == 0
-	object.get(m, "unmeasured_peers_ack", 0) != 0
+	some klucz in object.get(m, "unmeasured_peers_ack", [])
+	not inny_czlonek_perimetru(name, klucz)
 	msg := sprintf(
-		"projects.yaml[%s]: unmeasured_peers_ack: %v, a żaden członek nie zostaje w dry-run — potwierdzenie jest nieaktualne, usuń pole",
-		[name, m.unmeasured_peers_ack],
+		"projects.yaml[%s]: unmeasured_peers_ack wskazuje `%v`, a to nie jest INNY członek perimetru — potwierdzenie wymienia klucze z perimeter/projects.yaml w postaci `<dywizja>-<project_id>`",
+		[name, klucz],
 	)
+}
+
+inny_czlonek_perimetru(name, klucz) if {
+	klucz != name
+	input.members[klucz]
 }
 
 # Wyjątek dla członka, którego nie ma — zwykle literówka w nazwie pliku. Cichy no-op wyglądałby jak

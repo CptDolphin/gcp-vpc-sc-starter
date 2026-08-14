@@ -30,6 +30,10 @@ on:
     branches: [main]
     paths:
       - "perimeter/projects.yaml"
+      # Własna definicja: ten workflow FORCE-PUSHUJE cudze gałęzie, więc zmiana jego warunków brzegowych
+      # (lista prefiksów gałęzi, wymagana etykieta, `--force-with-lease`) jest zmianą uprawnień bota.
+      # Bez tej ścieżki wchodziła na `main` bez ani jednego przebiegu, który by ją wykonał.
+      - ".github/workflows/intake-rebase.yml"
   workflow_dispatch:
 
 permissions:

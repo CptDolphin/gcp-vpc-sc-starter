@@ -53,6 +53,33 @@ on:
       #     ze alert CRITICAL o 3:00 daje spis tresci zamiast procedury.
       - "docs/**"
       - ".starter-sync"
+      # SZÓSTE wystąpienie — i ostatnie dopisywane z ręki. Cztery pliki w trzech klasach leżały poza
+      # WSZYSTKIMI filtrami `paths:` w repozytorium: pull request dotykający wyłącznie któregoś z nich
+      # dostawał „no checks reported on the branch", tak samo jak pięć razy wcześniej. Znalazł je nie
+      # człowiek, tylko `tools/paths_pokrycie_check.py`, i to jest cała różnica wobec tamtych pięciu razy:
+      #   * `.tflint.hcl` — JEDYNE wejście trzech kroków `tflint` niżej, na wszystkie stacki. Zdjęcie
+      #     `plugin "google"` albo podniesienie progu rozbraja analizę na stałe i niewidocznie: `tflint`
+      #     zostaje zielony, bo nie ma już czego znaleźć (nagłówek tego pliku opisuje ten tryb awarii);
+      #   * `.github/CODEOWNERS` — wsad `tools/codeowners_check.py`, jedynego mechanizmu rozdzielającego
+      #     zgodę od wniosku, odkąd `require_code_owner_reviews` jest w tym planie niedostępne (DEC-23);
+      #   * `tests/**` — wsad kontraktu symulatora ServiceNow (`tools/snow_symulator_kontrakt.py`),
+      #     dwa pliki: `snow-approved.json` i `symulator-instancja.json`.
+      # Ścieżka pliku-korzenia musi być wypisana wprost: żaden z istniejących wzorców katalogowych
+      # nie łapie pliku leżącego w korzeniu repozytorium.
+      #
+      # `.gitattributes` i `AGENTS.md` NIE weszły tu, choć pierwszy pomiar je wskazywał: obie nazwy
+      # padają wyłącznie w PROZIE nagłówków (`projects_file.py`, `decisions_check.py`), a nie w kodzie,
+      # który je otwiera. Skaner odsiewa docstringi właśnie po to — bramka żądająca ścieżki dla pliku,
+      # którego nikt nie czyta, uczy zespołu dopisywania wyjątków i psuje samą siebie.
+      #
+      # `.github/*` zamiast samego `.github/CODEOWNERS`: pliki konfiguracyjne leżące BEZPOŚREDNIO
+      # w `.github/` to jedna klasa (CODEOWNERS, deklaracja pominięć bramki `paths`, dependabot),
+      # a wzorzec `*` nie przechodzi przez ukośnik, więc nie dubluje `.github/workflows/**` ani
+      # `.github/actions/**` niżej. Wypisywanie ich pojedynczo byłoby tą samą listą z pamięci,
+      # od której to zgłoszenie odchodzi.
+      - ".tflint.hcl"
+      - ".github/*"
+      - "tests/**"
   workflow_dispatch:
 
 permissions:
