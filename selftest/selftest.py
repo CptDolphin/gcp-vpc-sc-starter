@@ -2916,15 +2916,37 @@ def test_alerty() -> None:
     check("kotwica z komunikatu rozjazdu istnieje w docs/7-alerty.md",
           "rozjazd-granicy-z-deklaracja" in kotwice_runbook, str(sorted(kotwice_runbook)))
 
-    # 9. PRODUCENT MUSI PATRZEĆ NA TE SAME KATALOGI, CO WYZWALACZ `apply.yml`. Rozjazd znaczy: zmiana
-    # w katalogu, który uruchamia apply, nie jest liczona jako zaległa (albo odwrotnie — wieczna zaległość
-    # od pliku, którego apply nigdy nie zastosuje).
+    # 9. KAŻDY KATALOG OBSERWOWANY MUSI URUCHAMIAĆ `apply.yml` — kierunek, na którym stoi sens metryki.
+    #
+    # Katalog liczony jako zaległy, którego apply NIE uruchamia, daje WIECZNĄ zaległość: licznik rośnie,
+    # apply nigdy nie rusza, alert `apply zalega` pali się bez winnego i po tygodniu zostaje wyciszony.
+    #
+    # DLACZEGO NIE RÓWNOŚĆ, choć asercja tak brzmiała do DEC-55. Bo równość była KOINCYDENCJĄ, nie
+    # niezmiennikiem: obie listy znaczyły co innego i przez przypadek miały tę samą treść. Wyzwalacz
+    # `apply.yml` odpowiada na pytanie „czy trzeba jeszcze raz przepuścić BRAMKI" (a bramki czytają
+    # `tools/`, `policy/`, `schemas/`, `docs/`, `.github/`), a `--sciezki` obserwatora na pytanie „czy
+    # DEKLARACJA GRANICY rozjechała się z zastosowanym stanem". Literówka w `docs/` uruchamia apply
+    # i słusznie — ale nie jest zaległością granicy, więc liczona jako zaległość byłaby fałszywym
+    # alarmem. Odkąd wyzwalacz pokrywa wejścia własnych bramek (DEC-55), równość wymuszałaby jedno
+    # z dwojga: albo fałszywe zaległości, albo zwężenie wyzwalacza z powrotem do stanu bez bramek.
+    #
+    # Kierunek nośny zostaje więc jeden — zawieranie — i jest sprawdzany ostrzej niż poprzednia
+    # równość: pusty zbiór obserwowanych też jest błędem (bramka bez wsadu przechodzi każdy test
+    # pozytywny), a każdy katalog spoza wyzwalacza jest nazwany z osobna.
     apply_wf = yaml.safe_load((ROOT / ".github/workflows/apply.yml").read_text())
     sciezki_apply = {p.split("/")[0] for p in apply_wf[True]["push"]["paths"]}
     domyslne = re.search(r'"--sciezki", default="([^"]+)"', watch_py)
-    check("obserwator patrzy na te same katalogi co wyzwalacz apply.yml",
-          domyslne and set(domyslne.group(1).split(",")) == sciezki_apply,
-          f"apply={sorted(sciezki_apply)} watch={domyslne.group(1) if domyslne else None}")
+    obserwowane = set(domyslne.group(1).split(",")) if domyslne else set()
+    check("obserwator ma NIEPUSTY zbior katalogow (pustka to nie jest 'zero zaleglosci')",
+          bool(obserwowane), f"watch={domyslne.group(1) if domyslne else None}")
+    check("kazdy katalog obserwowany URUCHAMIA apply.yml (inaczej wieczna zaleglosc)",
+          obserwowane <= sciezki_apply,
+          f"poza wyzwalaczem={sorted(obserwowane - sciezki_apply)} "
+          f"apply={sorted(sciezki_apply)} watch={sorted(obserwowane)}")
+    # Kontrola pozytywna do powyższego: zawieranie jest spełnione także przez zbiór pusty i przez zbiór
+    # przypadkowy. Deklaracja granicy leży w tych dwóch katalogach i to one mają być obserwowane.
+    check("obserwator liczy zaleglosc DEKLARACJI GRANICY (perimeter + terraform)",
+          obserwowane == {"perimeter", "terraform"}, f"watch={sorted(obserwowane)}")
 
     # 10. DWA JOBY, DWIE TOŻSAMOŚCI. Gdyby liczył i pisał jeden job, konto `plan` — impersonowalne
     # z KAŻDEGO pull requesta — zyskałoby `timeSeries.create`, czyli prawo do uciszenia wszystkich alertów.
