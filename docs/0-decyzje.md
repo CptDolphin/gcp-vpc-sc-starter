@@ -2008,6 +2008,12 @@ albo runnera odpada bez dyskusji)
 
 ## DEC-27 — Raport i bramka promocji mówią, WOBEC CZEGO okno było czyste
 
+> **Mechanizm potwierdzenia zastąpiony przez DEC-55.** Ustalenie tej decyzji — że okno obserwacji jest ślepe
+> na pary między członkami w dry-run i że promocja wymaga świadomego przyjęcia tej ciszy — **zostaje w mocy
+> w całości**. Zmienia się wyłącznie JEDNOSTKA potwierdzenia: zbiór kluczy zamiast równości z licznikiem
+> globalnym. Powód i pomiar w DEC-55; akapit „dlaczego liczba, a nie flaga" niżej opisuje stan sprzed tamtej
+> zmiany i zostaje jako zapis rozumowania, które nie przeżyło zderzenia ze skalą.
+
 **Decyzja.** Raport naruszeń wypisuje listę członków pozostających w konfiguracji dry-run, a `promotion_gate`
 wymaga od promowanego wpisu pola `unmeasured_peers_ack` **równego** liczbie członków, którzy po tej promocji
 zostaną w dry-run. Pole jest liczbą, nie flagą; jest wymagane wyłącznie w chwili promocji (repo mówi
@@ -3590,6 +3596,100 @@ wdrożenie i płaci się go cicho: rozjazdem wersji w dowodzie, który wygląda 
 | jawna zmienna `env: TERRAFORM_WERSJA` w workflowie | literał wraca, tylko pod inną nazwą, i odkleja się od szablonu przy pierwszym podbiciu. Dodatkowo nie odpowiada na pytanie o conftest i tflint, które mają dokładnie ten sam problem |
 | pinować też `python` | `.tool-versions` pinuje łatkę (`3.12.7`), a `setup-python` dostaje `3.12` i ma prawo wziąć najnowszą łatkę. To różna **granulacja**, nie rozjazd; wyrównanie oznaczałoby pinowanie łatki w CI bez powodu |
 | ufać, że `setup-terraform` z pustym wejściem zawiodłoby głośno | zmierzone: nie zawodzi. Pusta wartość to dla tej akcji „weź default", a default to `latest` — czyli najgorszy możliwy wynik przy najbardziej zielonym przebiegu |
+
+---
+
+## DEC-55 — Potwierdzenie niezmierzonych par jest ZBIOREM kluczy, a nie równością z licznikiem globalnym
+
+**Decyzja.** `unmeasured_peers_ack` w pliku członka jest **listą kluczy** (`<dywizja>-<project_id>`) tych
+członków zostających w dry-run, z którymi promowany członek **wymienia ruch**. `promotion_gate` sprawdza dwie
+rzeczy i tylko te dwie: pole **jest** i jest listą (gdy jakikolwiek członek zostaje w dry-run), a **każdy**
+wypisany klucz wskazuje **innego, istniejącego** członka perimetru. Pusta lista jest legalna i jest
+oświadczeniem „z żadnym z nich"; **brak pola nadal zatrzymuje promocję**. Komunikat bramki wypisuje najwyżej
+pięć kluczy rówieśników i „…i N więcej" — komplet zostaje w raporcie naruszeń, do którego bramka odsyła.
+Po zastosowaniu promocji pole zostaje jako **zapis przyjętej decyzji** i nie jest już o nic pytane.
+
+**Problem, który to zamyka — defekt SKALI, zmierzony, nie przewidziany.** Poprzedni warunek żądał równości
+`unmeasured_peers_ack` z liczbą **wszystkich** pozostałych członków nie-`enforced`. To jest zdanie o całym
+portfelu, a nie o promowanym członku — więc unieważnia je zmiana, której wnioskodawca nie zrobił i nie
+widział. Trzy własności repozytorium składają się tu w bramkę nie do przejścia:
+
+1. wszyscy członkowie siedzą w **jednym** `perimeter/projects.yaml` (DEC-12), więc **każdy** onboarding rusza
+   ten plik i przesuwa licznik **każdego** otwartego wniosku o promocję;
+2. bramka biegnie na **obu** torach (DEC-16), więc wniosek zielony w chwili merge'u zostaje odrzucony
+   na `apply` — zmiana leży w gałęzi domyślnej i nie da się jej zastosować bez kolejnej edycji tej gałęzi;
+3. przy ~50 nowych projektach miesięcznie to ~2-3 unieważnienia dziennie, każde na cudzej, niezwiązanej
+   zmianie.
+
+**Zmierzone 2026-08-14 (#2076), dwa niezależne poziomy:**
+
+| pomiar | przed | po |
+|---|---|---|
+| żywe deklaracje tego repozytorium + JEDEN dopisany członek, którego wniosek nie dotyczył | `unmeasured_peers_ack: 4 (jest: 3)` — czerwono | brak komunikatu — zielono |
+| test jednostkowy: ten sam wniosek przed i po cudzym onboardingu | zielony → **czerwony** | zielony → **zielony** |
+| kontrola, że bramka nadal umie zapłonąć: ten sam wniosek **bez** potwierdzenia | czerwono | czerwono |
+
+Rozjazd nie był hipotezą: żywy plik niósł `3` przy czterech rówieśnikach w chwili zgłoszenia, bo dopisanie
+członka pomiarowego unieważniło potwierdzenie wystawione dla innego zbioru. Bramka spała wyłącznie dlatego,
+że kontrakt mówił już `enforced` dla tego członka, czyli że to nie jest PRZEJŚCIE.
+
+**Dlaczego to jest to samo ryzyko, przed którym chroni bramka, a nie jego akceptacja.** Bramka nie do
+przejścia zostaje **wyłączona** — to nie jest przewidywanie, tylko rozstrzygnięcie zapisane już w DEC-27
+(tam jako powód, dla którego twarda blokada odpadła). Wyłączona bramka nie osłabia kontroli, tylko ją usuwa,
+razem z jedynym miejscem, w którym ktokolwiek przyjmuje do wiadomości, że promocja zrywa pary niemierzalne
+z definicji. Przy 300 członkach naraz tych par jest **89 700**; żaden mechanizm ich nie wyliczy, więc pytanie
+brzmi wyłącznie „kto i w jakiej jednostce to przyjmuje".
+
+**Dlaczego ZBIÓR, a nie inna jednostka.** Oba warunki są **monotoniczne** względem dopisania członka:
+dopisanie kogokolwiek do `projects.yaml` nie potrafi unieważnić listy, która była poprawna. To jest cała
+poprawka — reszta jest konsekwencją. Zbiór ma też własność, której licznik nie miał: **wymienia to, co
+wnioskodawca wie, a czego nie wie nikt inny** (czy jego projekt rozmawia z X), zamiast kazać mu przepisać
+liczbę, którą narzędzie i tak zna lepiej. Lista rośnie z liczbą **kontrahentów tego członka** — kilka wpisów
+— a nie z liczbą członków organizacji.
+
+**Czego tracimy — nazwane wprost, nie schowane.** Bramka **przestaje dowodzić kompletności**: nie mówi już,
+że wnioskodawca obejrzał każdego rówieśnika, tylko że wymienił rówieśników realnych i przyjął ich świadomie.
+Pusta lista przechodzi. Kompletności **nie da się** utrzymać w mechanizmie odpornym na cudzą zmianę —
+„wymień wszystkich" znaczy „przepisz stan globalny", czyli dokładnie defekt, który zamykamy. Ciężar
+kompletności przechodzi tam, gdzie i tak leżał: na **raport** (pełna lista rówieśników, bramka odsyła do
+niego wprost), na **review** promocyjnego pull requesta i na **ludzką bramkę mutatora** (DEC-17), która stoi
+w chwili skutku. Pusta lista jest przy tym **oświadczeniem podpisanym** `approved_by`, a nie milczeniem:
+zdanie „ten projekt nie rozmawia z żadnym z nich" da się później podważyć, a liczby `3` podważyć się nie dało.
+
+**Ryzyko szczątkowe.** Klucz wypisany w potwierdzeniu przestaje wskazywać członka, gdy ten zostanie
+**offboardowany** — wtedy wniosek staje. Zostaje świadomie: offboarding jest rzadki (DEC-38), a znikanie
+przyjętej pary jest zmianą, którą wnioskodawca ma zobaczyć. Odwrotny kierunek (rówieśnik **promowany**
+w międzyczasie) bramki nie rusza — jego para przestaje być niemierzalna, więc stary wpis jest nieszkodliwy.
+
+**Odrzucone.**
+
+* *Monotoniczne „≥ liczby rówieśników w chwili merge'u".* Nie rozwiązuje zadania: tor apply liczy rówieśników
+  **ponownie**, więc po cudzym onboardingu `ack` znów jest mniejszy od aktualnego `n`. Żeby działało,
+  musiałoby zamrozić stan odniesienia — czyli wymagać pamięci, której w pliku nie ma.
+* *Potwierdzenie ważone momentem otwarcia wniosku* (pole `as_of` + wymóg pokrycia rówieśników starszych
+  od tej daty). Precyzyjne i **dziurawe**: datę pisze wnioskodawca, więc cofnięcie jej wyklucza z pokrycia
+  kogo trzeba. Zamknięcie tej dziury wymaga świeżości daty, a to jest drugi licznik do pilnowania —
+  mechanizm droższy od kontroli, którą realizuje.
+* *Przeniesienie potwierdzenia do `workflow_dispatch` promocji* (akt operatora zamiast stanu w pliku).
+  Kuszące i spójne z DEC-17: aktu nie da się unieważnić, bo powstaje w chwili oceny. Odrzucone, bo zdejmuje
+  kontrolę **z toru pull requesta** — promocyjny PR przechodziłby review bez ani jednego zdania o parach
+  niemierzalnych, a to jest jedyne miejsce, gdzie właściciel dywizji jeszcze patrzy. DEC-16 mówi wprost:
+  bramka ma być na obu torach, a nie przenoszona między nimi. Zostaje jako **warstwa druga** — ludzka
+  bramka mutatora stoi tam nadal i pyta o zbiór promowanych.
+* *Wyprowadzenie listy kontrahentów z deklaracji członka* (`caller_identities` niosą adres konta, w którym
+  siedzi część projektowa innego członka). Dałoby dolne ograniczenie „za darmo" i wywaliłoby pustą listę
+  tam, gdzie jest kłamstwem. Odrzucone po sprawdzeniu KIERUNKU: zmierzony tryb awarii to **egress** z członka
+  promowanego, a `caller_identities` opisuje **ingress** do niego. Wnioskowanie wskazywałoby w drugą stronę
+  niż awaria — czyli dawałoby fałszywą pewność, ten sam błąd, co walidacja referencji zamiast istnienia
+  źródła. Wracamy do tego dopiero z regułami egress jako źródłem, nie z profilami ingress.
+* *Twarda bramka „po zastosowanej promocji pole MUSI zniknąć".* Domyka literalnie obowiązek zapisany
+  wcześniej w schemacie — i odtwarza defekt po drugiej stronie: repozytorium byłoby **czerwone** od chwili
+  zastosowania promocji do chwili scalenia pull requesta sprzątającego, blokując cudze zmiany w tym samym
+  pliku. Przy ~50 promocjach miesięcznie to stały niski czerwony. Zamiast tego pole **przestaje udawać
+  potwierdzenie**: schemat i runbook nazywają je zapisem decyzji, a lista nazw — inaczej niż licznik — nie
+  twierdzi, że czemuś jest równa.
+* *Usunięcie kontroli.* Odrzucone w DEC-27 i odrzucone nadal. Po promocji przepływy do niezmierzonych
+  rówieśników stają się naruszeniem egress cicho i twardo; kontrola, która o tym nie pyta, nie istnieje.
 
 ## DEC-56 — Zbiór wejść bramki bierze się z DRZEWA; filtr `paths:` jest częścią bramki, nie jej oprawą
 
