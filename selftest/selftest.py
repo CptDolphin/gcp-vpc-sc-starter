@@ -4916,6 +4916,69 @@ def test_kompletnosc_decyzji() -> None:
         check("czerwien starter-drift zalezy TAKZE od brakujacych decyzji, nie tylko od wskaznika",
               "decyzje.outputs.brakujace" in str(krok_fail[0].get("if", "")), str(krok_fail[0].get("if")))
 
+    # --- 6a. CYKL ZYCIA ZGLOSZENIA MA KONIEC, NIE TYLKO POCZATEK ----------------------------------
+    # Bramka otwierala i aktualizowala zgloszenie, a nie zamykalo go NIC — przy tym ten sam workflow
+    # wpisuje do jego tresci zdanie „do not promote a member to `enforced` until this is closed". Warunek
+    # niespelnialny konczy sie albo tym, ze nikt nie promuje, albo tym, ze wszyscy ucza sie ignorowac caly
+    # kanal — czyli trybem smierci bramki, przed ktorym ostrzega naglowek tego samego pliku. Zmierzone:
+    # zgloszenie otwarte cztery dni z `updatedAt == createdAt` przy szesciu przebiegach zakonczonych
+    # sukcesem, bo krok aktualizujacy stoi za warunkiem „jest dryf".
+    kroki_drift = yaml.safe_load(drift)["jobs"]["starter-drift"]["steps"]
+    krok_zamk = [k for k in kroki_drift if k.get("name") == "close the drift issue when there is none"]
+    check("premisa: starter-drift ma krok ZAMYKAJACY zgloszenie", len(krok_zamk) == 1,
+          f"nazwy krokow: {[k.get('name') for k in kroki_drift]}")
+
+    def warunek_spelniony(wyrazenie: str, wartosci: dict) -> bool:
+        """Ewaluator OGRANICZONY do gramatyki `A == 'x' && B == 'y'` — nie jest GitHubem.
+
+        Po co w ogole: jedyna wlasnosc, ktora tu naprawde chcemy udowodnic, brzmi „puste wyjscie NIE
+        zamyka zgloszenia". Sprawdzenie tekstowe („czy w warunku stoi `== '0'`") tego nie dowodzi, bo
+        przechodzi tak samo dla `!= '1'` opakowanego inaczej. Tabelka prawdy dowodzi.
+        """
+        wynik = True
+        for czlon in wyrazenie.split("&&"):
+            lewa, prawa = czlon.split("==")
+            klucz = lewa.strip().split("steps.", 1)[-1]
+            wynik = wynik and (wartosci.get(klucz, "") == prawa.strip().strip("'\""))
+        return wynik
+
+    if krok_zamk:
+        wyr = str(krok_zamk[0].get("if", ""))
+        check("warunek zamkniecia porownuje na ROWNOSC z '0' (bez `!=`, ktore przepuszcza pustke)",
+              "!=" not in wyr and wyr.count("==") == 2 and "&&" in wyr, wyr)
+        if "!=" not in wyr and wyr.count("==") == 2 and "&&" in wyr:
+            # TABELKA PRAWDY. Trzy pierwsze wiersze to sens bramki, cztery ostatnie to fail-closed:
+            # brak wyjscia NIE JEST stanem „nie ma dryfu". Gdyby byl, awaria pomiaru wygladalaby
+            # jak zdrowie — ta sama klasa, co bramka bez wsadu konczaca sie sukcesem.
+            tabela = [
+                ({"compare.outputs.behind": "0", "decyzje.outputs.brakujace": "0"}, True),
+                ({"compare.outputs.behind": "1", "decyzje.outputs.brakujace": "0"}, False),
+                ({"compare.outputs.behind": "0", "decyzje.outputs.brakujace": "1"}, False),
+                ({"compare.outputs.behind": "1", "decyzje.outputs.brakujace": "1"}, False),
+                ({"compare.outputs.behind": "", "decyzje.outputs.brakujace": "0"}, False),
+                ({"compare.outputs.behind": "0", "decyzje.outputs.brakujace": ""}, False),
+                ({}, False),
+            ]
+            zle = [w for w, ocz in tabela if warunek_spelniony(wyr, w) != ocz]
+            check("zamkniecie TYLKO gdy oba powody czyste; pustka NIE zamyka (tabelka prawdy 7/7)",
+                  not zle, f"wiersze niezgodne: {zle} | warunek: {wyr}")
+        skrypt = str(krok_zamk[0].get("with", {}).get("script", ""))
+        check("krok zamykajacy zostawia POWOD i sha startera (zamkniecie ma byc dowodem)",
+              "createComment" in skrypt and "compare.outputs.head" in skrypt, skrypt[:300])
+        check("krok zamykajacy nie wywraca sie, gdy zgloszenia nie ma",
+              "length === 0" in skrypt and "return" in skrypt, skrypt[:300])
+
+    # DUPLIKATY. Zgloszenie zamkniete RECZNIE przy repo nadal za starterem musi zostac OTWARTE NA NOWO,
+    # a nie zdublowane — stos identycznych zgloszen to to samo, co brak zgloszenia (naglowek pliku).
+    krok_otw = [k for k in kroki_drift if k.get("name") == "open or update the drift issue"]
+    check("premisa: starter-drift ma krok otwierajacy/aktualizujacy zgloszenie", len(krok_otw) == 1)
+    if krok_otw:
+        skrypt_otw = str(krok_otw[0].get("with", {}).get("script", ""))
+        check("krok otwierajacy szuka po labelu w `state: 'all'` (inaczej mnozy duplikaty)",
+              "state: 'all'" in skrypt_otw, skrypt_otw[:300])
+        check("znalezione zamkniete zgloszenie jest OTWIERANE z powrotem, nie dublowane",
+              "state: 'open'" in skrypt_otw, skrypt_otw[:300])
+
     # --- 7. REJESTR MOWI O SOBIE PRAWDE: zakres, licznik, JEDEN naglowek --------------------------
     # Trzeci tryb awarii, dla obu sprawdzen wyzej NIEWIDOCZNY: sekcje sa na miejscu, cytowania tez,
     # a zdanie o rozmiarze zbioru klamie. Zmierzone TRZY RAZY na tym samym naglowku (zakres szedl
