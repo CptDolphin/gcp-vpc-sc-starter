@@ -3543,7 +3543,7 @@ deklaracją; bramki treści startera walidują strukturę workflow, a nie to, cz
 | zakaz bezwzględny: zero rozjazdów, naprawiamy wszystkie od ręki | pięć innych akcji stoi dziś na dwóch wersjach naraz, a każda ma własny blast-radius — podbicie `hashicorp/setup-terraform` v3 → v4 to nie ta sama zmiana, co podbicie akcji uwierzytelniającej. Zapadka z rejestrem porównywanym na równość nazywa dług, blokuje szósty rozjazd i wymusza wykreślenie wpisu przy domknięciu; zakaz bez pomiaru wymusiłby pięć niesprawdzonych podbić naraz |
 | zapytać sieci, jaki tag ma wskazany SHA | ta paczka jest świadomie hermetyczna (DEC-30). Sieć dałaby albo bramkę flaky, albo SKIP — czyli bramkę tylko z nazwy. Porównanie materiału samego ze sobą wystarcza: rozjazd jest własnością zbioru pinów, nie faktem o świecie zewnętrznym |
 
-## DEC-54 — Zbiór wejść bramki bierze się z DRZEWA; filtr `paths:` jest częścią bramki, nie jej oprawą
+## DEC-55 — Zbiór wejść bramki bierze się z DRZEWA; filtr `paths:` jest częścią bramki, nie jej oprawą
 
 **Decyzja.** Filtr `paths:` każdego workflowa MUSI pokrywać pliki, które ten workflow realnie czyta.
 Pilnuje tego `tools/paths_pokrycie_check.py`, uruchamiany w `bramki-tresci`, czyli na **obu torach** —
@@ -3590,4 +3590,4 @@ kosztuje przebieg, brakująca kosztuje brak przebiegu, więc bramka pilnuje wył
 | dopisać trzy brakujące ścieżki i nic więcej | to jest szósta poprawka listy. Piąta była opisana w §9.45 jako „ścieżki dopisywano pojedynczo, po jednej na incydent" — i mimo tego zdania przyszła szósta. Poprawka listy nie zmienia tego, że lista jest utrzymywana z pamięci |
 | zdjąć `paths:` ze wszystkich workflowów | każdy pull request uruchamiałby `terraform plan` na trzech stackach i pełny zestaw bramek żywych. Filtr istnieje po to, żeby bramki były tanie; problemem jest jego rozjazd z rzeczywistością, nie samo istnienie |
 | asercja w selfteście zamiast bramki w CI wdrożenia | selftest chodzi po drzewie **startera**, a filtry żyją także we wdrożeniu i można je tam zmienić bezpośrednio. Ta sama luka, którą zamknął guard kotwic w §9.45 — dlatego bramka jedzie w `bramki-tresci`, a selftest ją tylko **przypina** |
-| lista wejść utrzymywana ręcznie, porównywana ze źródłem | rozważone i odrzucone: zbiór jest tu w pełni **strukturalny** (co czyta ten kod), więc da się go policzyć. Bramka porównująca miałaby sens tam, gdzie zbiór jest semantyczny — jak przy jobie uprzywilejowanym w DEC-55 |
+| lista wejść utrzymywana ręcznie, porównywana ze źródłem | rozważone i odrzucone: zbiór jest tu w pełni **strukturalny** (co czyta ten kod), więc da się go policzyć. Bramka porównująca miałaby sens tam, gdzie zbiór jest semantyczny — jak przy jobie uprzywilejowanym w DEC-56 |
