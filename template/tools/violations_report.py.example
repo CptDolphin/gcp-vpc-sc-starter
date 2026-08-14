@@ -436,9 +436,14 @@ def main() -> int:
         rowiesnicy = [n for n in w_dry_run if n != name] if member.get("stage") != "enforced" else []
         if rowiesnicy:
             lines.append("")
+            # Pełna lista zostaje TUTAJ i to nie jest kosmetyka: od DEC-55 bramka nie pyta już o licznik
+            # globalny (unieważniał go każdy cudzy onboarding, #2076), więc kompletność zbioru rówieśników
+            # nie ma innego nośnika niż ten raport. Bramka odsyła tu wprost.
             lines.append(f"niemierzalne w tym oknie: przepływy do/z **{len(rowiesnicy)}** członków w dry-run "
-                         f"({', '.join(rowiesnicy)}) — przy promocji tego członka `unmeasured_peers_ack` "
-                         f"musi wynosić **{len(rowiesnicy)}**")
+                         f"({', '.join(rowiesnicy)}) — przy promocji tego członka wypisz w "
+                         f"`unmeasured_peers_ack` klucze tych, z którymi ten członek **wymienia ruch**. "
+                         f"Pusta lista `[]` jest legalna i jest oświadczeniem, że z żadnym; brak pola "
+                         f"zatrzymuje promocję")
         if platforma.get(name):
             # Świadomie NAD listą naruszeń dywizji: czytelnik ma zobaczyć, co zostało wyłączone z liczby,
             # zanim uwierzy w słowo „czysto". Milczenie o wykluczeniach byłoby tym samym, co ich brak.
