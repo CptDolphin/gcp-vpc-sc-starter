@@ -22,6 +22,7 @@ import os
 import pathlib
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -76,6 +77,39 @@ def stacki_terraform(root: pathlib.Path) -> list[str]:
         d.name for d in root.iterdir()
         if d.is_dir() and not d.name.startswith(".") and any(d.glob("*.tf"))
     )
+
+
+def pliki_z_shebangiem(korzen: pathlib.Path) -> list[pathlib.Path]:
+    """Wszystko w drzewie, co DEKLARUJE, że się uruchamia — rozpoznane po TREŚCI, nie po nazwie.
+
+    Deklaracją jest shebang, a nie rozszerzenie: narzędzie nazwane `.bash`, bez rozszerzenia albo
+    położone poza `tools/` jest tak samo uruchamialne jak `*.py`. Zbiór zbudowany z nazw byłby ślepy
+    dokładnie na te przypadki — czyli byłby trzecią kopią błędu, który już dwa razy oślepił bramki
+    tego repo (`stacki_terraform()` wyżej i `workflowy()` niżej).
+
+    Katalogi-kropki odpadają: `.github/` GitHub uruchamia sam, a w drzewie po `terraform init` leży
+    `.terraform/` z kopiami cudzych modułów, których tryby nie są niczyją decyzją w tym repozytorium.
+    """
+    znalezione = []
+    for p in sorted(korzen.rglob("*")):
+        if not p.is_file() or p.is_symlink():
+            continue
+        if any(czesc.startswith(".") for czesc in p.relative_to(korzen).parts[:-1]):
+            continue
+        with p.open("rb") as fh:
+            if fh.read(2) == b"#!":
+                znalezione.append(p)
+    return znalezione
+
+
+def bez_bitu_wykonywalnosci(pliki) -> list[pathlib.Path]:
+    """Które z podanych plików NIE mają bitu `u+x`.
+
+    Mierzymy `S_IXUSR`, bo to DOKŁADNIE ten bit, który git zapisuje jako `100755` zamiast `100644` —
+    czyli jedna własność odpowiada naraz na dwa pytania: „czy `./narzedzie` się uruchomi u wdrożeniowca"
+    i „jaki tryb wyląduje w indeksie repozytorium, do którego to trafi".
+    """
+    return sorted(p for p in pliki if not p.stat().st_mode & stat.S_IXUSR)
 
 
 # ----------------------------------------------- powierzchnia wykonywalna: JEDNO zrodlo listy (#2073)
@@ -306,6 +340,47 @@ def bootstrap() -> None:
     check("install.sh bez flagi CZYSCI czlonka przykladowego i jego zgode",
           czlonkowie_czysto == [] and zgody_czysto == [],
           f"members={czlonkowie_czysto!r} egress_approvals={zgody_czysto!r}")
+
+    # DRUGI NIEZMIENNIK TEGO SAMEGO ŚWIEŻEGO ROZPAKOWANIA: co ma shebang, MA SIĘ URUCHAMIAĆ.
+    #
+    # Bit wykonywalności nadaje `install.sh` wzorcem `case "$dst" in *.sh|*/tools/*.py)` — czyli listą
+    # stojącą OBOK mechanizmu, tym samym kształtem, który dwa razy oślepił bramki tego repo (nowy KATALOG
+    # stacku; inne ROZSZERZENIE tego samego workflowu). Narzędzie nazwane `.bash`, bez rozszerzenia albo
+    # położone poza `tools/` wypada z tego `chmod` PO CICHU i nie ma na to ŻADNEGO sygnału: rozpakowanie
+    # kończy się zielono, plik ma poprawny shebang, a `./narzedzie` u wdrożeniowca kończy się
+    # `permission denied`. Dotąd bit sprawdzały dwa testy, każdy o JEDNYM pliku i tylko dlatego, że akurat
+    # uruchamiały go ścieżką bez `python3` — czyli 2 narzędzia z 29, przypadkiem, nie z zamysłu.
+    #
+    # Ta asercja jest ZIELONA w dniu wpisania — jest guardem regresji wzorca `chmod`, a nie znaleziskiem.
+    # Sprawdzamy ROZPAKOWANIE BEZ FLAGI, bo to jedyny wariant, który dostaje wdrożenie.
+    z_shebangiem = pliki_z_shebangiem(czysty)
+    narzedzia_czysto = [p for p in z_shebangiem if p.relative_to(czysty).parts[0] == "tools"]
+
+    # PREMISA obu asercji niżej. Bez niej „wszystkie są wykonywalne" jest trywialnie prawdziwe dla zbioru
+    # pustego — czyli test świeciłby najgłośniej na zielono w dniu, w którym `install.sh` przestałby
+    # rozpakowywać narzędzia w ogóle. Próg jest luźny celowo: pilnuje rzędu wielkości, nie liczby, bo
+    # asercja na dokładną liczbę uczy tylko podbijania stałej przy każdym nowym narzędziu.
+    check("rozpakowanie: narzedzia z shebangiem SA w drzewie (premisa asercji o bicie wykonywalnosci)",
+          len(narzedzia_czysto) >= 20,
+          f"tools/ z shebangiem: {len(narzedzia_czysto)}, cale drzewo: {len(z_shebangiem)}")
+
+    brak_bitu = bez_bitu_wykonywalnosci(z_shebangiem)
+    check("rozpakowanie: KAZDY plik z shebangiem jest wykonywalny (u+x)", not brak_bitu,
+          str([str(p.relative_to(czysty)) for p in brak_bitu]))
+
+    # ANTY-TAUTOLOGIA, w obie strony naraz. Bez niej „zero plików bez bitu" przechodzi także wtedy, gdy
+    # predykat jest zepsuty i zawsze zwraca pustkę, ORAZ wtedy, gdy zbiór jest zbierany po nazwie i atrapy
+    # w ogóle nie widzi. Atrapa jest BEZ ROZSZERZENIA celowo: to dokładnie ten plik, który wypada zarówno
+    # z `case` w `install.sh`, jak i z każdego globu po nazwie — jedyne, co go łapie, to shebang.
+    # Zdejmujemy bit z KOPII, nie z oryginału: żaden inny test nie ma prawa zależeć od kolejności biegu.
+    if narzedzia_czysto:
+        atrapa = czysty / "zz_narzedzie_bez_bitu"
+        shutil.copyfile(narzedzia_czysto[0], atrapa)
+        atrapa.chmod(0o644)
+        check("rozpakowanie: kontrola bitu ZAPALA na pliku z shebangiem bez u+x",
+              bez_bitu_wykonywalnosci([atrapa]) == [atrapa] and atrapa in pliki_z_shebangiem(czysty),
+              f"predykat: {bez_bitu_wykonywalnosci([atrapa])}")
+
     shutil.rmtree(czysty, ignore_errors=True)
 
     # Szablony muszą pozostać martwe: w template/ nie ma ANI JEDNEGO pliku-kropki ani żywego .tf,
