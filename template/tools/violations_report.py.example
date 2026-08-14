@@ -436,7 +436,7 @@ def main() -> int:
         rowiesnicy = [n for n in w_dry_run if n != name] if member.get("stage") != "enforced" else []
         if rowiesnicy:
             lines.append("")
-            # Pełna lista zostaje TUTAJ i to nie jest kosmetyka: od DEC-54 bramka nie pyta już o licznik
+            # Pełna lista zostaje TUTAJ i to nie jest kosmetyka: od DEC-55 bramka nie pyta już o licznik
             # globalny (unieważniał go każdy cudzy onboarding, #2076), więc kompletność zbioru rówieśników
             # nie ma innego nośnika niż ten raport. Bramka odsyła tu wprost.
             lines.append(f"niemierzalne w tym oknie: przepływy do/z **{len(rowiesnicy)}** członków w dry-run "

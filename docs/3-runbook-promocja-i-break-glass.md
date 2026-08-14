@@ -22,7 +22,7 @@ poza pierwszym i ostatnim — tamte sprawdza osobny workflow i człowiek):
 | Czas w dry-run | `dry_run_min_days` z `policy.yaml` (domyślnie 14) | pole `dry_run_since` w pliku członka |
 | Naruszenia w oknie | **0** w ostatnich `clean_window_days` (domyślnie 7) | `violations.json` z workflow `violations-report` |
 | Raport w ogóle istnieje | wpis dla tego członka | brak wpisu = brak dowodu, nie „zero" |
-| **Zakres ciszy potwierdzony** | `unmeasured_peers_ack` = klucze członków zostających w dry-run, z którymi ten członek **wymienia ruch** (pusta lista = z żadnym) | nagłówek `violations.md`; DEC-27 + DEC-54 — ruch między dwoma członkami w dry-run NIE MOŻE dać wpisu |
+| **Zakres ciszy potwierdzony** | `unmeasured_peers_ack` = klucze członków zostających w dry-run, z którymi ten członek **wymienia ruch** (pusta lista = z żadnym) | nagłówek `violations.md`; DEC-27 + DEC-55 — ruch między dwoma członkami w dry-run NIE MOŻE dać wpisu |
 | Rzadkie przepływy widziane | ocena człowieka | czy w oknie zmieścił się miesięczny batch / kwartalny job? |
 
 > **Nie skracaj okna „bo zielono od trzech dni".** Dry-run rejestruje tylko to, co faktycznie zaszło.
@@ -137,7 +137,7 @@ gh workflow run violations-report.yml -f days=14
    `approved_by`. Brak pola zatrzymuje promocję; klucz, który nie wskazuje innego członka (literówka,
    nazwa sprzed offboardingu, własny klucz), też.
 
-   **Cudzy onboarding NIE unieważnia tej listy** (DEC-54). Dopisanie do `projects.yaml` dywizji, której
+   **Cudzy onboarding NIE unieważnia tej listy** (DEC-55). Dopisanie do `projects.yaml` dywizji, której
    ten wniosek nie dotyczy, zostawia promocję zieloną — do #2076 czerwieniło ją na torze apply, czyli już
    po merge'u. Zmienia się to tylko wtedy, gdy wypisany członek **zniknie** z pliku: wtedy klucz przestaje
    wskazywać kogokolwiek i wracasz do kroku 1.
@@ -405,7 +405,7 @@ pomiar, tylko o pomiar, który tego zdarzenia nie klasyfikuje. Dlatego:
 * raport wypisuje na górze listę członków w dry-run i powtarza ją przy każdym z nich,
 * `promotion_gate` żąda pola `unmeasured_peers_ack` wymieniającego **klucze** tych z nich, z którymi
   promowany członek wymienia ruch (krok 3 niżej) — zbiór, nie licznik, bo licznik unieważniała każda
-  cudza zmiana w tym samym pliku (DEC-54),
+  cudza zmiana w tym samym pliku (DEC-55),
 * **jeśli dywizje rozmawiają ze sobą — promuj je jedną kohortą** (jeden pull request, jeden apply). Wtedy
   wchodzą do konfiguracji egzekwowanej razem, zbiór niemierzalnych rówieśników robi się mniejszy, a przepływ
   między nimi przeżywa promocję. To jest zalecenie, nie wymóg — kohorta wiąże termin każdej dywizji

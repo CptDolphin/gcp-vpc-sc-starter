@@ -995,7 +995,7 @@ test_promocja_z_rowiesnikiem_i_potwierdzeniem_przechodzi if {
 	count(deny) == 0 with input as wejscie_promocji_dec27({"unmeasured_peers_ack": ["market-prj-example-vertex-prod"]})
 }
 
-# --- SEDNO DEC-54: CUDZA ZMIANA NIE UNIEWAŻNIA POTWIERDZENIA -----------------------------------------
+# --- SEDNO DEC-55: CUDZA ZMIANA NIE UNIEWAŻNIA POTWIERDZENIA -----------------------------------------
 #
 # Ten test jest po to, żeby defekt #2076 nie wrócił. Poprzedni kształt reguły żądał RÓWNOŚCI z liczbą
 # wszystkich pozostałych członków w dry-run, więc dopisanie do `projects.yaml` członka NIEZWIĄZANEGO
@@ -1065,7 +1065,7 @@ test_potwierdzenie_wskazujace_samego_siebie_odrzucone if {
 # CENA TEJ DECYZJI, ZAPISANA JAKO TEST, a nie jako zdanie w dokumencie: pusta lista PRZECHODZI. Jest
 # oświadczeniem „ten członek nie wymienia ruchu z żadnym z rówieśników zostających w dry-run", nie brakiem
 # odpowiedzi — brak POLA odrzuca test wyżej. Bramka nie dowodzi już, że wnioskodawca obejrzał każdego
-# rówieśnika; dowodzi, że wymienił rówieśników realnych. Kto to zmienia, zmienia decyzję (DEC-54), nie test.
+# rówieśnika; dowodzi, że wymienił rówieśników realnych. Kto to zmienia, zmienia decyzję (DEC-55), nie test.
 test_pusta_lista_jest_oswiadczeniem_i_przechodzi if {
 	count(deny) == 0 with input as wejscie_promocji_dec27({"unmeasured_peers_ack": []})
 }
@@ -1084,7 +1084,7 @@ test_promocja_bez_rowiesnikow_nie_wymaga_potwierdzenia if {
 # żadnego członka. Sprawdzenie kluczy biegnie NIEZALEŻNIE od liczby rówieśników — inaczej pierwszy członek
 # organizacji byłby jedynym miejscem, w którym wolno wpisać nazwę z powietrza.
 #
-# Miejsce po teście, który przed DEC-54 pilnował „liczba != 0 przy zerze rówieśników". Ten warunek zniknął
+# Miejsce po teście, który przed DEC-55 pilnował „liczba != 0 przy zerze rówieśników". Ten warunek zniknął
 # świadomie: przy zbiorze zamiast licznika nie ma czego przepisywać, a pusta lista jest legalna.
 test_potwierdzenie_widmo_bez_rowiesnikow_odrzucone if {
 	widmo := promowany_dec27({"unmeasured_peers_ack": ["market-prj-example-vertex-prod"]})

@@ -443,7 +443,7 @@ deny contains msg if {
 # zostają na zewnątrz i ten sam przepływ staje się naruszeniem egress. Okno nie było ślepe przez przypadek —
 # było ślepe z konstrukcji, i to dokładnie na przepływach, które promocja zrywa.
 #
-# DLACZEGO ZBIÓR, A NIE LICZBA (DEC-54 — zmiana wobec pierwotnego kształtu DEC-27).
+# DLACZEGO ZBIÓR, A NIE LICZBA (DEC-55 — zmiana wobec pierwotnego kształtu DEC-27).
 #
 # Pierwsza wersja żądała pola RÓWNEGO liczbie wszystkich pozostałych członków w dry-run. Ten warunek jest
 # ZDANIEM O CAŁYM PORTFELU, a nie o promowanym członku — więc unieważnia go zmiana, której wnioskodawca nie
