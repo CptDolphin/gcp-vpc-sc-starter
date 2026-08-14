@@ -19,6 +19,17 @@ on:
       - "schemas/**"
       - "policy/**"
       - ".github/workflows/publish-gates.yml"
+      # `tools/**` i `contrib/**` — paczka wysyłana zespołom zawiera nie tylko reguły: krok `pack` niżej
+      # kopiuje do niej `tools/collect_declarations.py`, `tools/projects_file.py` i `contrib/validate-local.sh`.
+      # Bez tych ścieżek zmiana w kolektorze NIE ODŚWIEŻAŁA release'u, więc dywizje walidowały swoje
+      # deklaracje starym kodem — a po naszej stronie wszystko było zielone, bo ten workflow po prostu
+      # nie ruszał. Cena to jeden release na zmianę narzędzi; przeterminowana paczka u odbiorcy jest
+      # droższa, bo nie widać jej z żadnej strony.
+      - "tools/**"
+      - "contrib/**"
+      # `.github/actions/**` — ten job instaluje narzędzia akcją `./.github/actions/narzedzia`, więc jej
+      # zmiana zmienia to, czym paczka jest weryfikowana przed wysyłką.
+      - ".github/actions/**"
   workflow_dispatch:
 
 permissions:

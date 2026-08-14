@@ -1,0 +1,25 @@
+# Świadome pominięcia bramki `tools/paths_pokrycie_check.py`.
+#
+# PO CO TO ISTNIEJE. Bramka wylicza wejścia workflowa z DRZEWA — przechodnio, przez akcje lokalne
+# i przez skrypty, które workflow uruchamia. Przechodniość jest tym, co pozwoliło jej znaleźć
+# `.github/CODEOWNERS` i `tests/*.json` (nie padają w żadnym YAML-u, tylko w kodzie narzędzi), ale
+# ma cenę: analiza statyczna nie odróżnia pliku czytanego TUTAJ od pliku, który ten sam skrypt
+# otwiera U ODBIORCY paczki, ani nie widzi ścieżki sklejanej ze zmiennej. Ten plik jest miejscem,
+# gdzie taką różnicę zapisuje się słowami — a nie `|| true` w kroku CI.
+#
+# BRAMKA BEZ FURTKI ZOSTAJE OBEJŚCIEM: ktoś zdejmie ją z pipeline'u albo dopisze `continue-on-error`,
+# i wtedy nie ma ani bramki, ani zapisu dlaczego. Furtka ma więc koszt wpisany z premedytacją:
+#   * wpis bez `powod` (albo ze zdawkowym) — CZERWONY,
+#   * wpis NIEAKTUALNY, czyli taki, którego ścieżka jest już pokryta przez `paths:` albo nie jest
+#     już czytana — CZERWONY.
+# Ta druga zasada jest ważniejsza od pierwszej i została zmierzona przy powstawaniu tej bramki:
+# pięć wpisów, które chwilę wcześniej były uzasadnione, przestało być potrzebne po poprawce
+# w samym skanerze — i bramka to zgłosiła, zamiast dalej je nosić. Bez tego lista rosłaby
+# w nieskończoność i po roku byłaby dokładnie tym długiem, który ta bramka miała zamknąć:
+# deklaracją, której nikt nie skonfrontował ze źródłem.
+#
+# STAN DOCELOWY TO PUSTA LISTA. Wyjątek jest dowodem, że czegoś nie dało się wyprowadzić z drzewa —
+# nie sposobem na uciszenie bramki. Jeśli dopisujesz wpis, najpierw sprawdź, czy nie taniej rozszerzyć
+# `paths:`; przebieg CI kosztuje mniej niż wejście na `main` bez ani jednego checku.
+
+pominiete: []

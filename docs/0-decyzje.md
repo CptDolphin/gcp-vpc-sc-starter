@@ -3542,3 +3542,52 @@ deklaracją; bramki treści startera walidują strukturę workflow, a nie to, cz
 | bramka uruchamiana na drzewie startera, nie na rozpakowanym | `selftest/` zawiera próbki, które **z premedytacją** składają rozjazd (dowodzą, że asercja gryzie). Bramka licząca je jako realne byłaby czerwona na treści poprawnej — ta sama pułapka, co pełne sprawdzenie cytowań decyzji na drzewie startera (DEC-30) |
 | zakaz bezwzględny: zero rozjazdów, naprawiamy wszystkie od ręki | pięć innych akcji stoi dziś na dwóch wersjach naraz, a każda ma własny blast-radius — podbicie `hashicorp/setup-terraform` v3 → v4 to nie ta sama zmiana, co podbicie akcji uwierzytelniającej. Zapadka z rejestrem porównywanym na równość nazywa dług, blokuje szósty rozjazd i wymusza wykreślenie wpisu przy domknięciu; zakaz bez pomiaru wymusiłby pięć niesprawdzonych podbić naraz |
 | zapytać sieci, jaki tag ma wskazany SHA | ta paczka jest świadomie hermetyczna (DEC-30). Sieć dałaby albo bramkę flaky, albo SKIP — czyli bramkę tylko z nazwy. Porównanie materiału samego ze sobą wystarcza: rozjazd jest własnością zbioru pinów, nie faktem o świecie zewnętrznym |
+
+## DEC-54 — Zbiór wejść bramki bierze się z DRZEWA; filtr `paths:` jest częścią bramki, nie jej oprawą
+
+**Decyzja.** Filtr `paths:` każdego workflowa MUSI pokrywać pliki, które ten workflow realnie czyta.
+Pilnuje tego `tools/paths_pokrycie_check.py`, uruchamiany w `bramki-tresci`, czyli na **obu torach** —
+pull requesta i mutatora. Zbiór wejść nie jest nigdzie wypisany: skaner liczy go za każdym uruchomieniem
+z `git ls-files`, przechodząc przez tekst wykonywalny workflowa, ciała akcji lokalnych `./.github/actions/*`
+i **kod uruchamianych skryptów**. Świadome pominięcie zapisuje się w `.github/paths-pokrycie.yaml`
+z powodem; wpis bez powodu i wpis **nieaktualny** są czerwone.
+
+**Dlaczego, skoro lekarstwem zawsze była jedna linia.** Bo tę jedną linię dopisywano **sześć razy**,
+za każdym razem po fakcie i za każdym razem po tym samym komunikacie — `no checks reported on the branch`:
+`iam-bootstrap/**`, `contrib/**`+`tools/**`, `.github/actions/**`, `violations-sink/**`,
+`docs/**`+`.starter-sync`, a teraz `.tflint.hcl`, `.github/CODEOWNERS` i `tests/**`. Lista nazw
+utrzymywana obok mechanizmu, który z niej korzysta, nie przestaje się rozjeżdżać od tego, że poprawiono
+ją po raz piąty. To ta sama klasa, którą DEC-34 zamknął dla stacków Terraforma — tam zbiór stacków
+wyprowadza się z drzewa; tu z drzewa wyprowadza się zbiór wejść.
+
+**Stawka jest wyższa niż „PR bez checku".** `apply.yml` — jedyny tor, który przy niedostępnej ochronie
+gałęzi (zmierzone: `GET branches/main/protection` → **403**, funkcja płatna) chroni granicę przed pushem
+prosto na `main` — nie miał w `paths:` **ani jednego** pliku definiującego własne bramki. Commit
+zmieniający `.github/actions/bramki-tresci/action.yml` wchodził bez żadnego przebiegu, a następny commit
+dotykający `perimeter/` wykonywał **okrojoną** definicję bramek, świecił zielono i mutował granicę.
+Kształt takiego commita nie jest hipotetyczny: **11 z ostatnich 80** commitów dotyka `tools/`,
+`schemas/` albo `.github/actions/` bez `perimeter/` i `terraform/`.
+
+**Dlaczego skaner odsiewa prozę.** Pierwszy pomiar wskazywał pięć klas wejść; dwie z nich
+(`.gitattributes`, `AGENTS.md`) padają wyłącznie w **docstringach** nagłówków, a nie w kodzie, który je
+otwiera. Bramka żądająca ścieżki dla pliku, którego nikt nie uruchamia, uczy zespołu dopisywania wyjątków
+i psuje samą siebie — więc komentarze, docstringi i treść adnotacji `::error::` nie liczą się jako odczyt.
+Realny zbiór to **cztery pliki w trzech klasach**.
+
+**Konsekwencje.** `apply.yml` rusza teraz także na zmianę `docs/`, `tools/`, `policy/` i `schemas/` —
+czyli częściej. To jest cena kupiona świadomie: `terraform apply` bez różnicy w planie jest operacją
+pustą, a `concurrency` już ogranicza go do jednego przebiegu naraz. Alternatywa — mutator, który nie
+widzi zmiany w plikach własnych bramek — kosztuje granicę, a nie minuty runnera.
+
+**Czego ta bramka NIE robi.** Nie widzi ścieżek sklejanych ze zmiennej w czasie wykonania; dla nich
+jedynym wyjściem jest wpis z powodem. Nie ocenia też, czy filtr nie jest ZA SZEROKI — nadmiarowa ścieżka
+kosztuje przebieg, brakująca kosztuje brak przebiegu, więc bramka pilnuje wyłącznie tego drugiego kierunku.
+
+**Alternatywy odrzucone.**
+
+| wariant | dlaczego nie |
+|---|---|
+| dopisać trzy brakujące ścieżki i nic więcej | to jest szósta poprawka listy. Piąta była opisana w §9.45 jako „ścieżki dopisywano pojedynczo, po jednej na incydent" — i mimo tego zdania przyszła szósta. Poprawka listy nie zmienia tego, że lista jest utrzymywana z pamięci |
+| zdjąć `paths:` ze wszystkich workflowów | każdy pull request uruchamiałby `terraform plan` na trzech stackach i pełny zestaw bramek żywych. Filtr istnieje po to, żeby bramki były tanie; problemem jest jego rozjazd z rzeczywistością, nie samo istnienie |
+| asercja w selfteście zamiast bramki w CI wdrożenia | selftest chodzi po drzewie **startera**, a filtry żyją także we wdrożeniu i można je tam zmienić bezpośrednio. Ta sama luka, którą zamknął guard kotwic w §9.45 — dlatego bramka jedzie w `bramki-tresci`, a selftest ją tylko **przypina** |
+| lista wejść utrzymywana ręcznie, porównywana ze źródłem | rozważone i odrzucone: zbiór jest tu w pełni **strukturalny** (co czyta ten kod), więc da się go policzyć. Bramka porównująca miałaby sens tam, gdzie zbiór jest semantyczny — jak przy jobie uprzywilejowanym w DEC-55 |

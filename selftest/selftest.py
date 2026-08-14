@@ -216,6 +216,10 @@ def bootstrap() -> None:
         "tests/vpcsc-violation-dryrun.json",
         # Fikstura detektora martwego czlonka (DEC-42) — wierny ksztalt odpowiedzi Asset Inventory.
         "tests/asset-projekty.json",
+        # Bramka pokrycia filtrow `paths:` + deklaracja jej swiadomych pominiec. Wejscia bramek
+        # wyliczane z DRZEWA zamiast utrzymywanej recznie listy sciezek, ktora rozjechala sie
+        # SZESC razy pod rzad (§9.45; kazdy raz wykryty tym samym „no checks reported").
+        "tools/paths_pokrycie_check.py", ".github/paths-pokrycie.yaml",
     }
     # Dokumentacja jedzie razem z kodem. Wyliczamy ją z katalogu startera zamiast przepisywać listę:
     # przepisana lista wywracałaby ten test przy każdym nowym dokumencie, a to uczy dopisywania nazw
@@ -4561,6 +4565,99 @@ def test_codeowners_rozdzielenie() -> None:
           "zaden alert nie wskazuje kotwicy runbooka" in akcja, akcja[-400:])
 
 
+# --------------------------------------------------------------------- pokrycie filtrow paths
+def test_paths_pokrycie() -> None:
+    """Filtr `paths:` workflowa MUSI pokrywac pliki, ktore ten workflow czyta.
+
+    Ta sama pomylka wyszla w repozytorium perimetru SZESC razy pod rzad i za kazdym razem lekarstwem
+    bylo dopisanie jednej linii do listy sciezek. Ten test pilnuje MECHANIZMU, ktory te liste liczy
+    z drzewa, a nie samej listy — bo lista poprawiona po raz szosty nie przestaje byc lista.
+
+    Mierzone sa OBA kierunki. Sam przebieg pozytywny przechodzi takze wtedy, gdy skaner nie widzi
+    niczego, wiec kazdemu „zielono" towarzyszy tu wsad, ktory ma je zepsuc.
+    """
+    print("\n== pokrycie filtrow paths (wejscia bramek z drzewa) ==")
+    akcja = (ROOT / ".github/actions/bramki-tresci/action.yml").read_text()
+
+    # Bramka uruchamiana recznie nie jest bramka — musi jechac w akcji wolanej przez OBA tory,
+    # bo bez ochrony galezi tor apply jest jedynym, ktorego nie da sie ominac (DEC-16). Bramka
+    # pilnujaca wyzwalaczy, stojaca wylacznie na torze `pull_request`, bylaby wlasnym kontrprzykladem.
+    check("guard pokrycia paths jedzie w bramkach tresci (oba tory)",
+          "tools/paths_pokrycie_check.py" in akcja, akcja[-600:])
+    check("guard pokrycia paths uruchamia takze swoj --self-test",
+          "paths_pokrycie_check.py --self-test" in akcja, akcja[-600:])
+
+    # Drzewo do eksperymentu: kopia rozpakowanego startera z wlasnym indeksem gita. Skaner czyta
+    # `git ls-files`, wiec bez indeksu nie ma z czego liczyc zbioru — i wtedy MA byc czerwony.
+    praca = pathlib.Path(tempfile.mkdtemp(prefix="vpcsc-paths-"))
+    baza = praca / "repo"
+    shutil.copytree(ROOT, baza)
+    narzedzie = str(baza / "tools/paths_pokrycie_check.py")
+
+    def uruchom(cwd=baza):
+        return subprocess.run([sys.executable, narzedzie], cwd=cwd, capture_output=True, text=True)
+
+    # Fail-closed ZANIM cokolwiek innego: drzewo bez indeksu gita to „nie wiem", a nie „czysto".
+    p = uruchom()
+    check("bez indeksu gita guard NIE przepuszcza (fail-closed)", p.returncode != 0,
+          p.stdout + p.stderr)
+
+    subprocess.run(["git", "init", "-q"], cwd=baza, capture_output=True)
+    subprocess.run(["git", "add", "-A"], cwd=baza, capture_output=True)
+
+    p = subprocess.run([sys.executable, narzedzie, "--self-test"], cwd=baza,
+                       capture_output=True, text=True)
+    check("self-test guarda przechodzi (matcher + fail-closed deklaracji)", p.returncode == 0,
+          p.stdout + p.stderr)
+
+    p = uruchom()
+    check("swiezo rozpakowany starter ma PELNE pokrycie paths", p.returncode == 0,
+          p.stdout + p.stderr)
+    # Anty-tautologia do powyzszego: zielono moze znaczyc takze „skaner nic nie policzyl".
+    check("guard policzyl niezerowa liczbe wejsc na kazdym workflow z filtrem",
+          "0 czytanych wejść" not in p.stdout and p.stdout.count("ok  ") >= 4, p.stdout)
+
+    # WSAD 1 — dokladnie ten defekt, ktory zglosil #2077: wejscie bramki poza filtrem.
+    walidacja = baza / ".github/workflows/validate.yml"
+    oryginal = walidacja.read_text()
+    walidacja.write_text(oryginal.replace('      - ".tflint.hcl"\n', ""))
+    p = uruchom()
+    check("zdjecie `.tflint.hcl` z paths JEST czerwone (wejscie trzech krokow tflint)",
+          p.returncode != 0 and ".tflint.hcl" in p.stdout, p.stdout + p.stderr)
+    walidacja.write_text(oryginal)
+
+    # WSAD 2 — czy mechanizm dziala BEZ podania mu nazwy. To jest roznica miedzy bramka wyprowadzajaca
+    # zbior z drzewa a szosta poprawka listy: nowe narzedzie i nowy katalog, o ktorych nikt nikomu
+    # nie powiedzial, maja zostac objete same.
+    (baza / "nowy-katalog").mkdir()
+    (baza / "nowy-katalog/wsad.json").write_text("{}\n")
+    (baza / "tools/nowy_guard.py").write_text(
+        'import pathlib\nprint(pathlib.Path("nowy-katalog/wsad.json").read_text())\n')
+    akcja_p = baza / ".github/actions/bramki-tresci/action.yml"
+    akcja_oryg = akcja_p.read_text()
+    kotwica = "    - name: znacznik - komplet bramek tresci wykonany"
+    akcja_p.write_text(akcja_oryg.replace(
+        kotwica, "    - name: guard - nowy\n      shell: bash\n"
+                 "      run: python3 tools/nowy_guard.py\n\n" + kotwica, 1))
+    subprocess.run(["git", "add", "-A"], cwd=baza, capture_output=True)
+    p = uruchom()
+    check("NOWE wejscie bramki jest objete BEZ dopisywania nazwy do jakiejkolwiek listy",
+          p.returncode != 0 and "nowy-katalog/wsad.json" in p.stdout, p.stdout + p.stderr)
+
+    # Kontrola powrotu: bramka, ktora po cofnieciu wsadu zostaje czerwona, nie mierzy wsadu.
+    akcja_p.write_text(akcja_oryg)
+    shutil.rmtree(baza / "nowy-katalog")
+    (baza / "tools/nowy_guard.py").unlink()
+    subprocess.run(["git", "add", "-A"], cwd=baza, capture_output=True)
+    p = uruchom()
+    check("po cofnieciu obu wsadow guard wraca do zieleni", p.returncode == 0, p.stdout + p.stderr)
+
+    # Deklaracja pominiec: stanem docelowym jest PUSTA lista. Wyjatek jest dowodem, ze czegos nie dalo
+    # sie wyprowadzic z drzewa — nie sposobem na uciszenie bramki.
+    dekl = yaml.safe_load((ROOT / ".github/paths-pokrycie.yaml").read_text())
+    check("deklaracja pominiec istnieje i jest PUSTA", dekl.get("pominiete") == [], str(dekl))
+
+
 # --------------------------------------------------------------------- kompletnosc rejestru decyzji
 def test_kompletnosc_decyzji() -> None:
     """Bramka DEC-20: rozjazd ze starterem widziany na ZBIORZE DECYZJI, nie na wskazniku.
@@ -8133,6 +8230,7 @@ def main() -> int:
     test_rego()
     test_control_plane_lista()
     test_codeowners_rozdzielenie()
+    test_paths_pokrycie()
     test_kompletnosc_decyzji()
     test_tools()
     test_dzien_pierwszy()
