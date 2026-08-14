@@ -3739,3 +3739,67 @@ kosztuje przebieg, brakująca kosztuje brak przebiegu, więc bramka pilnuje wył
 | zdjąć `paths:` ze wszystkich workflowów | każdy pull request uruchamiałby `terraform plan` na trzech stackach i pełny zestaw bramek żywych. Filtr istnieje po to, żeby bramki były tanie; problemem jest jego rozjazd z rzeczywistością, nie samo istnienie |
 | asercja w selfteście zamiast bramki w CI wdrożenia | selftest chodzi po drzewie **startera**, a filtry żyją także we wdrożeniu i można je tam zmienić bezpośrednio. Ta sama luka, którą zamknął guard kotwic w §9.45 — dlatego bramka jedzie w `bramki-tresci`, a selftest ją tylko **przypina** |
 | lista wejść utrzymywana ręcznie, porównywana ze źródłem | rozważone i odrzucone: zbiór jest tu w pełni **strukturalny** (co czyta ten kod), więc da się go policzyć — a lista, którą da się policzyć, nie ma powodu być listą. Bramka porównująca deklarację ze źródłem jest właściwym narzędziem tam, gdzie zbiór jest **semantyczny** (np. „który job wolno dopuścić do sekretu”); tutaj byłaby drugą deklaracją tej samej prawdy |
+
+---
+
+## DEC-57 — Bramka pyta o WŁAŚCIWOŚĆ, nie o zamkniętą listę nazw ani o jedno miejsce, w którym ta właściwość bywa
+
+**Decyzja.** Dwie bramki treści przestają pytać o wąskie miejsce:
+
+* **kotwice runbooka** — źródła polityk alertów wyprowadza się z drzewa
+  (`sorted(pathlib.Path("terraform").glob("*.tf"))`), a nie z pary `("alerts.tf", "monitoring.tf")`.
+  Pusty katalog `terraform/` jest błędem, a komunikat podaje **liczbę przejrzanych plików**;
+* **heartbeat DMS** — ekspozycję sekretu bada się na **wszystkich trzech poziomach `env`**
+  (workflow / job / krok) i dla **wszystkich jobów**, a nie dla kroku w zamkniętej parze
+  `measure`/`publish`. Nazwa joba uprzywilejowanego zostaje zapisana wprost — bo „który job wolno
+  dopuścić do sekretu" nie jest własnością struktury pliku — ale jest **konfrontowana ze źródłem**:
+  brak tego joba w workflow jest błędem, nie ciszą.
+
+**Dlaczego kotwice.** Przy kilkuset projektach polityki alertów rozjeżdżają się na kilka plików `.tf`
+(per dywizja, per klasa alertu). To normalny refaktor, nie egzotyka — a każdy alert w nowym pliku
+dostawał `runbook_url` bez sprawdzenia. Zmierzone: nowy `terraform/alerts-dywizje.tf` z martwą kotwicą
+→ **rc=0**, komunikat `OK: 7 kotwic z alertow`. Martwa kotwica nie daje błędu: przeglądarka ląduje na
+początku dokumentu, więc dyżurny o 3:00 dostaje spis treści zamiast procedury.
+
+Drugi rząd tego defektu jest ważniejszy od pierwszego. Bramka **miała** zabezpieczenie
+anty-tautologiczne (`if not uzyte` — „pusty zbiór też jest błędem") i ono **nie mogło zadziałać**: dwa
+stare pliki wciąż dostarczały komplet kotwic, więc zbiór nigdy nie był pusty.
+**Ochrona przed pustką nie jest ochroną przed niepełnym pokryciem** — i to jest przenośna lekcja,
+nie ciekawostka o tej jednej bramce.
+
+**Dlaczego heartbeat — i dlaczego to jest zgłoszenie bezpieczeństwa.** `env` w GitHub Actions ma trzy
+poziomy; bramka czytała jeden (`k.get("env")` kroku). Zmierzone na żywym pliku, przed poprawką:
+
+| wsad | wynik | ocena |
+|---|---|---|
+| `DMS_PING_URL` w `env` **kroku** joba `measure` | **rc=1** | łapane |
+| `DMS_PING_URL` w `env` **joba** `measure` | **rc=0** | **fail-open — groźne** |
+| `DMS_PING_URL` w `env` **workflow** | **rc=0** | **fail-open — najszersze** |
+| `DMS_PING_URL` w `env` **joba** `publish` | **rc=1** | fail-closed — nieszkodliwe |
+
+Asymetria szła więc **w złą stronę**: bramka milczała tam, gdzie chodzi o bezpieczeństwo, i blokowała
+tam, gdzie skutek jest nieszkodliwy. `env` joba widzi **każdy** jego krok — także dopisany później przez
+kogoś, kto o tej granicy nie wie — a `measure` chodzi na koncie `plan`, impersonowalnym z każdego pull
+requesta. URL pingu to poświadczenie pozwalające **uciszyć dead-man's-switch**, więc autor dowolnego PR-a
+podtrzymywałby heartbeat przy martwej maszynerii. „Wynieśmy `env` wyżej, bo potrzebują go dwa kroki" jest
+najzwyklejszym refaktorem, jaki można sobie wyobrazić.
+
+**Co z tego jest listą, a co nie.** Zbiór plików z alertami jest **strukturalny** — da się go policzyć,
+więc się go liczy. Zbiór jobów uprzywilejowanych jest **semantyczny** — nie da się go policzyć, więc
+zostaje zapisany, ale bramka porównuje go ze źródłem i czerwieni się na rozjeździe. To jest granica
+między „wyprowadź z drzewa" a „dołóż bramkę porównującą", i przebiega dokładnie tutaj.
+
+**Konsekwencje.** Rozszerzenie źródła kotwic na `terraform/*.tf` mogło od razu znaleźć istniejące martwe
+kotwice — sprawdzone, nie znalazło: 7 kotwic w 9 plikach, wszystkie żywe, 11 kotwic w dokumencie.
+Gdyby znalazło, naprawiamy kotwicę, nie bramkę. Bramka DMS zaczyna też odrzucać zmianę nazwy joba
+`publish` — dotąd kończyła się wtedy `KeyError` (czerwono, ale komunikatem o błędzie Pythona zamiast
+o przyczynie).
+
+**Alternatywy odrzucone.**
+
+| wariant | dlaczego nie |
+|---|---|
+| dopisać `alerts-dywizje.tf` do listy dwóch plików | trzecia nazwa w liście, która ma dwie. Ta lista rozjedzie się przy czwartym pliku dokładnie tak samo, a nikt nie zauważy, bo zbiór kotwic nadal nie będzie pusty |
+| badać tylko `env` joba, bo krok już działa | zostawia poziom workflow, czyli najszerszą z trzech ekspozycji. Zamknięcie dwóch wejść z trzech to ta sama klasa defektu, tylko mniejsza |
+| wyprowadzić z drzewa także zbiór jobów uprzywilejowanych | nie da się: „ten job chodzi na koncie impersonowalnym z PR-a" nie jest zapisane w strukturze pliku. Wyprowadzenie na siłę dałoby regułę zgadującą po nazwie joba — czyli bramkę, która myli się cicho |
+| `yaml.safe_dump(cały job)` zamiast trzech poziomów | złapałoby też krok heartbeatu w `publish` i wymagało wyjątku na niego. Wyjątek w bramce bezpieczeństwa jest dokładnie tym miejscem, w którym następna regresja się schowa |

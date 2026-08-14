@@ -4809,6 +4809,112 @@ def test_codeowners_rozdzielenie() -> None:
     check("guard kotwic odrzuca ZEROWE pokrycie (nie myli pustki z czystoscia)",
           "zaden alert nie wskazuje kotwicy runbooka" in akcja, akcja[-400:])
 
+    # ZRODLA KOTWIC Z DRZEWA, NIE Z ZAMKNIETEJ PARY NAZW. Ochrona przed pustka (wiersz wyzej) NIE jest
+    # ochrona przed niepelnym pokryciem: przy liscie dwoch plikow trzeci plik `.tf` z alertami dodawal
+    # `runbook_url` bez sprawdzenia, a zbior uzytych kotwic nigdy nie byl pusty, wiec `if not uzyte`
+    # milczalo. Zmierzone: nowy `terraform/alerts-dywizje.tf` z martwa kotwica -> rc=0.
+    check("guard kotwic wyprowadza zrodla z DRZEWA (glob), a nie z listy nazw",
+          'pathlib.Path("terraform").glob("*.tf")' in akcja, akcja[-400:])
+    check("guard kotwic odrzuca BRAK plikow .tf (fail-closed na pustym katalogu)",
+          "nie ma ani jednego pliku .tf" in akcja, akcja[-400:])
+    check("guard kotwic podaje liczbe PRZEJRZANYCH plikow (zero nierozroznialne od sukcesu)",
+          "przejrzano {len(zrodla)} plikow .tf" in akcja, akcja[-400:])
+
+    # HEARTBEAT DMS — `env` ma w GitHub Actions TRZY poziomy, a bramka pytala o jeden.
+    #
+    # Zmierzone na zywym pliku PRZED poprawka: `DMS_PING_URL` w `env` JOBA `measure` -> rc=0
+    # („ZIELONO"), ten sam zabieg w `publish` -> rc=1. Czyli bramka byla fail-OPEN dokladnie tam,
+    # gdzie chodzi o bezpieczenstwo (job impersonowalny z kazdego pull requesta), i fail-CLOSED tam,
+    # gdzie skutek jest nieszkodliwy. Trzecie wejscie — `env` calego workflowa — bylo otwarte tak samo.
+    check("guard DMS bada `env` na poziomie WORKFLOW", 'widzi(pelny.get("env"))' in akcja, akcja[-400:])
+    check("guard DMS bada `env` na poziomie JOBA", 'widzi(w[job].get("env"))' in akcja, akcja[-400:])
+    check("guard DMS iteruje WSZYSTKIE joby, nie zamknieta pare measure/publish",
+          "for job in sorted(w):" in akcja, akcja[-400:])
+    # Nazwa joba uprzywilejowanego jest SEMANTYCZNA — nie da sie jej policzyc z drzewa. Dlatego jest
+    # zapisana wprost i PORONYWANA ZE ZRODLEM: job, ktorego w workflow nie ma, jest bledem. Bez tego
+    # zmiana nazwy joba rozbrajalaby cala kontrole, zostawiajac ja zielona.
+    check("guard DMS konfrontuje nazwe joba uprzywilejowanego ze ZRODLEM (fail-closed)",
+          "JOB_UPRZYWILEJOWANY not in w" in akcja, akcja[-400:])
+    check("guard DMS podaje liczbe przejrzanych jobow i krokow",
+          "przejrzano {len(w)} jobow" in akcja, akcja[-400:])
+
+    # ── PARY ANTY-TAUTOLOGICZNE NA ZYWYM KODZIE ─────────────────────────────────────────────────
+    # Asercje wyzej pytaja o TEKST bramki. Tekst mozna mieć poprawny i mimo to nie odrzucac — wiec
+    # kazdy wsad nizej jest URUCHAMIANY na zmutowanej kopii drzewa.
+    def cialo_kroku(fragment):
+        akcja_yaml = yaml.safe_load((ROOT / ".github/actions/bramki-tresci/action.yml").read_text())
+        for krok in akcja_yaml["runs"]["steps"]:
+            if fragment in (krok.get("name") or ""):
+                m = re.search(r"python3 - <<'PY'\n(.*?)\n *PY *$", krok["run"], re.S | re.M)
+                return textwrap.dedent(m.group(1))
+        return None
+
+    def na_kopii(kod, mutacja):
+        d = pathlib.Path(tempfile.mkdtemp(prefix="vpcsc-2078-"))
+        for katalog in ("terraform", "docs", ".github"):
+            shutil.copytree(ROOT / katalog, d / katalog)
+        mutacja(d)
+        (d / "_g.py").write_text(kod)
+        p = subprocess.run([sys.executable, "_g.py"], cwd=d, capture_output=True, text=True)
+        shutil.rmtree(d)
+        return p.returncode, p.stdout + p.stderr
+
+    kod_kotwic = cialo_kroku("kotwice runbooka")
+    check("cialo guarda kotwic da sie wyciac z YAML-a", kod_kotwic is not None, "")
+
+    rc, out = na_kopii(kod_kotwic, lambda d: None)
+    check("kotwice: nietkniete drzewo przechodzi (kontrola pozytywna)", rc == 0, out)
+
+    def nowy_plik_alertow(d):
+        (d / "terraform/alerts-dywizje.tf").write_text(
+            'x = "runbook: ${local.runbook}#kotwica-ktorej-nie-ma"\n')
+    rc, out = na_kopii(kod_kotwic, nowy_plik_alertow)
+    check("kotwice: martwa kotwica w NOWYM pliku .tf JEST czerwona (rc=0 przed poprawka)",
+          rc != 0 and "kotwica-ktorej-nie-ma" in out, out)
+
+    def martwa_w_starym(d):
+        p = d / "terraform/alerts.tf"
+        p.write_text(p.read_text() + '\nx = "${local.runbook}#martwa-w-starym"\n')
+    rc, out = na_kopii(kod_kotwic, martwa_w_starym)
+    check("kotwice REGRESJA: stary przypadek (alerts.tf) nadal lapany", rc != 0, out)
+
+    kod_dms = cialo_kroku("heartbeat DMS")
+    check("cialo guarda DMS da sie wyciac z YAML-a", kod_dms is not None, "")
+
+    def mut_watch(d, f):
+        p = d / ".github/workflows/watch.yml"
+        dane = yaml.safe_load(p.read_text())
+        f(dane)
+        p.write_text(yaml.safe_dump(dane, sort_keys=False, allow_unicode=True))
+
+    SEKRET = {"DMS_URL": "${{ secrets.DMS_PING_URL }}"}
+    rc, out = na_kopii(kod_dms, lambda d: None)
+    check("DMS: nietkniete drzewo przechodzi (kontrola pozytywna)", rc == 0, out)
+    check("DMS: werdykt podaje liczbe przejrzanych jobow", "przejrzano 2 jobow" in out, out)
+
+    rc, out = na_kopii(kod_dms, lambda d: mut_watch(
+        d, lambda x: x["jobs"]["measure"].__setitem__("env", dict(SEKRET))))
+    check("DMS: sekret w `env` JOBA measure JEST czerwony (fail-open przed poprawka)",
+          rc != 0 and "measure" in out, out)
+
+    rc, out = na_kopii(kod_dms, lambda d: mut_watch(
+        d, lambda x: x.__setitem__("env", dict(SEKRET))))
+    check("DMS: sekret w `env` WORKFLOW JEST czerwony (trzecie wejscie tej samej klasy)",
+          rc != 0 and "WORKFLOW" in out, out)
+
+    def nowy_job(d):
+        mut_watch(d, lambda x: x["jobs"].__setitem__(
+            "raport", {"runs-on": "ubuntu-latest", "env": dict(SEKRET), "steps": [{"run": "echo"}]}))
+    rc, out = na_kopii(kod_dms, nowy_job)
+    check("DMS: NOWY job z sekretem jest objety BEZ dopisywania jego nazwy",
+          rc != 0 and "raport" in out, out)
+
+    def przemianowany(d):
+        mut_watch(d, lambda x: x["jobs"].__setitem__("publikacja", x["jobs"].pop("publish")))
+    rc, out = na_kopii(kod_dms, przemianowany)
+    check("DMS: brak joba uprzywilejowanego jest ZGLOSZONY, nie przemilczany",
+          rc != 0 and "nie wie" in out, out)
+
 
 # --------------------------------------------------------------------- pokrycie filtrow paths
 def test_paths_pokrycie() -> None:

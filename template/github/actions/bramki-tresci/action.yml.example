@@ -125,24 +125,69 @@ runs:
       run: |
         python3 - <<'PY'
         import sys, yaml
-        w = yaml.safe_load(open(".github/workflows/watch.yml"))["jobs"]
+        pelny = yaml.safe_load(open(".github/workflows/watch.yml"))
+        w = pelny["jobs"]
         bledy = []
 
-        def kroki_z_sekretem(job):
-            return [i for i, k in enumerate(w[job]["steps"])
-                    if "DMS_PING_URL" in yaml.safe_dump(k.get("env", {}))]
+        # `env` W GITHUB ACTIONS MA TRZY POZIOMY, A TA BRAMKA PYTALA O JEDEN.
+        #
+        # Poprzednia wersja czytala wylacznie `k.get("env")` kroku, wiec sekret WYNIESIONY o jeden
+        # poziom wyzej byl dla niej niewidzialny. Zmierzone na zywym pliku: `DMS_PING_URL` w `env`
+        # JOBA `measure` -> rc=0, „ZIELONO"; ten sam zabieg w `publish` -> rc=1. Czyli bramka byla
+        # fail-open dokladnie tam, gdzie chodzi o bezpieczenstwo, i fail-closed tam, gdzie skutek
+        # jest nieszkodliwy. „Wyniesmy env wyzej, bo potrzebuja go dwa kroki" to najzwyklejszy
+        # refaktor, jaki mozna sobie wyobrazic — a `env` joba widzi KAZDY jego krok, takze dopisany
+        # pozniej przez kogos, kto o tej granicy nie wie.
+        #
+        # Poziom WORKFLOW jest trzecim wejsciem tej samej klasy i tez byl otwarty (zmierzone: rc=0).
+        # Jest przy tym najgorszy z trzech: widza go OBA joby naraz.
+        def widzi(obiekt):
+            return "DMS_PING_URL" in yaml.safe_dump(obiekt or {})
 
-        if kroki_z_sekretem("measure"):
-            bledy.append("sekret DMS_PING_URL jest widoczny w jobie `measure` — a ten chodzi na koncie "
-                         "`plan`, impersonowalnym z kazdego pull requesta. Autor dowolnego PR-a moglby "
-                         "podtrzymywac heartbeat przy martwej maszynerii. Heartbeat nalezy do `publish`.")
+        # NAZWA JOBA UPRZYWILEJOWANEGO JEST SEMANTYCZNA — nie da sie jej wyprowadzic z drzewa, bo
+        # „ktory job wolno dopuscic do sekretu" nie jest wlasnoscia struktury pliku. Dlatego jest tu
+        # zapisana wprost i PORONYWANA ZE ZRODLEM: job, ktorego w workflow nie ma, jest bledem, a nie
+        # cisza. Bez tego zmiana nazwy joba rozbrajala by cala kontrole, zostawiajac ja zielona.
+        JOB_UPRZYWILEJOWANY = "publish"
+        if JOB_UPRZYWILEJOWANY not in w:
+            sys.exit(f"::error::w watch.yml nie ma joba `{JOB_UPRZYWILEJOWANY}` — bramka nie wie, "
+                     f"ktory job wolno dopuscic do sekretu, wiec NIE przepuszcza. Joby: {sorted(w)}")
 
-        hb = kroki_z_sekretem("publish")
+        if widzi(pelny.get("env")):
+            bledy.append("DMS_PING_URL stoi w `env` na poziomie WORKFLOW — widza go WSZYSTKIE joby, "
+                         "w tym `measure` chodzacy na koncie `plan`. To najszersza z trzech mozliwych "
+                         "ekspozycji tego sekretu.")
+
+        # Iterujemy PO WSZYSTKICH jobach, a nie po zamknietej parze `measure`/`publish`: job dopisany
+        # do tego workflowa jutro ma byc objety bez dopisywania jego nazwy tutaj.
+        for job in sorted(w):
+            if job == JOB_UPRZYWILEJOWANY:
+                continue
+            gdzie = []
+            if widzi(w[job].get("env")):
+                gdzie.append("`env` JOBA (widoczny dla kazdego jego kroku)")
+            if [k for k in (w[job].get("steps") or []) if widzi(k.get("env"))]:
+                gdzie.append("`env` kroku")
+            if gdzie:
+                bledy.append(f"sekret DMS_PING_URL jest widoczny w jobie `{job}` ({', '.join(gdzie)}) "
+                             "— a ten chodzi na koncie `plan`, impersonowalnym z kazdego pull requesta. "
+                             "Autor dowolnego PR-a moglby podtrzymywac heartbeat przy martwej "
+                             f"maszynerii. Heartbeat nalezy do `{JOB_UPRZYWILEJOWANY}`.")
+
+        # Ten sam zabieg PO STRONIE joba uprzywilejowanego tez jest bledem, tylko z innego powodu:
+        # `env` joba dostaje kazdy krok, wiec ping przestaje byc przywiazany do kroku, ktory stoi
+        # ZA publikacja metryk — a na tym przywiazaniu stoi punkt 2 i 3 tego guarda.
+        if widzi(w[JOB_UPRZYWILEJOWANY].get("env")):
+            bledy.append(f"DMS_PING_URL stoi w `env` JOBA `{JOB_UPRZYWILEJOWANY}`, a nie w `env` kroku "
+                         "heartbeatu. Wtedy widzi go kazdy krok tego joba — takze dopisany przed "
+                         "publikacja metryk — i przywiazanie pingu do konca lancucha znika.")
+
+        hb = [i for i, k in enumerate(w[JOB_UPRZYWILEJOWANY]["steps"]) if widzi(k.get("env"))]
         if len(hb) != 1:
-            bledy.append(f"job `publish` ma {len(hb)} krokow z DMS_PING_URL, oczekiwano dokladnie 1 — "
-                         "warstwa zewnetrzna albo znikla, albo zostala zduplikowana")
+            bledy.append(f"job `{JOB_UPRZYWILEJOWANY}` ma {len(hb)} krokow z DMS_PING_URL, oczekiwano "
+                         "dokladnie 1 — warstwa zewnetrzna albo znikla, albo zostala zduplikowana")
         else:
-            kroki = w["publish"]["steps"]
+            kroki = w[JOB_UPRZYWILEJOWANY]["steps"]
             i_hb = hb[0]
             i_pub = next((i for i, k in enumerate(kroki)
                           if "perimeter_watch.py publish" in (k.get("run") or "")), None)
@@ -160,6 +205,12 @@ runs:
 
         for b in bledy:
             print(f"::error::{b}")
+        # LICZBA ZBADANYCH JEDNOSTEK WYPISANA WPROST — zeby „zero" nie bylo nierozroznialne od sukcesu.
+        # Bramka, ktora przejrzala zero jobow, wypisuje dokladnie to samo „ZIELONO" co bramka, ktora
+        # przejrzala wszystkie; roznice widac tylko wtedy, gdy sama ja poda.
+        print(f"WERDYKT: {'CZERWONO' if bledy else 'ZIELONO'} — przejrzano {len(w)} jobow "
+              f"({', '.join(sorted(w))}), {sum(len(w[j].get('steps') or []) for j in w)} krokow "
+              f"i `env` na 3 poziomach (workflow/job/krok)")
         sys.exit(1 if bledy else 0)
         PY
 
@@ -393,11 +444,21 @@ runs:
         # slug naglowka, a wtedy `runbook_url` przestaje trafiac bez ani jednej zmiany w alertach.
         w_dokumencie = set(re.findall(r'<a id="([a-z0-9-]+)"></a>', runbook.read_text(encoding="utf-8")))
 
-        zrodla = [pathlib.Path(p) for p in ("terraform/alerts.tf", "terraform/monitoring.tf")]
-        brakujace_pliki = [str(p) for p in zrodla if not p.exists()]
-        if brakujace_pliki:
-            sys.exit(f"::error::nie ma {', '.join(brakujace_pliki)} — bez nich guard nie wie, "
-                     "w ktore kotwice celuja alerty, wiec nie przepuszcza")
+        # ZRODLA BIERZEMY Z DRZEWA, NIE Z LISTY DWOCH NAZW.
+        #
+        # Poprzednia wersja pytala o zamknieta pare `("terraform/alerts.tf", "terraform/monitoring.tf")`.
+        # Przy kilkuset projektach polityki alertow rozjezdzaja sie na kilka plikow `.tf` (per dywizja,
+        # per klasa alertu) — to normalny refaktor, nie egzotyka. Kazdy alert w NOWYM pliku dostawal
+        # wtedy `runbook_url` bez sprawdzenia, a martwa kotwica nie dawala bledu: przegladarka laduje
+        # na poczatku dokumentu, wiec dyzurny o 3:00 dostaje spis tresci zamiast procedury.
+        #
+        # Zabezpieczenie anty-tautologiczne nizej (`if not uzyte`) tego NIE lapalo i nie mialo jak:
+        # dwa stare pliki wciaz dostarczaly komplet kotwic, wiec zbior nigdy nie byl pusty.
+        # OCHRONA PRZED PUSTKA NIE JEST OCHRONA PRZED NIEPELNYM POKRYCIEM.
+        zrodla = sorted(pathlib.Path("terraform").glob("*.tf"))
+        if not zrodla:
+            sys.exit("::error::katalog terraform/ nie ma ani jednego pliku .tf — guard nie wie, "
+                     "w ktore kotwice celuja alerty, wiec NIE przepuszcza")
 
         uzyte = set()
         for p in zrodla:
@@ -416,8 +477,12 @@ runs:
                      f"{', '.join(martwe)}. Kotwica bez celu nie daje bledu — przegladarka laduje na "
                      "poczatku dokumentu, wiec dyzurny dostaje spis tresci zamiast procedury.")
 
+        # Liczba ZBADANYCH PLIKOW w komunikacie, nie tylko liczba znalezionych kotwic: bez niej
+        # „7 kotwic" brzmi tak samo, gdy guard przeczytal dwa pliki z dziewieciu i gdy przeczytal
+        # wszystkie dziewiec. Rozjazd zakresu ma byc widoczny w logu, a nie dopiero w incydencie.
         print(f"OK: {len(uzyte)} kotwic z alertow, wszystkie istnieja w docs/7-alerty.md "
-              f"(kotwic w dokumencie: {len(w_dokumencie)})")
+              f"(kotwic w dokumencie: {len(w_dokumencie)}; przejrzano {len(zrodla)} plikow .tf: "
+              f"{', '.join(p.name for p in zrodla)})")
         PY
 
     # `continue-on-error` ZAMIENIA PORAŻKĘ W „SUCCESS" W REST API — zmierzone, nie teoretyczne.
