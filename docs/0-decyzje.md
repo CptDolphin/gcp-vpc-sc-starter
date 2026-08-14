@@ -2201,6 +2201,11 @@ incydent nie ma z niej pożytku. Zostaje `armed: false` z uzasadnieniem wskazuj�
 poziomu jest osobnym ruchem — bramka `vpcsc.perimeter` świadomie odrzuca plan kasujący obiekt polityki
 dostępu, więc taka zmiana nie może przejść „przy okazji".
 
+> **Domknięte przez DEC-51.** Alternatywa postawiona w akapicie wyżej („albo powstaje ta druga procedura,
+> albo poziom znika") została rozstrzygnięta na rzecz **usunięcia** poziomu. Zdanie o bramce przestało być
+> prawdziwe wcześniej i z innego powodu: DEC-33 zawęziła zakaz do poziomu, który po zmianie **nadal jest
+> referowany**, więc kasowanie poziomu bez referencji przechodzi bramką niezmienioną.
+
 **Co odrzucono i dlaczego.**
 
 * **Osobne konto serwisowe dla break-glassu.** Wygląda na czystszy rozdział, a jest drugim kompletem ról,
@@ -2798,8 +2803,7 @@ stan zostaje rozjechany (rola nowa, Deny stare) i widać to dopiero w kolejnym p
 
 **Residual, nazwany wprost.** `accessLevels.delete` sięga — bo zakres ACM jest org-level, wymuszony przez
 Google — każdego **nierefereowanego** poziomu w polityce organizacji, także należącego do perimetru, którego
-to repozytorium nie zarządza, i także poziomu `break_glass`. Bramka OPA widzi wyłącznie referencje z TEJ
-konfiguracji. Poziomy tego repo są odtwarzalne z `perimeter/access-levels/` jednym apply (rola ma `create`);
+to repozytorium nie zarządza. Bramka OPA widzi wyłącznie referencje z TEJ konfiguracji. Poziomy tego repo są odtwarzalne z `perimeter/access-levels/` jednym apply (rola ma `create`);
 cudze — nie są. Warstwa Deny tego nie zawęża i świadomie nie próbuje (wiersze wyżej).
 ## DEC-38 — Offboarding kończy się na granicy; cykl życia projektu nie należy do tego repozytorium
 
@@ -3385,3 +3389,55 @@ wszystko, sam pozytyw przechodzi bramka wyłączona:
 | warunkować niezmiennik na `manage_skeleton` (wyłączać go w brownfieldzie) | `policy.yaml` jest dokumentem, na którym stoją WSZYSTKIE guardy, także wtedy, gdy Terraform nie zarządza szkieletem. Wyłączenie warunku dla brownfielda daje wdrożenie przejmujące bez ani jednego niezmiennika — czyli dokładnie ten stan, przed którym broni akapit wyżej |
 | klucz **wymagany** zamiast domyślnego | `policy.yaml` jest plikiem środowiska i synchronizacja startera go nie dotyka. Klucz wymagany zaczerwieniłby każde stojące wdrożenie w chwili scalenia, a naprawa polegałaby na dopisaniu wartości, którą i tak dostaje z domyślnej. Cena: literał `aiplatform.googleapis.com` zostaje w kodzie jako **wartość domyślna** — ale domyślną da się nadpisać deklaracją, a warunku `precondition` nie dało się |
 | trzymać deklarację w zmiennej Terraforma zamiast w `policy.yaml` | zmienną widzi wyłącznie Terraform. Dwie reguły OPA i schemat czytają `policy.yaml` i nie mają dostępu do `tfvars` — warunek znów rozszedłby się na dwa źródła, tyle że po nowej linii podziału |
+
+---
+
+## DEC-51 — Access level `break_glass` znika; rozstrzyga, czy obiekt ISTNIEJE w organizacji, a nie czy jest nieużywany
+
+**Decyzja.** Poziom `break_glass` zostaje **usunięty** z `perimeter/access-levels/corp.yaml`. Profil
+`corp-user-console-access` — który też nie ma stałego konsumenta — **zostaje**. Nie powstaje procedura
+„granica dalej egzekwuje, ale wpuść bastion"; jeśli kiedyś powstanie, poziom wraca **razem z regułą
+ingress, która go referuje**, i razem z sekcją runbooka. Nie wcześniej.
+
+**Dlaczego akurat tak.** DEC-29 postawiła alternatywę („albo powstaje ta druga procedura razem z regułą,
+która poziom referuje — albo poziom znika") i zostawiła ją otwartą. Zamyka ją druga strona, nie pierwsza,
+i to z trzech powodów w tej kolejności:
+
+1. **Poziom nie jest nieuzbrojony — jest niewidocznie nieuzbrojony.** `armed: false` i `unarmed_reason`
+   to pola TEGO repozytorium; API ich nie zna. W `gcloud access-context-manager levels list` i w konsoli
+   stał obiekt nazwany procedurą awaryjną, z jednym zakresem `/32` i bez jednej referencji. Kto czyta
+   organizację, a nie repozytorium — audytor, nowy człowiek, przyszłe „ja" w incydencie — widział gotową
+   kontrolę. Pole `armed` ostrzega dokładnie przed tym kształtem i tu ostrzegało samo przed sobą.
+2. **Druga procedura nie jest zamówiona.** Zbudowanie jej „skoro poziom już jest" to trzy obiekty
+   (reguła, wpis członka, sekcja runbooka) utrzymywane pod hipotezę. Materiał na nią i tak zostaje
+   gotowy — profil `corp-user-console-access` został wyrenderowany i zmierzony na konfiguracji
+   **egzekwowanej**: wpuścił człowieka przez `group:` i odmówił temu samemu człowiekowi po zmianie
+   grupy. Brakuje konsumenta, nie dowodu.
+3. **Usunięcie nie wymaga już drogi awaryjnej.** Do 2026-08-13 bramka `vpcsc.perimeter` zrównywała
+   access level z perimetrem i odrzucała każdy plan kasujący obiekt polityki dostępu — więc „usuń
+   poziom" znaczyło „osłab bramkę albo obejdź ją jednorazowo". DEC-33 zawęziła zakaz do poziomu, który
+   po zmianie **nadal jest referowany**. `break_glass` ma zero referencji, więc plan przechodzi bramką
+   **niezmienioną**. Blokada, która trzymała tę decyzję otwartą, przestała istnieć wcześniej i z innego
+   powodu.
+
+**Asymetria z profilem — to jest właściwe kryterium.** „Nieużywany" nie rozstrzyga niczego: nieużywane są
+oba. Rozstrzyga **gdzie obiekt istnieje**. Profil jest szablonem w repozytorium: renderuje się dopiero,
+gdy ktoś przywoła go w `projects.yaml`, więc w organizacji go nie ma i nikt go w `describe` nie zobaczy.
+Access level istniał **na żywo**. Koszt nieużywanego szablonu to linijki w gicie; koszt nieużywanego
+obiektu polityki dostępu to fałszywa kontrola w organizacji. Ta sama zasada dotyczy każdego innego
+placeholdera: zanim uznasz go za tani, sprawdź, po której stronie tej granicy leży.
+
+**Konsekwencja dla synchronizacji.** Poprawka powstaje w starterze, więc każde wdrożenie dostanie ją przy
+najbliższym scaleniu i **straci swój poziom `break_glass`**, jeśli go nie referuje. Jeśli u kogoś jest
+referowany — bramka `vpcsc.perimeter` odrzuci plan z nazwą poziomu i komunikatem „usuń najpierw reguły,
+które go używają". To zamierzone: to jest dokładnie pytanie, na które wdrożenie ma odpowiedzieć świadomie.
+
+**Alternatywy odrzucone.**
+
+| wariant | dlaczego nie |
+| --- | --- |
+| zbudować procedurę „wpuść bastion" i uzbroić poziom | trzy obiekty utrzymywane pod hipotezę, bez zamawiającego. Uzbrojenie samego poziomu bez reguły ingress nie zmienia niczego poza tym, że audyt widzi kontrolę — a incydent nadal nie ma z niej pożytku (DEC-29) |
+| zostawić poziom, dopisując „to placeholder" w komentarzu | komentarz jest w repozytorium, obiekt w organizacji. Dokładnie ten rozjazd tworzy problem, a nie brak opisu |
+| zostawić poziom, ale z `unarmed_accepted_until` | data wymusza powrót do decyzji, której nie ma po co odkładać: alternatywa DEC-29 jest rozstrzygnięta, a wygasanie zamieniłoby ją w przypomnienie o samej sobie |
+| usunąć przy okazji także profil `corp-user-console-access` | profil nie istnieje w organizacji i ma zmierzony dowód działania. Usunięcie go kosztowałoby ten dowód, a nie zdjęło żadnej fałszywej kontroli |
+| poluzować bramkę `vpcsc.perimeter`, żeby przepuściła kasowanie | niepotrzebne od DEC-33 — a gdyby było potrzebne, byłoby to trwałe osłabienie kontroli w zamian za jednorazowe sprzątnięcie |

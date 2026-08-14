@@ -395,9 +395,12 @@ skutku co jego ustawienie; pilnuje tego reguła OPA.
 Zdejmujemy członka z konfiguracji **egzekwowanej**, zostawiając go w **dry-run**. Incydent nie kasuje wiedzy
 o jego ruchu — po naprawie promocja wymaga takiego samego dowodu jak za pierwszym razem.
 
-**To NIE JEST procedura „wpuść bastion przez działającą granicę".** Access level `break_glass` w
-`perimeter/access-levels/` należy do tamtej, innej procedury i ta droga go **nie używa** — patrz DEC-29.
-Szukanie w incydencie adresu, który trzeba dopisać do poziomu, jest szukaniem w złym miejscu.
+**To NIE JEST procedura „wpuść bastion przez działającą granicę".** Ta droga **nie używa żadnego access
+levelu** — patrz DEC-29. Szukanie w incydencie adresu, który trzeba dopisać do poziomu, jest szukaniem
+w złym miejscu, i właśnie dlatego poziom `break_glass` **przestał istnieć** (DEC-51): nazwa procedury
+awaryjnej na obiekcie, którego ta procedura nie dotyka, jest w incydencie fałszywym tropem, a w audycie
+fałszywą kontrolą. Jeśli kiedyś powstanie tamta, druga procedura — poziom wraca **razem z regułą ingress,
+która go referuje**, nie wcześniej.
 
 ### Czasy, na które można liczyć (zmierzone, nie szacowane)
 
