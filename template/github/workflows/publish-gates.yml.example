@@ -76,6 +76,7 @@ jobs:
 
           Zawiera WYŁĄCZNIE reguły — żadnych danych o członkach perimetru, tożsamościach ani zakresach IP.
 
-          Użycie: contrib/action.yml pobiera tę paczkę automatycznie. Ręcznie:
+          Użycie: akcja contrib (w starterze, .github/actions/contrib — DEC-21) pobiera tę paczkę
+          automatycznie. Ręcznie:
               gh release download gates-$VERSION --repo \${{ github.repository }} --pattern gates.tar.gz
               tar -xzf gates.tar.gz && ./gates/validate-local.sh --member <plik.yaml> --gates ./gates"

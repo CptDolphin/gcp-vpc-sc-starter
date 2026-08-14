@@ -1350,6 +1350,98 @@ def buduj_kontrakt(root: pathlib.Path) -> dict:
     }
 
 
+# ------------------------------------------ kanal dywizji: jeden material, jedna bramka (DEC-21, #2075)
+#
+# Dywizja dostaje kanal zgloszeniowy z DWOCH miejsc naraz: `examples/division-repo/` (do skopiowania
+# w calosci) i bloku „Krok 3" w `.github/actions/contrib/README.md` (do wklejenia). Dopoki asercje stoja
+# przy JEDNYM z nich, drugi moze cicho odjechac — i odjechal. Zmierzone (#2075): README uczyl
+# `uses: ORG/gcp-vpc-sc/contrib@…`, czyli repozytorium PRYWATNEGO i do tego zlej sciezki, a jego blok mial
+# `on: pull_request` BEZ `types: [closed]` i bez `merged == true` — czyli wysylke zgloszenia z OTWARTEGO
+# pull requesta. Trzy inne miejsca w starterze mowily wtedy poprawnie; README bylo jedynym, ktore klamalo.
+#
+# Konsekwencja drugiego defektu jest scisle bezpieczenstwowa: kazdy, kto potrafi otworzyc PR w repozytorium
+# dywizji, generuje PR w repozytorium perimetru — z pominieciem merge'a, czyli z pominieciem jedynego
+# momentu, w ktorym ktokolwiek na to patrzy.
+#
+# Dlatego asercje siedza TUTAJ, a nie w tescie przykladu: kazdy material, ktory dywizja u siebie uruchomi,
+# przechodzi te sama bramke, a trzeci taki material dolaczy sie jednym wywolaniem. To ta sama zasada, co
+# `stacki_terraform()` wyzej — lista wyprowadza sie z jednego miejsca, zamiast byc przepisywana obok.
+def sprawdz_kanal_dywizji(wf: dict, zrodlo: str) -> None:
+    """Asercje wspolne dla KAZDEGO materialu kanalu zgloszeniowego (przyklad ORAZ instrukcja)."""
+    # `on:` to w YAML 1.1 wartosc logiczna — PyYAML robi z tego klucz `True`, nie `"on"`. Blok wyciety
+    # z README parsuje sie dokladnie tak samo jak plik przykladu, wiec pulapka dotyczy obu zrodel.
+    wyzwalacz = wf.get("on", wf.get(True)) or {}
+    pr = (wyzwalacz.get("pull_request") or {}) if isinstance(wyzwalacz, dict) else {}
+    typy = pr.get("types") or []
+    # Bez `closed` w wyzwalaczu `merged == true` nie zaplonie NIGDY (domyslne typy to opened/synchronize/
+    # reopened), wiec kanal jest martwy. Z `closed` ale bez `merged` — odpala sie tez na PR-ze zamknietym
+    # BEZ merge'a, czyli na wniosku odrzuconym. Dopiero oba naraz znacza „po przegladzie".
+    check(f"[{zrodlo}] wyzwalacz obejmuje `closed` (bez tego `merged == true` nie zaplonie nigdy)",
+          "closed" in typy, f"types: {typy}")
+
+    kroki = [(nazwa, job, k) for nazwa, job in (wf.get("jobs") or {}).items()
+             for k in ((job or {}).get("steps") or []) if "contrib@" in str((k or {}).get("uses", ""))]
+    check(f"[{zrodlo}] material wola akcje contrib DOKLADNIE raz (a nie kopiuje jej logiki)",
+          len(kroki) == 1, f"znalezione w jobach: {[n for n, _, _ in kroki]}")
+    if len(kroki) != 1:
+        return
+
+    nazwa_joba, job, krok = kroki[0]
+    # Warunek wolno postawic na jobie albo na samym kroku — liczy sie, ze wysylka jest ZA nim.
+    warunek = f"{(job or {}).get('if', '')} {krok.get('if', '')}"
+    check(f"[{zrodlo}] zgloszenie wychodzi DOPIERO po merge (job `{nazwa_joba}`)",
+          "merged == true" in warunek, f"if: {warunek.strip()!r}")
+
+    # SKAD akcja jest brana — bramka, nie kosmetyka. Sciezka musi wskazywac repozytorium, ktore runner
+    # umie pobrac BEZ tokenu: `uses:` rozwiazuje sie na etapie `Set up job`, TOKENEM DYWIZJI, zanim
+    # wykona sie jakikolwiek krok — token aplikacji jeszcze wtedy nie istnieje, wiec zadne uprawnienie
+    # tego nie ratuje. Repo perimetru jest prywatne i konczy sie `Unable to resolve action …,
+    # repository not found` (zero krokow). Ruchoma referencja to referencja mutowalna, a kto ja
+    # kontroluje, kontroluje kod uruchamiany z poswiadczeniem dywizji.
+    #
+    # Samego SHA-a tutaj NIE wymagamy i to jest swiadome: material w starterze nie moze przypiac commita,
+    # ktory powstanie dopiero po jego zmergowaniu. Wymagamy tego, co da sie orzec o szablonie — ze
+    # referencja nie jest RUCHOMA. Placeholder `<SHA_WYDANIA>` krzyczy „uzupelnij", `@main` udaje gotowe.
+    odn = str(krok["uses"])
+    check(f"[{zrodlo}] akcja brana ze STARTERA (publiczny), nie z repo perimetru (DEC-21)",
+          "/gcp-vpc-sc-starter/.github/actions/contrib@" in odn, odn)
+    ref = odn.split("@", 1)[1].split()[0]
+    check(f"[{zrodlo}] odniesienie do akcji NIE jest ruchome (@main/@master/@v* = mutowalne)",
+          ref not in {"main", "master", "HEAD"} and not re.fullmatch(r"v[\d.]+", ref), odn)
+
+
+def blok_yaml_z_markdownu(plik: pathlib.Path, naglowek: str) -> str | None:
+    """Pierwszy blok ```yaml PO zadanym naglowku sekcji.
+
+    Zakotwiczone naglowkiem, a nie „pierwszy blok w pliku": README ma tych blokow kilka (fragmenty
+    poglądowe, komendy, tabele) i asercja biorąca byle blok czerwienilaby sie od cudzych — czyli
+    zamienilaby sie w szum, ktory ktos w koncu wylaczy.
+    """
+    tekst = plik.read_text()
+    i = tekst.find(naglowek)
+    if i < 0:
+        return None
+    m = re.search(r"^```ya?ml\n(.*?)^```", tekst[i:], re.S | re.M)
+    return m.group(1) if m else None
+
+
+def test_instrukcja_kanalu_dywizji() -> None:
+    """Blok „Krok 3" z README akcji `contrib` przechodzi DOKLADNIE te same asercje, co przyklad (#2075).
+
+    README akcji jest materialem, ktory dywizja KOPIUJE — a nie ogląda. Roznica miedzy „pokazujemy"
+    a „kazemy skopiowac" jest tu na niekorzysc instrukcji: przyklad ktos przeczyta w calosci, blok
+    z README ląduje w cudzym repozytorium wklejeniem.
+    """
+    print("\n== instrukcja kanalu dywizji (README akcji contrib) ==")
+    plik = STARTER / ".github/actions/contrib/README.md"
+    NAGLOWEK = "## Krok 3 — workflow u siebie"
+    blok = blok_yaml_z_markdownu(plik, NAGLOWEK)
+    check(f"README akcji contrib ma blok yaml pod naglowkiem `{NAGLOWEK}`", blok is not None)
+    if blok is None:
+        return
+    sprawdz_kanal_dywizji(yaml.safe_load(blok), "README Krok 3")
+
+
 def test_przyklad_repo_dywizji() -> None:
     """`examples/division-repo/` ma być DZIAŁAJĄCYM przykładem, nie ilustracją.
 
@@ -1376,29 +1468,15 @@ def test_przyklad_repo_dywizji() -> None:
           {"schema_version", "division", "project_id", "project_number", "owner_group", "approved_by",
            "profiles"} <= set(dekl), f"jest: {sorted(dekl)}")
 
-    # Workflow nie może wysyłać zgłoszenia z otwartego PR-a: dispatch ma konsekwencje po drugiej stronie
-    # granicy, więc wychodzi dopiero po merge'u. Sprawdzamy STRUKTURĘ (warunek joba), nie tekst.
+    # Wspolne asercje kanalu — TE SAME, ktore dostaje instrukcja z README (`sprawdz_kanal_dywizji`).
+    # Wczesniej staly tutaj w kopii i to jest dokladnie powod, dla ktorego README moglo odjechac (#2075):
+    # bramka pilnowala materialu, ktory POKAZUJEMY, a nie tego, ktory KAZEMY SKOPIOWAC.
     wf = yaml.safe_load((przyklad / "github/workflows/vpc-sc-request.yml").read_text())
-    zgloszenie = wf["jobs"]["zgloszenie"]
-    check("workflow wysyla zgloszenie DOPIERO po merge",
-          "merged == true" in str(zgloszenie.get("if", "")), str(zgloszenie.get("if")))
-    uzywa_akcji = [s for s in zgloszenie["steps"] if "contrib@" in str(s.get("uses", ""))]
-    check("workflow wola akcje contrib (a nie kopiuje jej logiki)", len(uzywa_akcji) == 1)
+    sprawdz_kanal_dywizji(wf, "examples/division-repo")
 
-    # SKĄD akcja jest brana — to jest bramka, nie kosmetyka. Ścieżka musi wskazywać na repozytorium, które
-    # runner umie pobrać BEZ tokenu (starter jest publiczny), a referencja musi być 40-znakowym SHA-em:
-    # ruchoma referencja to referencja mutowalna, a kto ją kontroluje, kontroluje kod uruchamiany
-    # z poświadczeniem dywizji. Placeholdera `<SHA…>` też nie przepuszczamy jako „prawie pinu".
-    #
-    # Sam SHA-a tutaj NIE wymagamy i to jest świadome: przykład w starterze nie może przypiąć commita,
-    # który powstanie dopiero po jego zmergowaniu. Wymagamy tego, co da się orzec o szablonie —
-    # że referencja nie jest RUCHOMA. Placeholder krzyczy „uzupełnij", `@main` udaje, że jest gotowe.
-    odn = str(uzywa_akcji[0]["uses"])
-    check("akcja brana ze STARTERA (publiczny), nie z repo perimetru (DEC-21)",
-          "/gcp-vpc-sc-starter/.github/actions/contrib@" in odn, odn)
-    ref = odn.split("@", 1)[1].split()[0]
-    check("odniesienie do akcji NIE jest ruchome (@main/@master/@v* = mutowalne)",
-          ref not in {"main", "master", "HEAD"} and not re.fullmatch(r"v[\d.]+", ref), odn)
+    # Poza wspolnymi — wlasciwosc, ktora ma tylko przyklad: DWA joby, i tylko jeden z nich wysyla.
+    # Job walidacyjny nie moze wolac akcji, bo jej OSTATNI krok wysyla zgloszenie, a walidacja jedzie
+    # na kazdym pushu do PR-a. W bloku z README jobu walidacyjnego nie ma, wiec asercja zostaje tutaj.
     check("job walidacji NIE wola akcji wysylajacej dispatch",
           not [s for s in wf["jobs"]["walidacja"]["steps"] if "contrib@" in str(s.get("uses", ""))])
 
@@ -7917,6 +7995,7 @@ def main() -> int:
     test_contract()
     test_kontrakt_dwie_publikacje()
     test_przyklad_repo_dywizji()
+    test_instrukcja_kanalu_dywizji()
     test_kanal_dywizji()
     test_kanal_ticketowy()
     test_swieza_baza()
