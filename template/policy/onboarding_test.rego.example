@@ -142,9 +142,44 @@ test_brak_members_list_denied if {
 	contains(m, "został po cichu zgubiony")
 }
 
+# `base_policy` NIE deklaruje `baseline_required_services`, więc ten test biegnie po ścieżce DOMYŚLNEJ —
+# czyli sprawdza dokładnie to zachowanie, które wdrożenia stojące przed DEC-50 mają dostać po synchronizacji.
 test_missing_aiplatform_denied if {
 	bad := object.union(healthy_input, {"policy": object.union(base_policy, {"restricted_services": ["storage.googleapis.com"]})})
 	count(deny) > 0 with input as bad
+}
+
+# PARA ANTY-TAUTOLOGICZNA DO POWYŻSZEGO — i cały powód istnienia DEC-50.
+#
+# Wdrożenie, które chroni co innego niż to repozytorium (cudzy perimetr przejęty brownfieldem), deklaruje SWÓJ
+# baseline i MA PRZEJŚĆ. Przed DEC-50 ten przypadek padał, bo literał `aiplatform.googleapis.com` stał
+# w regule. Bez tej asercji „reguła odrzucająca wszystko" wyglądałaby na działającą.
+test_obcy_baseline_bez_aiplatform_przechodzi if {
+	obca := object.union(base_policy, {
+		"restricted_services": ["sqladmin.googleapis.com", "storage.googleapis.com"],
+		"baseline_required_services": ["sqladmin.googleapis.com"],
+	})
+	count(deny) == 0 with input as object.union(healthy_input, {"policy": obca})
+}
+
+# Deklaracja musi mówić prawdę: usługa wypisana jako niezmiennik, a nieobecna w `restricted_services`,
+# opisuje ochronę, której nie ma.
+test_obcy_baseline_bez_pokrycia_denied if {
+	obca := object.union(base_policy, {
+		"restricted_services": ["storage.googleapis.com"],
+		"baseline_required_services": ["sqladmin.googleapis.com"],
+	})
+	msgs := deny with input as object.union(healthy_input, {"policy": obca})
+	some m in msgs
+	contains(m, "sqladmin.googleapis.com")
+}
+
+# Pusta lista to nie „brak niezmienników", tylko wyłączona bramka bez zapisanej decyzji.
+test_pusty_baseline_denied if {
+	pusta := object.union(base_policy, {"baseline_required_services": []})
+	msgs := deny with input as object.union(healthy_input, {"policy": pusta})
+	some m in msgs
+	contains(m, "pustą listą")
 }
 
 test_unknown_profile_denied if {

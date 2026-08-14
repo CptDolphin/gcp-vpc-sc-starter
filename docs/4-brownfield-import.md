@@ -87,25 +87,45 @@ i **`vpc_accessible_services`**. Powtarzaj krok 1, aż zobaczysz `ZGODNE`.
 
 ### Kiedy Twoje niezmienniki nie pasują do cudzego perimetru
 
-Repo niesie twarde niezmienniki baseline'u — u nas „baseline musi zawierać `aiplatform.googleapis.com`",
-egzekwowane w **trzech** miejscach naraz (`precondition` w `terraform/perimeter.tf`, `policy/perimeter.rego`,
-`policy/onboarding.rego`). Na cudzym perimetrze, który chroni inne usługi, **plan nie ruszy**:
+Repo niesie twardy niezmiennik baseline'u: **wypadnięcie z `restricted_services` usługi, dla której
+perimetr powstał, jest błędem planu**. Niezmiennik zostaje — ale to, **których usług dotyczy**, jest
+DEKLARACJĄ Twojego wdrożenia, a nie literałem w kodzie bramki (DEC-50):
+
+```yaml
+# perimeter/policy.yaml
+baseline_required_services:
+  - aiplatform.googleapis.com     # u nas; u Ciebie to, dla czego stoi Twoja granica
+```
+
+Krok 2 tej procedury (przepisz rzeczywistość do pliku) i niezmiennik **nie stoją więc w sprzeczności**:
+przepisujesz `restricted_services` z chmury i w tej samej edycji mówisz, które z tych usług są dla
+Ciebie niezmiennikiem. Klucz nieobecny = `["aiplatform.googleapis.com"]`, czyli zachowanie sprzed
+DEC-50 — jeśli przejmowany perimetr nie chroni Vertex AI, **musisz** ten klucz wypełnić, bo inaczej
+`plan` zatrzyma się na:
 
 ```
 Error: Resource precondition failed
-Baseline musi zawierać aiplatform.googleapis.com — bez niego perimetr nie chroni Vertex AI.
+perimeter/policy.yaml: restricted_services nie zawiera usług zadeklarowanych w
+baseline_required_services: aiplatform.googleapis.com.
 ```
 
-To nie jest usterka — to niezmiennik robiący swoją robotę. Masz dwie uczciwe drogi i **żadna nie polega
-na usunięciu bramki**:
+Dwa warunki, których **nie da się obejść deklaracją** — i to one czynią z tego niezmiennik:
 
-1. **Zmienić niezmiennik na własny** — jeśli przejmowany perimetr chroni co innego, opisz to w ADR
-   i podmień usługę we wszystkich trzech miejscach. Niezmiennik ma zostać, ma tylko mówić prawdę.
-2. **Poszerzyć baseline przejmowanego perimetru** — jeśli usługa faktycznie ma być chroniona.
-   To **zmiana zakresu ochrony**, nie krok techniczny: własny ticket, własna zgoda, własne okno.
+* lista **nie może być pusta**. Perimetr bez ani jednego niezmiennika przechodzi każdą bramkę i nie
+  obiecuje nikomu niczego;
+* każdy wpis **musi realnie występować** w `restricted_services`. Deklaracja opisująca ochronę, której
+  nie ma, jest gorsza niż jej brak.
 
-Czego nie robić: kasować `precondition`, żeby plan przeszedł. Wtedy przejęcie „się udaje", a granica
-przestaje obiecywać cokolwiek.
+Czego nie robić: kasować `precondition` ani reguł OPA, żeby plan przeszedł. Przed DEC-50 był to jedyny
+sposób, bo warunek stał zaszyty w **pięciu** miejscach naraz (`terraform/perimeter.tf`,
+`terraform/tests/renderer.tftest.hcl`, `policy/perimeter.rego`, `policy/onboarding.rego`,
+`schemas/policy.schema.json`) — czyli pierwszą czynnością przejmującego byłby fork logiki bramki.
+Dziś edytujesz **jeden plik deklaracji**; kod bramek zostaje nietknięty i dalej pilnuje tego, co
+zadeklarowałeś.
+
+A jeśli usługa faktycznie **ma** być chroniona, a przejmowany perimetr jej nie chroni — to
+**zmiana zakresu ochrony**, nie krok techniczny: własny ticket, własna zgoda, własne okno
+(`docs/8-zmiany-reczne.md` §8.4), a nie produkt uboczny przejęcia.
 
 ## Krok 3 — blok `import` i przełącznik
 

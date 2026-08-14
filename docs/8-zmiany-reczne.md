@@ -490,6 +490,13 @@ w oknie między jednym a drugim apply — nie ma ich kto powtórzyć. Przy dodaw
 z niepustą konfiguracją egzekwowaną rewert jest planem awaryjnym, a nie strategią; strategią jest
 dodanie usługi **najpierw** tam, gdzie wszyscy członkowie są w dry-run, i odczytanie naruszeń.
 
-**Czego cofnąć się nie da bramką:** `aiplatform.googleapis.com` jest zablokowane przed usunięciem regułą
-OPA (baseline chroni Vertex AI od dnia zero — DEC-1). Każda inna usługa może z tej listy zniknąć zwykłym
-pull requestem i **nie odpali żadnego alertu**.
+**Czego cofnąć się nie da bramką:** usługi wypisane w `policy.yaml §baseline_required_services` są
+zablokowane przed usunięciem z `restricted_services` — pilnują tego precondition Terraforma, test renderera
+i dwie reguły OPA (DEC-1, DEC-50). Każda **inna** usługa może z tej listy zniknąć zwykłym pull requestem
+i **nie odpali żadnego alertu**.
+
+Konsekwencja, o której trzeba wiedzieć: `baseline_required_services` to sama deklaracja, więc usunięcie
+usługi **z niej** przechodzi bramki (dopóki lista zostaje niepusta). Nie jest to dziura, tylko granica
+mechanizmu — dlatego ten plik leży pod CODEOWNERS Security i dlatego zmiana tej listy idzie tą samą
+ścieżką review co zmiana `restricted_services` (§8.4). Bramka pilnuje **zgodności deklaracji z
+konfiguracją**; tego, że deklaracja mówi prawdę o intencji organizacji, nie da się sprawdzić maszyną.

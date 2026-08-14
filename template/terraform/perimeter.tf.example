@@ -327,11 +327,21 @@ resource "google_access_context_manager_service_perimeter" "this" {
       spec[0].egress_policies,
     ]
 
-    # Vertex AI jest powodem istnienia tego perimetru. Gdyby wypadł z baseline'u, perimetr dalej wyglądałby
-    # w konsoli na włączony, chroniąc usługi, o które nikt nie prosił — najgorszy rodzaj awarii, bo niemy.
+    # Usługi, dla których ten perimetr powstał, muszą w baselinie ZOSTAĆ. Gdyby któraś wypadła, perimetr
+    # dalej wyglądałby w konsoli na włączony, chroniąc usługi, o które nikt nie prosił — najgorszy rodzaj
+    # awarii, bo niemy.
+    #
+    # KTÓRE to usługi, mówi `perimeter/policy.yaml §baseline_required_services`, a nie ten plik (DEC-50).
+    # Literał `aiplatform.googleapis.com` stał tutaj i w czterech innych miejscach; na cudzym perimetrze,
+    # który chroni co innego, zatrzymywał `plan` na pierwszym kroku przejęcia (docs/4-brownfield-import.md).
     precondition {
-      condition     = contains(local.restricted_services, "aiplatform.googleapis.com")
-      error_message = "Baseline musi zawierać aiplatform.googleapis.com — bez niego perimetr nie chroni Vertex AI (perimeter/policy.yaml)."
+      condition     = length(local.baseline_required_services) > 0
+      error_message = "perimeter/policy.yaml: baseline_required_services jest pustą listą. Perimetr bez ani jednego niezmiennika nie obiecuje nikomu niczego — wypisz usługi, których wypadnięcie z restricted_services ma być błędem (klucz nieobecny = aiplatform.googleapis.com)."
+    }
+
+    precondition {
+      condition     = length(local.baseline_services_missing) == 0
+      error_message = "perimeter/policy.yaml: restricted_services nie zawiera usług zadeklarowanych w baseline_required_services: ${join(", ", local.baseline_services_missing)}. Albo dopisz je do restricted_services, albo — jeśli ten perimetr faktycznie ich nie chroni — popraw deklarację; to jest zmiana zakresu ochrony, nie refaktor."
     }
 
     # Perimetr bez ani jednego członka egzekwowanego jest dopuszczalny (tak wygląda dzień pierwszy), ale

@@ -268,22 +268,43 @@ test_baseline_without_access_level_closed_without_data if {
 	count(deny) > 0 with input as plan_with([bez_zrodla])
 }
 
+szkielet_z(uslugi) := {
+	"address": "google_access_context_manager_service_perimeter.this[0]",
+	"type": "google_access_context_manager_service_perimeter",
+	"values": {"status": [{"restricted_services": uslugi}], "spec": [{"restricted_services": uslugi}]},
+}
+
+# Bez `with data …` — czyli ścieżka DOMYŚLNA (brak deklaracji = zachowanie sprzed DEC-50).
 test_perimeter_without_aiplatform_denied if {
-	skeleton := {
-		"address": "google_access_context_manager_service_perimeter.this[0]",
-		"type": "google_access_context_manager_service_perimeter",
-		"values": {"status": [{"restricted_services": ["storage.googleapis.com"]}], "spec": [{"restricted_services": ["storage.googleapis.com"]}]},
-	}
-	count(deny) > 0 with input as plan_with([skeleton])
+	count(deny) > 0 with input as plan_with([szkielet_z(["storage.googleapis.com"])])
 }
 
 test_perimeter_with_aiplatform_passes if {
-	skeleton := {
-		"address": "google_access_context_manager_service_perimeter.this[0]",
-		"type": "google_access_context_manager_service_perimeter",
-		"values": {"status": [{"restricted_services": ["aiplatform.googleapis.com"]}], "spec": [{"restricted_services": ["aiplatform.googleapis.com"]}]},
-	}
-	count(deny) == 0 with input as plan_with([skeleton])
+	count(deny) == 0 with input as plan_with([szkielet_z(["aiplatform.googleapis.com"])])
+}
+
+# PARA ANTY-TAUTOLOGICZNA (DEC-50): cudzy perimetr chroniący co innego MA PRZEJŚĆ, gdy deklaracja to
+# mówi — i MA PAŚĆ, gdy plan gubi zadeklarowaną usługę. Sama pierwsza asercja niczego by nie dowiodła
+# (reguła wyłączona przechodzi tak samo), sama druga też nie (reguła odrzucająca wszystko przechodzi ją).
+test_perimeter_obcy_baseline_przechodzi if {
+	count(deny) == 0 with input as plan_with([szkielet_z(["sqladmin.googleapis.com", "storage.googleapis.com"])])
+		with data.baseline_required_services as ["sqladmin.googleapis.com"]
+}
+
+test_perimeter_obcy_baseline_bez_uslugi_denied if {
+	msgs := deny with input as plan_with([szkielet_z(["storage.googleapis.com"])])
+		with data.baseline_required_services as ["sqladmin.googleapis.com"]
+	some m in msgs
+	contains(m, "sqladmin.googleapis.com")
+}
+
+# Pusta deklaracja jest odrzucana WPROST, a nie zastępowana wartością domyślną — inaczej komunikat mówiłby
+# o `aiplatform` komuś, kto tej usługi nie chroni.
+test_perimeter_pusty_baseline_denied if {
+	msgs := deny with input as plan_with([szkielet_z(["storage.googleapis.com"])])
+		with data.baseline_required_services as []
+	some m in msgs
+	contains(m, "pustą listą")
 }
 
 # Kasowanie perimetru przez pipeline to ścieżka break-glass, nie zwykły PR — nawet gdy IAM na to pozwala.
