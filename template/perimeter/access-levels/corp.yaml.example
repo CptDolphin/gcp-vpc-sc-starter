@@ -99,28 +99,31 @@ access_levels:
   #     allowed_encryption_statuses:
   #       - ENCRYPTED
 
-  - name: break_glass
-    title: "Break-glass (incident only)"
-    # UWAGA — DWIE RÓŻNE PROCEDURY NOSZĄ TU JEDNĄ NAZWĘ, i to jest jedyna rzecz, którą trzeba o tym
-    # poziomie wiedzieć przed jego uzbrojeniem (DEC-29).
-    #
-    # `break-glass.yml` — procedura, którą ten starter ma i która została przećwiczona na żywej granicy —
-    # NIE UŻYWA ŻADNEGO ACCESS LEVELU. Wyprowadza członka z konfiguracji EGZEKWOWANEJ i tym przywraca
-    # ruch; access level jest wtedy bez znaczenia, bo nie ma już czego spełniać.
-    #
-    # Poziom niżej należy do procedury INNEJ, której tu nie ma: „granica dalej egzekwuje, ale wpuść
-    # bastion". Ta wymaga własnej reguły ingress na członku (profil `corp-user-console-access`), własnego
-    # wpisu w `projects.yaml` i własnego opisu w runbooku — sam poziom nie wpuszcza nikogo, bo nic go nie
-    # referuje. Zostawiony bez tego kompletu jest dokładnie tym, przed czym ostrzega pole `armed`:
-    # obiektem, który w konsoli wygląda jak gotowa kontrola awaryjna.
-    #
-    # DECYZJA: NIE UZBRAJAMY GO „na wszelki wypadek". Albo powstaje ta druga procedura razem z regułą,
-    # która poziom referuje — albo poziom znika. Uzbrojony placeholder bez reguły daje bowiem najgorszy
-    # z możliwych wyników: audyt widzi kontrolę, incydent nie ma z niej pożytku.
-    armed: false
-    unarmed_reason: "poziom nalezy do procedury 'wpusc bastion przy dzialajacej granicy', ktorej ten starter NIE MA; break-glass.yml wyprowadza czlonka z enforced i access levelu nie uzywa (DEC-29)"
-    ip_subnetworks:
-      - "192.0.2.10/32" # TEST-NET-1 (RFC 5737) — placeholder, podmień
+  # --- DLACZEGO NIE MA TU POZIOMU `break_glass` ---------------------------------------------------
+  # Był — `armed: false`, jeden zakres `192.0.2.10/32` (RFC 5737) — i został USUNIĘTY (DEC-52). To nie
+  # jest sprzątanie kosmetyczne, tylko wniosek z tego, że DWIE RÓŻNE PROCEDURY NOSIŁY JEDNĄ NAZWĘ.
+  #
+  # `break-glass.yml` — procedura, którą ten starter MA i która została przećwiczona na żywej granicy —
+  # NIE UŻYWA ŻADNEGO ACCESS LEVELU. Wyprowadza członka z konfiguracji EGZEKWOWANEJ i tym przywraca
+  # ruch; po democji żadna reguła nie pyta już o kontekst, więc poziom nie ma czego spełniać (DEC-29).
+  #
+  # Poziom o tej nazwie należał do procedury INNEJ, której tu nie ma: „granica dalej egzekwuje, ale
+  # wpuść bastion". Tamta wymaga własnej reguły ingress na członku (materiał gotowy: profil
+  # `corp-user-console-access`), wpisu w `projects.yaml` i własnej sekcji w runbooku — SAM POZIOM NIE
+  # WPUSZCZA NIKOGO, bo nic go nie referuje. Zostawiony bez tego kompletu był dokładnie tym, przed czym
+  # ostrzega pole `armed`: obiektem, który w `levels list` i w konsoli wygląda na gotową kontrolę
+  # awaryjną. Audytor czyta kontrolę, incydent nie ma z niej pożytku — a `armed: false` widać WYŁĄCZNIE
+  # w tym repozytorium, nie w API.
+  #
+  # ASYMETRIA, która rozstrzygnęła: profil `corp-user-console-access` ZOSTAJE, choć też nie ma stałego
+  # konsumenta. Profil jest szablonem — renderuje się dopiero, gdy ktoś go przywoła w `projects.yaml`,
+  # więc nie istnieje w organizacji i nikogo nie wprowadza w błąd. Access level istniał NA ŻYWO.
+  # Kosztem nie jest linijka YAML-a, tylko obiekt w polityce dostępu.
+  #
+  # JEŚLI BUDUJESZ TĘ DRUGĄ PROCEDURĘ: poziom dopisz RAZEM z regułą, która go referuje, i razem
+  # z sekcją runbooka — nie „na zapas". Usunięcie nieużywanego poziomu jest tanie i nie wymaga drogi
+  # awaryjnej: bramka `vpcsc.perimeter` odrzuca usunięcie poziomu, który po zmianie NADAL jest
+  # referowany (DEC-33) — nie usunięcie jako takie.
 
   # --- kompozycja: poziom zbudowany z innych poziomów ---------------------------------------------
   # DLACZEGO: „korpo-sieć ORAZ zarządzane urządzenie" to najczęstszy realny wymóg dla dostępu człowieka do
