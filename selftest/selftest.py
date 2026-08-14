@@ -164,6 +164,8 @@ def bootstrap() -> None:
         "tools/codeowners_check.py",
         # Kompletnosc rejestru decyzji — druga bramka rozjazdu ze starterem, obok wskaznika (DEC-20).
         "tools/decisions_check.py",
+        # Generator wpisow dnia pierwszego: wypelnia pola MECHANICZNE i ODMAWIA na reszcie (DEC-51).
+        "tools/dzien_pierwszy.py",
         # Werdykt „czy apply realnie zmienil granice" — czytany z TRESCI planu po apply, nie z koloru
         # przebiegu. Zielony `apply` na regule egzekwowanej tego nie dowodzi (DEC-6, DEC-45).
         "tools/weryfikacja_po_apply.py",
@@ -7723,6 +7725,9 @@ def test_dzien_pierwszy() -> None:
     if not narzedzie.exists():
         return
 
+    # Numery folderow z listy placeholderow (jedna powtorzona cyfra) — patrz komentarz nizej.
+    FOLDER_A, FOLDER_B = "222222222222", "333333333333"
+
     prace = ROOT / "dzien-pierwszy-test"
     prace.mkdir(exist_ok=True)
 
@@ -7731,14 +7736,14 @@ def test_dzien_pierwszy() -> None:
                 "state": stan, "folders": [f"folders/{f}" for f in folder]}
 
     inwentarz = [
-        zasob("prj-example-alfa", "111111111111", ["100000000001"]),
-        zasob("prj-example-beta", "222222222222", ["100000000001"]),
+        zasob("prj-example-alfa", "111111111111", [FOLDER_A]),
+        zasob("prj-example-beta", "222222222222", [FOLDER_A]),
         # SKASOWANY: numer jest rozwiazywalny przez 30 dni, wiec granica przyjelaby go bez slowa skargi
-        zasob("prj-example-martwy", "123456789012", ["100000000001"], stan="DELETE_REQUESTED"),
+        zasob("prj-example-martwy", "123456789012", [FOLDER_A], stan="DELETE_REQUESTED"),
         # WPROST POD ORGANIZACJA: brak folderu = brak dywizji, a dywizja jest czescia adresu w stanie
         zasob("prj-example-sierota", "210987654321", []),
         # LANCUCH Z DWOMA TLUMACZENIAMI: to jest blad TABELI, nie sytuacja do rozstrzygniecia wyborem
-        zasob("prj-example-dwuznaczny", "000000000000", ["100000000001", "100000000002"]),
+        zasob("prj-example-dwuznaczny", "000000000000", [FOLDER_A, FOLDER_B]),
     ]
     profil = [{"name": "vertex-online-serving",
                "params": {"caller_identities": ["serviceAccount:sa-x@prj-example-app.iam.gserviceaccount.com"],
@@ -7747,7 +7752,7 @@ def test_dzien_pierwszy() -> None:
                    "profiles": json.dumps(profil)}
                   for p in ("prj-example-alfa", "prj-example-beta", "prj-example-martwy",
                             "prj-example-sierota", "prj-example-dwuznaczny")]
-    tabela = {"folders": {"100000000001": "example-division", "100000000002": "example-inna"}}
+    tabela = {"folders": {FOLDER_A: "example-division", FOLDER_B: "example-inna"}}
 
     def zapisz(nazwa, dane, jako="json"):
         p = prace / nazwa
@@ -7871,7 +7876,10 @@ def test_dzien_pierwszy() -> None:
     # Prog `21 + 9,54 x N > 4200` musi strzelac POWYZEJ i milczec PONIZEJ — bramka zawsze wlaczona
     # zatrzymalaby takze partie, ktore wolno przepuscic, i zostalaby wylaczona w tydzien.
     for n, ma_stanac in ((438, False), (460, True)):
-        duzy = [zasob(f"prj-example-m{i:04d}", str(700000000000 + i), ["100000000001"]) for i in range(n)]
+        # Numery WYPROWADZANE z placeholdera, nie wpisane doslownie — material jest publiczny, a skan
+        # samodzielnosci traktuje kazdy 12-cyfrowy numer spoza listy przykladowych jako mozliwy wyciek.
+        baza = int("111111111111")
+        duzy = [zasob(f"prj-example-m{i:04d}", str(baza + i), [FOLDER_A]) for i in range(n)]
         zapisz(f"inw-{n}.json", duzy)
         zapisz(f"cmdb-{n}.csv", [{"project_id": z["additionalAttributes"]["projectId"],
                                   "owner_group": "grp-example-cloud@example.com",
