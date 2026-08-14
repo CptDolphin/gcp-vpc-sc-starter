@@ -283,10 +283,42 @@ runs:
         # tylko z nazwy.
         #
         # `contrib/action.yml` ZDJĘTE z listy: akcja dywizji mieszka teraz w starterze, bo `uses:`
-        # rozwiązuje się bez tokenu (DEC-21). Ścieżka do pliku, którego tu nie ma, to nie ostrożność —
-        # `2>/dev/null` zamieniłoby ją w cichy brak pokrycia, czyli dokładnie w to, przed czym ostrzega
-        # akapit wyżej. Pinowania w tamtym pliku pilnuje selftest startera, po jego stronie.
-        bad=$(grep -hnE '^\s*(- )?uses:' .github/workflows/*.yml .github/actions/*/action.yml 2>/dev/null \
+        # rozwiązuje się bez tokenu (DEC-21). Pinowania w tamtym pliku pilnuje selftest startera.
+        #
+        # OBA ROZSZERZENIA (#2073). GitHub honoruje `.yml` i `.yaml` identycznie, więc
+        # `.github/workflows/promocja-masowa.yaml` BIEGNIE — a poprzednia wersja tej bramki go nie
+        # widziała. Zmierzone: `uses: napastnik/exfiltruj-oidc@main` w pliku `.yaml` przechodziło
+        # na ZIELONO, podczas gdy sąsiedni guard (`grep -r … .github`, L264) ten sam plik łapał.
+        # Dwie bramki w jednym pliku, ten sam wsad, przeciwne werdykty. Stawka: to jedyna kontrola
+        # pilnująca, że akcja obca jest przypięta SHA-em, a kod z ruchomego tagu biegnie z tokenem
+        # OIDC konta `apply`, czyli mutatora perimetru całej organizacji.
+        #
+        # Lista brana z DRZEWA (`find`), nie ze wzorca powłoki: niedopasowany glob zostawiał dosłowny
+        # `.github/workflows/*.yml` jako argument, a `2>/dev/null` zamieniało powstały błąd w pustą
+        # zmienną i zielony werdykt — czyli w cichy brak pokrycia, przed którym ostrzega akapit wyżej.
+        # `|| true` jest tu BEZPIECZNE, w odróżnieniu od poprzedniej wersji, i to jest cała różnica:
+        # pokrycie mierzymy teraz LICZĄC pliki, a nie wnioskując je z kodu wyjścia. Brakujący katalog
+        # (`.github/actions` nie musi istnieć) przestaje być awarią guarda, a przestaje też być cichym
+        # zerem — bo zero jest sprawdzane osobno, niżej. Bez tego `set -e` ubijał guard w drzewie bez
+        # `.github/actions`, ZANIM cokolwiek wypisał (zmierzone: rc=1, pusty stdout, piaskownica testu).
+        pliki=$( { find .github/workflows -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) 2>/dev/null
+                   find .github/actions   -maxdepth 2 -type f \( -name 'action.yml' -o -name 'action.yaml' \) 2>/dev/null
+                 } || true)
+        liczba=$(printf '%s\n' "$pliki" | grep -c . || true)
+
+        # ZEROWE POKRYCIE = BŁĄD. „Zbadałam 0 plików" nie jest stwierdzeniem, że jest czysto — jest
+        # stwierdzeniem, że bramka nic nie widziała. Poprzednia wersja meldowała wtedy sukces.
+        if [ "$liczba" -eq 0 ]; then
+          echo '::error::Pin guard examined ZERO files (.github/workflows, .github/actions). A guard that inspected nothing cannot report success — this is silent lack of coverage, not a pass.'
+          exit 1
+        fi
+        # Liczba w werdykcie, bo „zero naruszeń" i „zero zbadanych" mają inaczej ten sam kolor.
+        echo "guard pinowania: $liczba plikow zbadanych"
+
+        # `-H`, nie `-h`: komunikat ma nieść NAZWĘ PLIKU wraz z rozszerzeniem. Bez niej werdykt mówi
+        # „linia 8", nie mówiąc w którym z kilkunastu plików — a przy tej klasie defektu rozszerzenie
+        # jest najważniejszą częścią odpowiedzi.
+        bad=$(printf '%s\n' "$pliki" | xargs grep -HnE '^\s*(- )?uses:' \
               | grep -vE 'uses:\s*\./' \
               | grep -vE 'uses:\s*[^@]+@[0-9a-f]{40}([[:space:]]|$)' || true)
         if [ -n "$bad" ]; then

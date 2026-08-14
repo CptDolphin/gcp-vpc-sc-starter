@@ -42,14 +42,31 @@ POWOD = re.compile(r"^\s*#\s*POWOD \(continue-on-error\):\s*\S")
 
 
 def powierzchnie() -> list[pathlib.Path]:
-    """Wykonywalne YAML-e. Kolejnosc stabilna, zeby komunikat nie zmienial sie miedzy przebiegami."""
-    return sorted([*(KORZEN / ".github/workflows").glob("*.yml"),
-                   *(KORZEN / ".github/actions").glob("*/action.yml")])
+    """Wykonywalne YAML-e, OBA rozszerzenia. Kolejnosc stabilna — komunikat ma sie nie zmieniac.
+
+    GitHub Actions honoruje `.yml` i `.yaml` IDENTYCZNIE, wiec `.github/workflows/cichy.yaml`
+    i `.github/actions/obejscie/action.yaml` sa WYKONYWANE. Glob widzacy tylko `*.yml` nie widzial ich
+    wcale — czyli jedna linijka `continue-on-error: true` w pliku o „drugim" rozszerzeniu czynila
+    CALY zestaw bramek doradczym, a REST API raportowalo `conclusion: success`. Zmierzone (#2073):
+    dwa takie wsady przeszly guarda, ktory zameldowal „zero naruszen".
+    """
+    return sorted({p for wz in ("*.yml", "*.yaml") for p in (KORZEN / ".github/workflows").glob(wz)}
+                  | {p for wz in ("*/action.yml", "*/action.yaml")
+                     for p in (KORZEN / ".github/actions").glob(wz)})
 
 
 def prawda(v) -> bool:
-    """`continue-on-error: false` nie jest naruszeniem — jest zapisaniem tego, co i tak jest domyslne."""
-    return str(v).strip().lower() in {"true", "1", "yes"}
+    """`continue-on-error: false` nie jest naruszeniem — jest zapisaniem tego, co i tak jest domyslne.
+
+    WYRAZENIE `${{ … }}` JEST naruszeniem, a nie „falszem". Statycznie nieocenialne znaczy „NIE WIEM",
+    a „nie wiem" != „false": `continue-on-error: ${{ github.event_name == 'push' }}` to udokumentowana
+    skladnia GitHuba i na zdarzeniu `push` daje dokladnie ten tryb awarii, dla ktorego ten guard
+    powstal. Zmierzone (#2073) i najgrozniejszy z trzech przypadkow, bo plik BYL skanowany — guard
+    go otwieral, czytal te linie i mimo to przepuszczal. Flaga sterowana wyrazeniem podlega wiec tym
+    samym trzem warunkom (`id` + POWOD + `outcome` w podsumowaniu), co flaga wpisana na sztywno.
+    """
+    s = str(v).strip().lower()
+    return s in {"true", "1", "yes"} or "${{" in s
 
 
 def bledy_tekstowe(plik: pathlib.Path) -> list[str]:
@@ -102,17 +119,30 @@ def bledy_strukturalne(plik: pathlib.Path) -> list[str]:
 
 
 def main() -> int:
+    pliki = powierzchnie()
+
+    # ZEROWE POKRYCIE TO BLAD, NIE SUKCES. Guard, ktory zbadal 0 plikow, nie stwierdzil, ze jest czysto —
+    # stwierdzil, ze nic nie widzial. Bez tego warunku wystarczy przeniesc/przemianowac katalog, zeby
+    # dostac zielono „bez naruszen" na drzewie, ktorego nikt nie sprawdzil.
+    if not pliki:
+        print("::error::continue-on-error: ZERO plikow wykonywalnych do zbadania "
+              f"(szukano w {KORZEN}/.github/workflows i .github/actions). Guard, ktory nie zbadal "
+              "niczego, nie moze zameldowac, ze jest czysto — to cichy brak pokrycia, nie sukces.")
+        return 1
+
     bledy: list[str] = []
-    for plik in powierzchnie():
+    for plik in pliki:
         bledy += bledy_tekstowe(plik)
         bledy += bledy_strukturalne(plik)
 
     for b in bledy:
         print(f"::error::{b}")
-    if bledy:
-        return 1
-    print(f"continue-on-error: {len(powierzchnie())} plikow wykonywalnych sprawdzonych, zero naruszen")
-    return 0
+    # Liczba zbadanych plikow jest CZESCIA werdyktu, nie ozdoba: bez niej „zero naruszen" nie odroznia
+    # sie od „zero zbadanych", a to sa dwa przeciwne stany o tym samym kolorze.
+    print(f"continue-on-error: {len(pliki)} plikow wykonywalnych sprawdzonych "
+          f"({sum(1 for p in pliki if p.suffix == '.yaml')} z rozszerzeniem .yaml), "
+          f"{len(bledy)} naruszen")
+    return 1 if bledy else 0
 
 
 if __name__ == "__main__":
