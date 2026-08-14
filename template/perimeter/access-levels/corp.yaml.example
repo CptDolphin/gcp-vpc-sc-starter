@@ -100,7 +100,7 @@ access_levels:
   #       - ENCRYPTED
 
   # --- DLACZEGO NIE MA TU POZIOMU `break_glass` ---------------------------------------------------
-  # Był — `armed: false`, jeden zakres `192.0.2.10/32` (RFC 5737) — i został USUNIĘTY (DEC-51). To nie
+  # Był — `armed: false`, jeden zakres `192.0.2.10/32` (RFC 5737) — i został USUNIĘTY (DEC-52). To nie
   # jest sprzątanie kosmetyczne, tylko wniosek z tego, że DWIE RÓŻNE PROCEDURY NOSIŁY JEDNĄ NAZWĘ.
   #
   # `break-glass.yml` — procedura, którą ten starter MA i która została przećwiczona na żywej granicy —

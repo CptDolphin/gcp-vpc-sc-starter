@@ -2201,7 +2201,7 @@ incydent nie ma z niej pożytku. Zostaje `armed: false` z uzasadnieniem wskazuj�
 poziomu jest osobnym ruchem — bramka `vpcsc.perimeter` świadomie odrzuca plan kasujący obiekt polityki
 dostępu, więc taka zmiana nie może przejść „przy okazji".
 
-> **Domknięte przez DEC-51.** Alternatywa postawiona w akapicie wyżej („albo powstaje ta druga procedura,
+> **Domknięte przez DEC-52.** Alternatywa postawiona w akapicie wyżej („albo powstaje ta druga procedura,
 > albo poziom znika") została rozstrzygnięta na rzecz **usunięcia** poziomu. Zdanie o bramce przestało być
 > prawdziwe wcześniej i z innego powodu: DEC-33 zawęziła zakaz do poziomu, który po zmianie **nadal jest
 > referowany**, więc kasowanie poziomu bez referencji przechodzi bramką niezmienioną.
@@ -3392,7 +3392,7 @@ wszystko, sam pozytyw przechodzi bramka wyłączona:
 
 ---
 
-## DEC-51 — Access level `break_glass` znika; rozstrzyga, czy obiekt ISTNIEJE w organizacji, a nie czy jest nieużywany
+## DEC-52 — Access level `break_glass` znika; rozstrzyga, czy obiekt ISTNIEJE w organizacji, a nie czy jest nieużywany
 
 **Decyzja.** Poziom `break_glass` zostaje **usunięty** z `perimeter/access-levels/corp.yaml`. Profil
 `corp-user-console-access` — który też nie ma stałego konsumenta — **zostaje**. Nie powstaje procedura
