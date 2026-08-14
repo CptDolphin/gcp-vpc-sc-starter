@@ -19,7 +19,15 @@ on:
       # bramka, która nie widzi zmiany w pliku, który sama wykonuje, jest bramką tylko z nazwy. Kosztem jest
       # jeden plan (read-only) na zmianę narzędzi — tanio jak na jedyne miejsce, gdzie widać ich wykonanie.
       - "tools/**"
-      - ".github/workflows/plan.yml"
+      # `iam-bootstrap/**` i CAŁE `.github/workflows/**` zamiast samego `plan.yml`: `control_plane_check.py`
+      # czyta `iam-bootstrap/terraform.tfvars` (pierwsze miejsce, w którym pojawia się drugi projekt
+      # płaszczyzny sterowania) ORAZ `.github/workflows/validate.yml`. Oba wypadały poza ten filtr, więc
+      # bramka listy `control_plane_projects` nie widziała zmiany w pliku, o który sama pyta. Wyliczone
+      # przez `tools/paths_pokrycie_check.py`, nie znalezione okiem.
+      - "iam-bootstrap/**"
+      - ".github/workflows/**"
+      # `.github/actions/**` — z tego samego powodu co `tools/**` wyżej: bramki żywe stoją teraz w akcji
+      # złożonej, więc pull request zmieniający SAMĄ bramkę nie uruchamiałby jej ani razu.
       # `.github/actions/**` — z tego samego powodu co `tools/**` wyżej: bramki żywe stoją teraz w akcji
       # złożonej, więc pull request zmieniający SAMĄ bramkę nie uruchamiałby jej ani razu.
       - ".github/actions/**"

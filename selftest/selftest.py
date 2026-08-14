@@ -259,6 +259,10 @@ def bootstrap() -> None:
         "tests/vpcsc-violation-dryrun.json",
         # Fikstura detektora martwego czlonka (DEC-42) — wierny ksztalt odpowiedzi Asset Inventory.
         "tests/asset-projekty.json",
+        # Bramka pokrycia filtrow `paths:` + deklaracja jej swiadomych pominiec. Wejscia bramek
+        # wyliczane z DRZEWA zamiast utrzymywanej recznie listy sciezek, ktora rozjechala sie
+        # SZESC razy pod rzad (§9.45; kazdy raz wykryty tym samym „no checks reported").
+        "tools/paths_pokrycie_check.py", ".github/paths-pokrycie.yaml",
     }
     # Dokumentacja jedzie razem z kodem. Wyliczamy ją z katalogu startera zamiast przepisywać listę:
     # przepisana lista wywracałaby ten test przy każdym nowym dokumencie, a to uczy dopisywania nazw
@@ -2912,15 +2916,37 @@ def test_alerty() -> None:
     check("kotwica z komunikatu rozjazdu istnieje w docs/7-alerty.md",
           "rozjazd-granicy-z-deklaracja" in kotwice_runbook, str(sorted(kotwice_runbook)))
 
-    # 9. PRODUCENT MUSI PATRZEĆ NA TE SAME KATALOGI, CO WYZWALACZ `apply.yml`. Rozjazd znaczy: zmiana
-    # w katalogu, który uruchamia apply, nie jest liczona jako zaległa (albo odwrotnie — wieczna zaległość
-    # od pliku, którego apply nigdy nie zastosuje).
+    # 9. KAŻDY KATALOG OBSERWOWANY MUSI URUCHAMIAĆ `apply.yml` — kierunek, na którym stoi sens metryki.
+    #
+    # Katalog liczony jako zaległy, którego apply NIE uruchamia, daje WIECZNĄ zaległość: licznik rośnie,
+    # apply nigdy nie rusza, alert `apply zalega` pali się bez winnego i po tygodniu zostaje wyciszony.
+    #
+    # DLACZEGO NIE RÓWNOŚĆ, choć asercja tak brzmiała do DEC-56. Bo równość była KOINCYDENCJĄ, nie
+    # niezmiennikiem: obie listy znaczyły co innego i przez przypadek miały tę samą treść. Wyzwalacz
+    # `apply.yml` odpowiada na pytanie „czy trzeba jeszcze raz przepuścić BRAMKI" (a bramki czytają
+    # `tools/`, `policy/`, `schemas/`, `docs/`, `.github/`), a `--sciezki` obserwatora na pytanie „czy
+    # DEKLARACJA GRANICY rozjechała się z zastosowanym stanem". Literówka w `docs/` uruchamia apply
+    # i słusznie — ale nie jest zaległością granicy, więc liczona jako zaległość byłaby fałszywym
+    # alarmem. Odkąd wyzwalacz pokrywa wejścia własnych bramek (DEC-56), równość wymuszałaby jedno
+    # z dwojga: albo fałszywe zaległości, albo zwężenie wyzwalacza z powrotem do stanu bez bramek.
+    #
+    # Kierunek nośny zostaje więc jeden — zawieranie — i jest sprawdzany ostrzej niż poprzednia
+    # równość: pusty zbiór obserwowanych też jest błędem (bramka bez wsadu przechodzi każdy test
+    # pozytywny), a każdy katalog spoza wyzwalacza jest nazwany z osobna.
     apply_wf = yaml.safe_load((ROOT / ".github/workflows/apply.yml").read_text())
     sciezki_apply = {p.split("/")[0] for p in apply_wf[True]["push"]["paths"]}
     domyslne = re.search(r'"--sciezki", default="([^"]+)"', watch_py)
-    check("obserwator patrzy na te same katalogi co wyzwalacz apply.yml",
-          domyslne and set(domyslne.group(1).split(",")) == sciezki_apply,
-          f"apply={sorted(sciezki_apply)} watch={domyslne.group(1) if domyslne else None}")
+    obserwowane = set(domyslne.group(1).split(",")) if domyslne else set()
+    check("obserwator ma NIEPUSTY zbior katalogow (pustka to nie jest 'zero zaleglosci')",
+          bool(obserwowane), f"watch={domyslne.group(1) if domyslne else None}")
+    check("kazdy katalog obserwowany URUCHAMIA apply.yml (inaczej wieczna zaleglosc)",
+          obserwowane <= sciezki_apply,
+          f"poza wyzwalaczem={sorted(obserwowane - sciezki_apply)} "
+          f"apply={sorted(sciezki_apply)} watch={sorted(obserwowane)}")
+    # Kontrola pozytywna do powyższego: zawieranie jest spełnione także przez zbiór pusty i przez zbiór
+    # przypadkowy. Deklaracja granicy leży w tych dwóch katalogach i to one mają być obserwowane.
+    check("obserwator liczy zaleglosc DEKLARACJI GRANICY (perimeter + terraform)",
+          obserwowane == {"perimeter", "terraform"}, f"watch={sorted(obserwowane)}")
 
     # 10. DWA JOBY, DWIE TOŻSAMOŚCI. Gdyby liczył i pisał jeden job, konto `plan` — impersonowalne
     # z KAŻDEGO pull requesta — zyskałoby `timeSeries.create`, czyli prawo do uciszenia wszystkich alertów.
@@ -4782,6 +4808,205 @@ def test_codeowners_rozdzielenie() -> None:
     # albo zmiane wzorca ich sklejania — czyli guard, ktory przestal cokolwiek widziec i o tym milczy.
     check("guard kotwic odrzuca ZEROWE pokrycie (nie myli pustki z czystoscia)",
           "zaden alert nie wskazuje kotwicy runbooka" in akcja, akcja[-400:])
+
+    # ZRODLA KOTWIC Z DRZEWA, NIE Z ZAMKNIETEJ PARY NAZW. Ochrona przed pustka (wiersz wyzej) NIE jest
+    # ochrona przed niepelnym pokryciem: przy liscie dwoch plikow trzeci plik `.tf` z alertami dodawal
+    # `runbook_url` bez sprawdzenia, a zbior uzytych kotwic nigdy nie byl pusty, wiec `if not uzyte`
+    # milczalo. Zmierzone: nowy `terraform/alerts-dywizje.tf` z martwa kotwica -> rc=0.
+    check("guard kotwic wyprowadza zrodla z DRZEWA (glob), a nie z listy nazw",
+          'pathlib.Path("terraform").glob("*.tf")' in akcja, akcja[-400:])
+    check("guard kotwic odrzuca BRAK plikow .tf (fail-closed na pustym katalogu)",
+          "nie ma ani jednego pliku .tf" in akcja, akcja[-400:])
+    check("guard kotwic podaje liczbe PRZEJRZANYCH plikow (zero nierozroznialne od sukcesu)",
+          "przejrzano {len(zrodla)} plikow .tf" in akcja, akcja[-400:])
+
+    # HEARTBEAT DMS — `env` ma w GitHub Actions TRZY poziomy, a bramka pytala o jeden.
+    #
+    # Zmierzone na zywym pliku PRZED poprawka: `DMS_PING_URL` w `env` JOBA `measure` -> rc=0
+    # („ZIELONO"), ten sam zabieg w `publish` -> rc=1. Czyli bramka byla fail-OPEN dokladnie tam,
+    # gdzie chodzi o bezpieczenstwo (job impersonowalny z kazdego pull requesta), i fail-CLOSED tam,
+    # gdzie skutek jest nieszkodliwy. Trzecie wejscie — `env` calego workflowa — bylo otwarte tak samo.
+    check("guard DMS bada `env` na poziomie WORKFLOW", 'widzi(pelny.get("env"))' in akcja, akcja[-400:])
+    check("guard DMS bada `env` na poziomie JOBA", 'widzi(w[job].get("env"))' in akcja, akcja[-400:])
+    check("guard DMS iteruje WSZYSTKIE joby, nie zamknieta pare measure/publish",
+          "for job in sorted(w):" in akcja, akcja[-400:])
+    # Nazwa joba uprzywilejowanego jest SEMANTYCZNA — nie da sie jej policzyc z drzewa. Dlatego jest
+    # zapisana wprost i PORONYWANA ZE ZRODLEM: job, ktorego w workflow nie ma, jest bledem. Bez tego
+    # zmiana nazwy joba rozbrajalaby cala kontrole, zostawiajac ja zielona.
+    check("guard DMS konfrontuje nazwe joba uprzywilejowanego ze ZRODLEM (fail-closed)",
+          "JOB_UPRZYWILEJOWANY not in w" in akcja, akcja[-400:])
+    check("guard DMS podaje liczbe przejrzanych jobow i krokow",
+          "przejrzano {len(w)} jobow" in akcja, akcja[-400:])
+
+    # ── PARY ANTY-TAUTOLOGICZNE NA ZYWYM KODZIE ─────────────────────────────────────────────────
+    # Asercje wyzej pytaja o TEKST bramki. Tekst mozna mieć poprawny i mimo to nie odrzucac — wiec
+    # kazdy wsad nizej jest URUCHAMIANY na zmutowanej kopii drzewa.
+    def cialo_kroku(fragment):
+        akcja_yaml = yaml.safe_load((ROOT / ".github/actions/bramki-tresci/action.yml").read_text())
+        for krok in akcja_yaml["runs"]["steps"]:
+            if fragment in (krok.get("name") or ""):
+                m = re.search(r"python3 - <<'PY'\n(.*?)\n *PY *$", krok["run"], re.S | re.M)
+                return textwrap.dedent(m.group(1))
+        return None
+
+    def na_kopii(kod, mutacja):
+        d = pathlib.Path(tempfile.mkdtemp(prefix="vpcsc-2078-"))
+        for katalog in ("terraform", "docs", ".github"):
+            shutil.copytree(ROOT / katalog, d / katalog)
+        mutacja(d)
+        (d / "_g.py").write_text(kod)
+        p = subprocess.run([sys.executable, "_g.py"], cwd=d, capture_output=True, text=True)
+        shutil.rmtree(d)
+        return p.returncode, p.stdout + p.stderr
+
+    kod_kotwic = cialo_kroku("kotwice runbooka")
+    check("cialo guarda kotwic da sie wyciac z YAML-a", kod_kotwic is not None, "")
+
+    rc, out = na_kopii(kod_kotwic, lambda d: None)
+    check("kotwice: nietkniete drzewo przechodzi (kontrola pozytywna)", rc == 0, out)
+
+    def nowy_plik_alertow(d):
+        (d / "terraform/alerts-dywizje.tf").write_text(
+            'x = "runbook: ${local.runbook}#kotwica-ktorej-nie-ma"\n')
+    rc, out = na_kopii(kod_kotwic, nowy_plik_alertow)
+    check("kotwice: martwa kotwica w NOWYM pliku .tf JEST czerwona (rc=0 przed poprawka)",
+          rc != 0 and "kotwica-ktorej-nie-ma" in out, out)
+
+    def martwa_w_starym(d):
+        p = d / "terraform/alerts.tf"
+        p.write_text(p.read_text() + '\nx = "${local.runbook}#martwa-w-starym"\n')
+    rc, out = na_kopii(kod_kotwic, martwa_w_starym)
+    check("kotwice REGRESJA: stary przypadek (alerts.tf) nadal lapany", rc != 0, out)
+
+    kod_dms = cialo_kroku("heartbeat DMS")
+    check("cialo guarda DMS da sie wyciac z YAML-a", kod_dms is not None, "")
+
+    def mut_watch(d, f):
+        p = d / ".github/workflows/watch.yml"
+        dane = yaml.safe_load(p.read_text())
+        f(dane)
+        p.write_text(yaml.safe_dump(dane, sort_keys=False, allow_unicode=True))
+
+    SEKRET = {"DMS_URL": "${{ secrets.DMS_PING_URL }}"}
+    rc, out = na_kopii(kod_dms, lambda d: None)
+    check("DMS: nietkniete drzewo przechodzi (kontrola pozytywna)", rc == 0, out)
+    check("DMS: werdykt podaje liczbe przejrzanych jobow", "przejrzano 2 jobow" in out, out)
+
+    rc, out = na_kopii(kod_dms, lambda d: mut_watch(
+        d, lambda x: x["jobs"]["measure"].__setitem__("env", dict(SEKRET))))
+    check("DMS: sekret w `env` JOBA measure JEST czerwony (fail-open przed poprawka)",
+          rc != 0 and "measure" in out, out)
+
+    rc, out = na_kopii(kod_dms, lambda d: mut_watch(
+        d, lambda x: x.__setitem__("env", dict(SEKRET))))
+    check("DMS: sekret w `env` WORKFLOW JEST czerwony (trzecie wejscie tej samej klasy)",
+          rc != 0 and "WORKFLOW" in out, out)
+
+    def nowy_job(d):
+        mut_watch(d, lambda x: x["jobs"].__setitem__(
+            "raport", {"runs-on": "ubuntu-latest", "env": dict(SEKRET), "steps": [{"run": "echo"}]}))
+    rc, out = na_kopii(kod_dms, nowy_job)
+    check("DMS: NOWY job z sekretem jest objety BEZ dopisywania jego nazwy",
+          rc != 0 and "raport" in out, out)
+
+    def przemianowany(d):
+        mut_watch(d, lambda x: x["jobs"].__setitem__("publikacja", x["jobs"].pop("publish")))
+    rc, out = na_kopii(kod_dms, przemianowany)
+    check("DMS: brak joba uprzywilejowanego jest ZGLOSZONY, nie przemilczany",
+          rc != 0 and "nie wie" in out, out)
+
+
+# --------------------------------------------------------------------- pokrycie filtrow paths
+def test_paths_pokrycie() -> None:
+    """Filtr `paths:` workflowa MUSI pokrywac pliki, ktore ten workflow czyta.
+
+    Ta sama pomylka wyszla w repozytorium perimetru SZESC razy pod rzad i za kazdym razem lekarstwem
+    bylo dopisanie jednej linii do listy sciezek. Ten test pilnuje MECHANIZMU, ktory te liste liczy
+    z drzewa, a nie samej listy — bo lista poprawiona po raz szosty nie przestaje byc lista.
+
+    Mierzone sa OBA kierunki. Sam przebieg pozytywny przechodzi takze wtedy, gdy skaner nie widzi
+    niczego, wiec kazdemu „zielono" towarzyszy tu wsad, ktory ma je zepsuc.
+    """
+    print("\n== pokrycie filtrow paths (wejscia bramek z drzewa) ==")
+    akcja = (ROOT / ".github/actions/bramki-tresci/action.yml").read_text()
+
+    # Bramka uruchamiana recznie nie jest bramka — musi jechac w akcji wolanej przez OBA tory,
+    # bo bez ochrony galezi tor apply jest jedynym, ktorego nie da sie ominac (DEC-16). Bramka
+    # pilnujaca wyzwalaczy, stojaca wylacznie na torze `pull_request`, bylaby wlasnym kontrprzykladem.
+    check("guard pokrycia paths jedzie w bramkach tresci (oba tory)",
+          "tools/paths_pokrycie_check.py" in akcja, akcja[-600:])
+    check("guard pokrycia paths uruchamia takze swoj --self-test",
+          "paths_pokrycie_check.py --self-test" in akcja, akcja[-600:])
+
+    # Drzewo do eksperymentu: kopia rozpakowanego startera z wlasnym indeksem gita. Skaner czyta
+    # `git ls-files`, wiec bez indeksu nie ma z czego liczyc zbioru — i wtedy MA byc czerwony.
+    praca = pathlib.Path(tempfile.mkdtemp(prefix="vpcsc-paths-"))
+    baza = praca / "repo"
+    shutil.copytree(ROOT, baza)
+    narzedzie = str(baza / "tools/paths_pokrycie_check.py")
+
+    def uruchom(cwd=baza):
+        return subprocess.run([sys.executable, narzedzie], cwd=cwd, capture_output=True, text=True)
+
+    # Fail-closed ZANIM cokolwiek innego: drzewo bez indeksu gita to „nie wiem", a nie „czysto".
+    p = uruchom()
+    check("bez indeksu gita guard NIE przepuszcza (fail-closed)", p.returncode != 0,
+          p.stdout + p.stderr)
+
+    subprocess.run(["git", "init", "-q"], cwd=baza, capture_output=True)
+    subprocess.run(["git", "add", "-A"], cwd=baza, capture_output=True)
+
+    p = subprocess.run([sys.executable, narzedzie, "--self-test"], cwd=baza,
+                       capture_output=True, text=True)
+    check("self-test guarda przechodzi (matcher + fail-closed deklaracji)", p.returncode == 0,
+          p.stdout + p.stderr)
+
+    p = uruchom()
+    check("swiezo rozpakowany starter ma PELNE pokrycie paths", p.returncode == 0,
+          p.stdout + p.stderr)
+    # Anty-tautologia do powyzszego: zielono moze znaczyc takze „skaner nic nie policzyl".
+    check("guard policzyl niezerowa liczbe wejsc na kazdym workflow z filtrem",
+          "0 czytanych wejść" not in p.stdout and p.stdout.count("ok  ") >= 4, p.stdout)
+
+    # WSAD 1 — dokladnie ten defekt, ktory zglosil #2077: wejscie bramki poza filtrem.
+    walidacja = baza / ".github/workflows/validate.yml"
+    oryginal = walidacja.read_text()
+    walidacja.write_text(oryginal.replace('      - ".tflint.hcl"\n', ""))
+    p = uruchom()
+    check("zdjecie `.tflint.hcl` z paths JEST czerwone (wejscie trzech krokow tflint)",
+          p.returncode != 0 and ".tflint.hcl" in p.stdout, p.stdout + p.stderr)
+    walidacja.write_text(oryginal)
+
+    # WSAD 2 — czy mechanizm dziala BEZ podania mu nazwy. To jest roznica miedzy bramka wyprowadzajaca
+    # zbior z drzewa a szosta poprawka listy: nowe narzedzie i nowy katalog, o ktorych nikt nikomu
+    # nie powiedzial, maja zostac objete same.
+    (baza / "nowy-katalog").mkdir()
+    (baza / "nowy-katalog/wsad.json").write_text("{}\n")
+    (baza / "tools/nowy_guard.py").write_text(
+        'import pathlib\nprint(pathlib.Path("nowy-katalog/wsad.json").read_text())\n')
+    akcja_p = baza / ".github/actions/bramki-tresci/action.yml"
+    akcja_oryg = akcja_p.read_text()
+    kotwica = "    - name: znacznik - komplet bramek tresci wykonany"
+    akcja_p.write_text(akcja_oryg.replace(
+        kotwica, "    - name: guard - nowy\n      shell: bash\n"
+                 "      run: python3 tools/nowy_guard.py\n\n" + kotwica, 1))
+    subprocess.run(["git", "add", "-A"], cwd=baza, capture_output=True)
+    p = uruchom()
+    check("NOWE wejscie bramki jest objete BEZ dopisywania nazwy do jakiejkolwiek listy",
+          p.returncode != 0 and "nowy-katalog/wsad.json" in p.stdout, p.stdout + p.stderr)
+
+    # Kontrola powrotu: bramka, ktora po cofnieciu wsadu zostaje czerwona, nie mierzy wsadu.
+    akcja_p.write_text(akcja_oryg)
+    shutil.rmtree(baza / "nowy-katalog")
+    (baza / "tools/nowy_guard.py").unlink()
+    subprocess.run(["git", "add", "-A"], cwd=baza, capture_output=True)
+    p = uruchom()
+    check("po cofnieciu obu wsadow guard wraca do zieleni", p.returncode == 0, p.stdout + p.stderr)
+
+    # Deklaracja pominiec: stanem docelowym jest PUSTA lista. Wyjatek jest dowodem, ze czegos nie dalo
+    # sie wyprowadzic z drzewa — nie sposobem na uciszenie bramki.
+    dekl = yaml.safe_load((ROOT / ".github/paths-pokrycie.yaml").read_text())
+    check("deklaracja pominiec istnieje i jest PUSTA", dekl.get("pominiete") == [], str(dekl))
 
 
 # --------------------------------------------------------------------- kompletnosc rejestru decyzji
@@ -8467,6 +8692,7 @@ def main() -> int:
     test_rego()
     test_control_plane_lista()
     test_codeowners_rozdzielenie()
+    test_paths_pokrycie()
     test_kompletnosc_decyzji()
     test_tools()
     test_dzien_pierwszy()

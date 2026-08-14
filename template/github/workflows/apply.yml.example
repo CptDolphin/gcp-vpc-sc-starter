@@ -59,9 +59,39 @@ name: apply
 on:
   push:
     branches: [main]
+    # TEN FILTR MUSI POKRYWAĆ PLIKI, KTÓRE DEFINIUJĄ BRAMKI TEGO WORKFLOWA — i przez pierwsze dni
+    # nie pokrywał ŻADNEGO z nich.
+    #
+    # Nagłówek wyżej uzasadnia istnienie tego toru zdaniem „KAŻDA bramka biegnie tu jeszcze raz, bo
+    # gałąź domyślna bywa bez ochrony". Ten warunek jest dziś spełniony i zmierzony: API zwraca na
+    # `branches/main/protection` odpowiedź 403 („Upgrade to GitHub Pro or make this repository
+    # public"). Skoro push prosto na `main` jest realny, a `validate.yml`/`plan.yml` stoją wyłącznie
+    # na `pull_request`, to ten filtr jest OSTATNIĄ warstwą — a przepuszczał commit zmieniający
+    # `.github/actions/bramki-tresci/action.yml` bez ani jednego checku. Kolejny commit dotykający
+    # `perimeter/` uruchamiał wtedy OKROJONĄ definicję bramek, świecił zielono i mutował granicę.
+    #
+    # Lista niżej nie jest utrzymywana z pamięci: `tools/paths_pokrycie_check.py` liczy zbiór wejść
+    # tego workflowa z DRZEWA (przechodnio przez akcje lokalne i uruchamiane skrypty) i czerwieni
+    # bramkę, gdy któreś wejście wypadnie poza ten filtr. Nowe narzędzie w `tools/` jest objęte
+    # w commicie, w którym powstało.
     paths:
       - "perimeter/**"
       - "terraform/**"
+      - "policy/**"
+      - "schemas/**"
+      - "tools/**"
+      - "contrib/**"
+      - "docs/**"
+      - "tests/**"
+      - ".github/actions/**"
+      - ".github/workflows/**"
+      - ".github/*"
+      - "iam-bootstrap/**"
+      # `.starter-sync` NIE wynika ze skanera (żaden krok go tutaj nie otwiera) i jest dopisane
+      # świadomie, z tego samego powodu, dla którego stoi w `validate.yml`: wskaźnik synchronizacji
+      # jest jedynym wejściem bramki `starter-drift`, a na TYM torze — pushu prosto na `main` —
+      # nie ma nad nim żadnej innej warstwy.
+      - ".starter-sync"
   workflow_dispatch:
     inputs:
       # JEDYNE LEGALNE ŹRÓDŁO ZGODY NA ROZPOCZĘCIE EGZEKWOWANIA. Pole istnieje wyłącznie przy ręcznym
