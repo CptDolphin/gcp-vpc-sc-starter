@@ -12,6 +12,7 @@ Co ten test naprawdę sprawdza (i czego NIE):
 Wymaga na PATH: terraform (1.15.5), conftest, python3 (pyyaml). Opcjonalnie: actionlint, check-jsonschema.
 Uruchomienie:  python3 selftest/selftest.py
 """
+import csv
 import datetime
 import hashlib
 import http.server
@@ -7666,6 +7667,206 @@ def test_swieza_baza() -> None:
               "WNIOSEK NIE ZOSTAŁ ODRZUCONY" in tresc)
 
 
+
+# --------------------------------------------------- dzien pierwszy: generator wpisow (DEC-51)
+def test_dzien_pierwszy() -> None:
+    """Czy generator dnia pierwszego WYPELNIA mechaniczne i ODMAWIA na niewywnioskowalnych (DEC-51).
+
+    DLACZEGO TEN TEST MA PARY, A NIE SAME NEGATYWY. Narzedzie, ktore odmawia zawsze, przechodzi kazdy
+    test negatywny i jest bezuzyteczne — a wlasnie odmowa jest tu zachowaniem domyslnym, wiec pomylka
+    w te strone jest CICHA: partia wychodzi pusta, przebieg zielony, a operator czyta to jako „nie ma
+    czego onboardowac". Kazda asercja odmowy ma wiec kontrole pozytywna na TYM SAMYM wejsciu z jedna
+    zmieniona rzecza.
+
+    DLACZEGO IDEMPOTENCJA JEST TU, A NIE W RUNBOOKU. `apply` partii zabity w polowie jest scenariuszem
+    ZMIERZONYM, nie hipotetycznym, a wznowienie po nim jest jedyna droga domkniecia partii. Generator,
+    ktory przy ponowieniu dubluje wpisy, zamienia awarie odwracalna w plik do recznego sprzatania —
+    i wychodzi to dopiero na `terraform plan` komunikatem o zdublowanym kluczu.
+    """
+    print("\n== dzien pierwszy (generator wpisow) ==")
+    import copy
+    import random
+
+    narzedzie = ROOT / "tools" / "dzien_pierwszy.py"
+    check("dzien pierwszy: narzedzie jest w rozpakowanym repo", narzedzie.exists(), str(narzedzie))
+    if not narzedzie.exists():
+        return
+
+    prace = ROOT / "dzien-pierwszy-test"
+    prace.mkdir(exist_ok=True)
+
+    def zasob(pid, numer, folder, stan="ACTIVE"):
+        return {"additionalAttributes": {"projectId": pid}, "project": f"projects/{numer}",
+                "state": stan, "folders": [f"folders/{f}" for f in folder]}
+
+    inwentarz = [
+        zasob("prj-example-alfa", "111111111111", ["100000000001"]),
+        zasob("prj-example-beta", "222222222222", ["100000000001"]),
+        # SKASOWANY: numer jest rozwiazywalny przez 30 dni, wiec granica przyjelaby go bez slowa skargi
+        zasob("prj-example-martwy", "123456789012", ["100000000001"], stan="DELETE_REQUESTED"),
+        # WPROST POD ORGANIZACJA: brak folderu = brak dywizji, a dywizja jest czescia adresu w stanie
+        zasob("prj-example-sierota", "210987654321", []),
+        # LANCUCH Z DWOMA TLUMACZENIAMI: to jest blad TABELI, nie sytuacja do rozstrzygniecia wyborem
+        zasob("prj-example-dwuznaczny", "000000000000", ["100000000001", "100000000002"]),
+    ]
+    profil = [{"name": "vertex-online-serving",
+               "params": {"caller_identities": ["serviceAccount:sa-x@prj-example-app.iam.gserviceaccount.com"],
+                          "access_levels": ["corp_network"]}}]
+    cmdb_pelny = [{"project_id": p, "owner_group": "grp-example-cloud@example.com",
+                   "profiles": json.dumps(profil)}
+                  for p in ("prj-example-alfa", "prj-example-beta", "prj-example-martwy",
+                            "prj-example-sierota", "prj-example-dwuznaczny")]
+    tabela = {"folders": {"100000000001": "example-division", "100000000002": "example-inna"}}
+
+    def zapisz(nazwa, dane, jako="json"):
+        p = prace / nazwa
+        if jako == "json":
+            p.write_text(json.dumps(dane))
+        elif jako == "yaml":
+            p.write_text(yaml.safe_dump(dane))
+        else:
+            with p.open("w", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=["project_id", "owner_group", "profiles"] +
+                                   (["stage"] if any("stage" in x for x in dane) else []))
+                w.writeheader()
+                w.writerows(dane)
+        return p
+
+    zapisz("foldery.yaml", tabela, "yaml")
+
+    def przelot(*, inw="inwentarz.json", cmdb="cmdb.csv", root=None, change_ref="snow:RITM0000123",
+                extra=()):
+        r = sh([sys.executable, str(narzedzie), "--inwentarz-z-pliku", str(prace / inw),
+                "--cmdb", str(prace / cmdb), "--foldery", str(prace / "foldery.yaml"),
+                "--change-ref", change_ref, "--approved-by", APPROVER,
+                "--data", "2026-01-01", "--root", str(root or ROOT), *extra], cwd=ROOT)
+        return r
+
+    def czlonkowie(root):
+        return yaml.safe_load((pathlib.Path(root) / "perimeter" / "projects.yaml").read_text())["members"]
+
+    # Kazdy przelot dostaje SWOJE rozpakowane repo — inaczej pierwszy zapis zmienilby wejscie drugiego,
+    # a test idempotencji mierzylby kolejnosc asercji zamiast wlasnosci narzedzia.
+    def swieze(nazwa):
+        d = prace / nazwa
+        if d.exists():
+            shutil.rmtree(d)
+        d.mkdir(parents=True)
+        (d / "perimeter").mkdir()
+        (d / "perimeter" / "projects.yaml").write_text("schema_version: 1\nmembers: []\n")
+        shutil.copytree(ROOT / "perimeter" / "profiles", d / "perimeter" / "profiles")
+        shutil.copytree(ROOT / "schemas", d / "schemas")
+        return d
+
+    zapisz("inwentarz.json", inwentarz)
+    zapisz("cmdb.csv", cmdb_pelny, "csv")
+
+    # ---------------------------------------------------------------- kontrola POZYTYWNA
+    r1 = swieze("r1")
+    p = przelot(root=r1)
+    wpisy = czlonkowie(r1) if p.returncode == 0 else []
+    check("dzien pierwszy: z pelnego wejscia powstaja wpisy", p.returncode == 0 and len(wpisy) == 2,
+          f"rc={p.returncode} wpisow={len(wpisy)} {p.stderr[-300:]}")
+    check("dzien pierwszy: kazdy wpis ma stage=dry-run",
+          bool(wpisy) and all(w["stage"] == "dry-run" for w in wpisy),
+          str([w.get("stage") for w in wpisy]))
+    check("dzien pierwszy: review_by liczone z DATY PARTII, nie z 'dzis'",
+          bool(wpisy) and all(w["review_by"] == "2026-06-30" for w in wpisy),
+          str([w.get("review_by") for w in wpisy]))
+
+    # ODMOWY: kazda z innego powodu, wszystkie na tym samym przelocie co pozytyw wyzej
+    for fragment, opis in (("prj-example-martwy", "projekt w DELETE_REQUESTED"),
+                           ("prj-example-sierota", "projekt bez folderu (brak dywizji)"),
+                           ("prj-example-dwuznaczny", "lancuch folderow z DWOMA tlumaczeniami")):
+        check(f"dzien pierwszy: ODMOWA — {opis}",
+              fragment in p.stdout and all(w["project_id"] != fragment for w in wpisy),
+              p.stdout[-400:])
+
+    # ---------------------------------------------------------------- IDEMPOTENCJA i WZNOWIENIE
+    r2 = swieze("r2")
+    przelot(root=r2)
+    p2 = przelot(root=r2)
+    check("dzien pierwszy: powtorzony przelot NIE dubluje wpisow",
+          p2.returncode == 0 and len(czlonkowie(r2)) == 2, f"rc={p2.returncode} {len(czlonkowie(r2))}")
+    check("dzien pierwszy: plik po DWOCH przelotach jest identyczny jak po jednym",
+          (r1 / "perimeter" / "projects.yaml").read_text() == (r2 / "perimeter" / "projects.yaml").read_text())
+
+    # WZNOWIENIE PO AWARII: plik ma CZESC partii (generator zginal miedzy dopisaniami)
+    r3 = swieze("r3")
+    przelot(root=r3)
+    czesc = czlonkowie(r3)[:1]
+    (r3 / "perimeter" / "projects.yaml").write_text(
+        yaml.safe_dump({"schema_version": 1, "members": czesc}, sort_keys=False, allow_unicode=True))
+    p3 = przelot(root=r3)
+    po = {w["project_id"]: w for w in czlonkowie(r3)}
+    wzor = {w["project_id"]: w for w in czlonkowie(r1)}
+    check("dzien pierwszy: wznowienie po CZESCIOWYM zapisie domyka partie i nic nie dubluje",
+          p3.returncode == 0 and po == wzor, f"rc={p3.returncode} {sorted(po)} vs {sorted(wzor)}")
+
+    # ---------------------------------------------------------------- DETERMINIZM kolejnosci
+    # Kolejnosc odpowiedzi Asset Inventory jest STABILNA, ale nie posortowana — poleganie na niej daloby
+    # inny diff, gdy ktokolwiek utworzy projekt w organizacji miedzy przelotami.
+    r4 = swieze("r4")
+    pomieszany = copy.deepcopy(inwentarz)
+    random.Random(7).shuffle(pomieszany)
+    zapisz("inwentarz-pomieszany.json", pomieszany)
+    przelot(inw="inwentarz-pomieszany.json", root=r4)
+    check("dzien pierwszy: wynik NIE zalezy od kolejnosci odpowiedzi inwentarza",
+          (r4 / "perimeter" / "projects.yaml").read_text() == (r1 / "perimeter" / "projects.yaml").read_text())
+
+    # ---------------------------------------------------------------- ANTY-TAUTOLOGIA: brak owner_group
+    zapisz("cmdb-bez-owner.csv", [{**x, "owner_group": ""} for x in cmdb_pelny], "csv")
+    r5 = swieze("r5")
+    p5 = przelot(cmdb="cmdb-bez-owner.csv", root=r5)
+    check("dzien pierwszy: wejscie BEZ owner_group daje zero wpisow i NIEZEROWY kod wyjscia",
+          p5.returncode != 0 and czlonkowie(r5) == [], f"rc={p5.returncode} {len(czlonkowie(r5))}")
+
+    # ---------------------------------------------------------------- wejscia odrzucane w CALOSCI
+    zapisz("cmdb-duplikat.csv", cmdb_pelny + [cmdb_pelny[0]], "csv")
+    zapisz("cmdb-enforced.csv", [{**x, "stage": "enforced" if i == 0 else "dry-run"}
+                                 for i, x in enumerate(cmdb_pelny)], "csv")
+    (prace / "inwentarz-pusty.json").write_text("[]")
+    for nazwa, kwargs, opis in (
+            ("duplikat", {"cmdb": "cmdb-duplikat.csv"}, "duplikat project_id w CMDB — PADA, nie wybiera"),
+            ("enforced", {"cmdb": "cmdb-enforced.csv"}, "proba stage=enforced ZATRZYMUJE, nie jest cicho nadpisywana"),
+            ("pusty", {"inw": "inwentarz-pusty.json"}, "pusty inwentarz = awaria odczytu, nie wynik"),
+            ("changeref", {"change_ref": "x"}, "change_ref niezgodny ze schematem zatrzymuje PRZED zapisem")):
+        rr = swieze(f"r-{nazwa}")
+        pr = przelot(root=rr, **kwargs)
+        check(f"dzien pierwszy: {opis}", pr.returncode == 2 and czlonkowie(rr) == [],
+              f"rc={pr.returncode} wpisow={len(czlonkowie(rr))} {pr.stderr[-200:]}")
+
+    # ---------------------------------------------------------------- PUNKT ZATRZYMANIA (obie strony)
+    # Prog `21 + 9,54 x N > 4200` musi strzelac POWYZEJ i milczec PONIZEJ — bramka zawsze wlaczona
+    # zatrzymalaby takze partie, ktore wolno przepuscic, i zostalaby wylaczona w tydzien.
+    for n, ma_stanac in ((438, False), (460, True)):
+        duzy = [zasob(f"prj-example-m{i:04d}", str(700000000000 + i), ["100000000001"]) for i in range(n)]
+        zapisz(f"inw-{n}.json", duzy)
+        zapisz(f"cmdb-{n}.csv", [{"project_id": z["additionalAttributes"]["projectId"],
+                                  "owner_group": "grp-example-cloud@example.com",
+                                  "profiles": json.dumps(profil)} for z in duzy], "csv")
+        rr = swieze(f"r-prog-{n}")
+        pr = przelot(inw=f"inw-{n}.json", cmdb=f"cmdb-{n}.csv", root=rr, extra=["--partia", str(n)])
+        stanal = pr.returncode != 0
+        check(f"dzien pierwszy: punkt zatrzymania budzetu przy N={n} {'STRZELA' if ma_stanac else 'MILCZY'}",
+              stanal == ma_stanac, f"rc={pr.returncode} {pr.stderr[-200:]}")
+        if ma_stanac:
+            check("dzien pierwszy: punkt zatrzymania NIE zapisuje ani jednego wpisu",
+                  czlonkowie(rr) == [], f"wpisow={len(czlonkowie(rr))}")
+
+    # ---------------------------------------------------------------- podsumowanie = jednostka review
+    # Podsumowanie ma ZWIJAC: 438 wpisow jednej dywizji o jednym profilu to JEDNA decyzja autoryzacyjna
+    # i JEDNA tozsamosc. Gdyby klasa niosla tozsamosci, klas byloby tyle, co wpisow (DEC-51).
+    rr = swieze("r-podsum")
+    pr = przelot(inw="inw-438.json", cmdb="cmdb-438.csv", root=rr,
+                 extra=["--partia", "438", "--tylko-podsumowanie"])
+    m = re.search(r"KLASY KSZTALTU — (\d+) decyzji autoryzacyjnych na (\d+) wpisow", pr.stdout)
+    check("dzien pierwszy: podsumowanie ZWIJA wiersze do klas ksztaltu",
+          bool(m) and int(m.group(1)) == 1 and int(m.group(2)) == 438,
+          (m.group(0) if m else pr.stdout[-300:]))
+    check("dzien pierwszy: --tylko-podsumowanie nie zapisuje nic", czlonkowie(rr) == [])
+
+
 def main() -> int:
     bootstrap()
     test_samodzielnosc()
@@ -7696,6 +7897,7 @@ def main() -> int:
     test_codeowners_rozdzielenie()
     test_kompletnosc_decyzji()
     test_tools()
+    test_dzien_pierwszy()
     test_preflight()
     test_bramka_preflightu()
     test_eksperyment_wyscigu()
