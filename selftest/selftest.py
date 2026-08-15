@@ -3575,23 +3575,35 @@ def zrodla_z_pinami() -> dict:
 # bo problemem jest widocznosc SCIEZKI, nie polityka grupowania. `ignore` byloby wrecz szkodliwe:
 # zamrozilo by wdrozenie na starszym pinie szablonu, czyli rozwiazalo rozjazd w strone gorsza.
 #
-# POWIERZCHNIA TO DRZEWO ROZPAKOWANE, NIE STARTER. Pytanie brzmi „co dostaje wdrozenie", wiec pytamy
-# material wyjsciowy `install.sh`. Drzewo startera zawiera dodatkowo `selftest/` z probkami, ktore z
-# premedytacja skladaja rozjazd (dowodza, ze bramka gryzie) — bramka liczaca je jako realne byla by
-# czerwona na tresci poprawnej, dokladnie tak jak pelne sprawdzenie cytowan decyzji na drzewie startera.
+# POWIERZCHNIA TO WSZYSTKO, CO WYCHODZI Z TEGO REPOZYTORIUM — nie samo drzewo rozpakowane (#2084).
+# Pierwsza wersja tej bramki pytala wylacznie material wyjsciowy `install.sh`, bo pytanie brzmialo „co
+# dostaje wdrozenie". Pytanie bylo za waskie i zostawialo dwie dziury, przez ktore pin dojezdza do cudzego
+# runnera bez przechodzenia przez `install.sh`:
+#   * `.github/actions/contrib/` — akcja zlozona wolana przez repo DYWIZJI przez `uses: <ORG>/<starter>/…@sha`.
+#     Jej wlasne `uses:` wykonuja sie u dywizji, a `install.sh` jej nie kopiuje;
+#   * `examples/division-repo/` — material kopiowany do repo dywizji RECZNIE (`install.sh` swiadomie go
+#     pomija, zeby workflow nie ozyl w repo perimetru — patrz guard w `bootstrap()`).
+# Obie sciezki byly po ujednoliceniu zgodne i obie mogly rozjechac sie z powrotem w ciszy. To ten sam
+# ksztalt bledu, co DEC-56: tresc poprawiona, kontrola nadal jej nie obejmuje.
 #
-# BRAMKA JEST ZAPADKA, NIE ZAKAZEM. Rejestr nizej to stan ZMIERZONY w dniu wpisania, nie ideal: piec
-# akcji stoi dzis na dwoch wersjach naraz i kazda z nich ma wlasny blast-radius (podbicie `setup-terraform`
-# v3 -> v4 to nie ta sama zmiana, co podbicie akcji uwierzytelniajacej). Porownanie jest na ROWNOSC, w obie
-# strony: nowy rozjazd czerwieni, a rozjazd DOMKNIETY i niewykreslony z rejestru — tez, zeby lista dlugu
-# nie przezyla dlugu. Dopisanie tu wpisu jest wiec czynnoscia swiadoma, a nie sposobem uciszenia bramki.
-ROZJAZDY_WERSJI_UZNANE = {
-    "actions/checkout": ("v4.4.0", "v7.0.1"),
-    "actions/setup-python": ("v5.6.0", "v7.0.0"),
-    "actions/upload-artifact": ("v4.6.2", "v7.0.1"),
-    "google-github-actions/setup-gcloud": ("v2.2.1", "v3.0.1"),
-    "hashicorp/setup-terraform": ("v3.1.2", "v4.0.1"),
-}
+# WYKLUCZONY JEST DOKLADNIE JEDEN KATALOG: `selftest/`. Leza w nim probki, ktore z premedytacja skladaja
+# rozjazd (dowodza, ze bramka gryzie) — bramka liczaca je jako realne bylaby czerwona na tresci poprawnej,
+# dokladnie tak jak pelne sprawdzenie cytowan decyzji na drzewie startera. Wykluczenie jest NAZWANE, a
+# zbior — wyprowadzony z DRZEWA, wiec plik powstaly jutro jest objety z dnia, w ktorym powstaje.
+#
+# REJESTR JEST PUSTY I TO JEST STAN DOCELOWY (#2084). Byl zapadka na piec rozjazdow zmierzonych w dniu
+# wpisania; wszystkie piec zostalo domkniete PODNIESIENIEM w gore — do wersji, ktore wdrozenie i tak juz
+# uruchamia, wiec zaden pin nie zostal wybrany „na probe". Przy okazji domkniete zostaly dwa rozjazdy,
+# ktorych ta bramka NIE WIDZIALA, bo byly jednorodne wewnatrz szablonu i rozjezdzaly sie dopiero wzgledem
+# wdrozenia: `actions/github-script` v7.1.0 -> v9.0.0 i `peter-evans/create-pull-request` v6.1.0 -> v8.1.1.
+# Ten drugi to DWIE wersje glowne: dopoki szablon stal na v6.1.0, najblizsza synchronizacja COFNELABY
+# wdrozenie o dwa majory przy zielonych bramkach (§9.21 — „synchronizacja nadpisaniem pliku jest downgradem").
+#
+# Porownanie zostaje na ROWNOSC, w obie strony: nowy rozjazd czerwieni, a rozjazd DOMKNIETY i niewykreslony
+# z rejestru — tez, zeby lista dlugu nie przezyla dlugu. Przy pustym rejestrze znaczy to tyle, ze zapadka
+# stala sie zakazem: kazdy rozjazd jest nowy. Dopisanie tu wpisu jest czynnoscia SWIADOMA (dwie wersje tej
+# samej akcji w materiale wysylanym odbiorcy), a nie sposobem uciszenia bramki.
+ROZJAZDY_WERSJI_UZNANE: dict = {}
 
 
 def rozjazdy_wersji(zrodla: dict) -> dict:
@@ -3611,18 +3623,35 @@ def rozjazdy_wersji(zrodla: dict) -> dict:
             for akcja, po_sha in sorted(po_akcji.items()) if len(po_sha) > 1}
 
 
-def zrodla_rozpakowane() -> dict:
-    """Pliki ROZPAKOWANEGO repo z przypieta akcja — czyli dokladnie ten material, ktory dostaje wdrozenie."""
+def zrodla_wychodzace() -> dict:
+    """Pliki z przypieta akcja we wszystkim, co WYCHODZI z tego repozytorium na cudzy runner.
+
+    Dwa zrodla, bo sa dwie rozne drogi wyjscia (naglowek `ROZJAZDY_WERSJI_UZNANE` ma powody):
+      * drzewo ROZPAKOWANE (`ROOT`) — material, ktory `install.sh` daje wdrozeniu;
+      * drzewo STARTERA poza `selftest/` — akcja `contrib/` wolana przez `uses:` z repo dywizji oraz
+        `examples/division-repo/`, kopiowane do repo dywizji recznie. Zadnej z nich `install.sh` nie kopiuje.
+
+    Klucze sa prefiksowane zrodlem, bo `template/github/workflows/plan.yml.example` i rozpakowany
+    `.github/workflows/plan.yml` to ten sam plik dwa razy — bez prefiksu jeden nadpisywalby drugiego
+    w slowniku i liczba plikow w komunikacie bledu klamalaby o polowe.
+
+    `selftest/` jest wykluczony JAWNIE i jest to jedyne wykluczenie: leza tam probki skladajace rozjazd
+    z premedytacja. Reszta zbioru jest wyprowadzona z DRZEWA, nie z listy nazw (DEC-56).
+    """
     out = {}
-    for p in sorted(ROOT.rglob("*")):
-        if ".git" in p.parts or not p.is_file():
-            continue
-        try:
-            tresc = p.read_text()
-        except (UnicodeDecodeError, OSError):
-            continue
-        if PIN_Z_KOMENTARZEM.search(tresc):
-            out[str(p.relative_to(ROOT))] = tresc
+    for etykieta, korzen in (("rozpakowane", ROOT), ("starter", STARTER)):
+        for p in sorted(korzen.rglob("*")):
+            if ".git" in p.parts or not p.is_file():
+                continue
+            rel = p.relative_to(korzen)
+            if korzen is STARTER and rel.parts and rel.parts[0] == "selftest":
+                continue
+            try:
+                tresc = p.read_text()
+            except (UnicodeDecodeError, OSError):
+                continue
+            if PIN_Z_KOMENTARZEM.search(tresc):
+                out[f"{etykieta}:{rel}"] = tresc
     return out
 
 
@@ -3897,11 +3926,18 @@ def test_lint_and_pinning() -> None:
                                      for m in PIN_Z_KOMENTARZEM.finditer(t)}) >= 6,
           f"plikow z pinem: {len(zrodla)}")
 
-    # --- jedna akcja = jedna wersja w materiale wdrozenia (naglowek `ROZJAZDY_WERSJI_UZNANE` ma powody) ---
-    material = zrodla_rozpakowane()
-    check("skan wersji oglada material ROZPAKOWANY, nie drzewo startera (petla nie jest pusta)",
-          len(material) >= 10 and any(n.startswith(".github/workflows/") for n in material),
-          f"plikow rozpakowanych z pinem: {sorted(material)}")
+    # --- jedna akcja = jedna wersja we wszystkim, co WYCHODZI (naglowek `ROZJAZDY_WERSJI_UZNANE` ma powody) ---
+    material = zrodla_wychodzace()
+    # Petla nie jest pusta ANI PO JEDNEJ STRONIE: brak `.github/workflows/` znaczy, ze `install.sh` nic nie
+    # rozpakowal, a brak `contrib`/`examples` — ze poszerzenie z #2084 cicho przestalo dzialac. Bez drugiego
+    # warunku bramka wygladalaby tak samo dobrze, gdyby ogladala znowu samo drzewo rozpakowane.
+    check("skan wersji oglada material ROZPAKOWANY (petla nie jest pusta)",
+          len(material) >= 10 and any(n.startswith("rozpakowane:.github/workflows/") for n in material),
+          f"plikow rozpakowanych z pinem: {sorted(n for n in material if n.startswith('rozpakowane:'))}")
+    check("skan wersji oglada tez material wychodzacy POZA `install.sh` (akcja `contrib`, `examples/`)",
+          any(n.startswith("starter:.github/actions/") for n in material)
+          and any(n.startswith("starter:examples/") for n in material),
+          f"plikow startera z pinem: {sorted(n for n in material if n.startswith('starter:'))}")
     biezace = rozjazdy_wersji(material)
     nowe = {a: v for a, v in biezace.items() if ROZJAZDY_WERSJI_UZNANE.get(a) != v}
     domkniete = {a: v for a, v in ROZJAZDY_WERSJI_UZNANE.items() if biezace.get(a) != v}

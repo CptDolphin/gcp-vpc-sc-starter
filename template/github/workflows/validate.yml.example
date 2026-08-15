@@ -99,7 +99,7 @@ jobs:
     name: schema, policy and budget
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # WSZYSTKIE bramki treści są W JEDNYM MIEJSCU, wołanym też przez `apply.yml`. Rozpisane tutaj jako
       # kroki byłyby kopią, a kopia rozjeżdża się przy pierwszej zmianie — i wtedy wraca defekt, który ten
@@ -113,8 +113,8 @@ jobs:
     name: terraform fmt and validate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
           terraform_version: "1.15.5"
           # WRAPPER WYLACZONY, BO MASKUJE KODY WYJSCIA — a na nich stoja wszystkie bramki nizej.
@@ -173,7 +173,7 @@ jobs:
     name: tflint (static analysis)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: terraform-linters/setup-tflint@6e1e0642c0289bd619021bf6b34e3c08ed1e005a # v6.3.0
         with:

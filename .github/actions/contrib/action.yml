@@ -49,7 +49,7 @@
 # starter, or your own public copy of it. Never `@main`: a moving reference is a mutable one, and whoever
 # controls it controls the code that runs with the division's App token.
 #
-#   - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+#   - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 #   - uses: ORG/gcp-vpc-sc-starter/.github/actions/contrib@<40-char SHA>
 #     with:
 #       member-file: vpc-sc/prj-example-vertex-prod.yaml
