@@ -3586,10 +3586,13 @@ def zrodla_z_pinami() -> dict:
 # Obie sciezki byly po ujednoliceniu zgodne i obie mogly rozjechac sie z powrotem w ciszy. To ten sam
 # ksztalt bledu, co DEC-56: tresc poprawiona, kontrola nadal jej nie obejmuje.
 #
-# WYKLUCZONY JEST DOKLADNIE JEDEN KATALOG: `selftest/`. Leza w nim probki, ktore z premedytacja skladaja
-# rozjazd (dowodza, ze bramka gryzie) — bramka liczaca je jako realne bylaby czerwona na tresci poprawnej,
-# dokladnie tak jak pelne sprawdzenie cytowan decyzji na drzewie startera. Wykluczenie jest NAZWANE, a
-# zbior — wyprowadzony z DRZEWA, wiec plik powstaly jutro jest objety z dnia, w ktorym powstaje.
+# PO STRONIE STARTERA PYTAMY DWA KATALOGI, NIE CALE DRZEWO — bo pytanie brzmi „co WYCHODZI", a nie „czy
+# wszystko w repo ma te sama wersje". Poza zbiorem zostaja `selftest/` (probki skladajace rozjazd
+# z premedytacja) i `.github/workflows/` STARTERA (jego wlasne CI, ktorego nikt poza tym repo nie
+# uruchamia; jego piny domyka Dependabot startera, czyli mechanizm, a nie ta asercja). Wewnatrz dwoch
+# objetych katalogow zbior jest wyprowadzony z DRZEWA, wiec plik powstaly jutro jest objety z dnia,
+# w ktorym powstaje. Pierwsza wersja tego poszerzenia brala cale drzewo i czerwienila sie na wlasnym CI
+# startera — kod byl wtedy szerszy niz jego uzasadnienie, i bramka to zlapala na pierwszym przebiegu.
 #
 # REJESTR JEST PUSTY I TO JEST STAN DOCELOWY (#2084). Byl zapadka na piec rozjazdow zmierzonych w dniu
 # wpisania; wszystkie piec zostalo domkniete PODNIESIENIEM w gore — do wersji, ktore wdrozenie i tak juz
@@ -3635,23 +3638,37 @@ def zrodla_wychodzace() -> dict:
     `.github/workflows/plan.yml` to ten sam plik dwa razy — bez prefiksu jeden nadpisywalby drugiego
     w slowniku i liczba plikow w komunikacie bledu klamalaby o polowe.
 
-    `selftest/` jest wykluczony JAWNIE i jest to jedyne wykluczenie: leza tam probki skladajace rozjazd
-    z premedytacja. Reszta zbioru jest wyprowadzona z DRZEWA, nie z listy nazw (DEC-56).
+    CZEGO PO STRONIE STARTERA NIE PYTAMY I DLACZEGO. Zbior ze strony startera jest zawezony do dwoch
+    KATALOGOW, a nie do „calego drzewa poza `selftest/`". Wykluczone sa dwie rzeczy, kazda z innego powodu:
+      * `selftest/` — leza tam probki skladajace rozjazd Z PREMEDYTACJA (dowodza, ze bramka gryzie);
+        bramka liczaca je jako realne bylaby czerwona na tresci POPRAWNEJ;
+      * `.github/workflows/` STARTERA — to jego WLASNE CI, ktorego nikt poza tym repozytorium nie
+        uruchamia, wiec zaden jego pin nie trafia na cudzy runner. Pytanie tej bramki brzmi „czy material
+        WYCHODZACY jest jednorodny", a nie „czy wszystko w repo ma te sama wersje". Piny wlasnego CI
+        domyka Dependabot startera (osobne zgloszenie) — czyli mechanizm, a nie ta asercja.
+    Zawezenie jest wiec zgodne z pytaniem, ktore ta bramka zadaje. Pierwsza wersja poszerzenia (#2084)
+    brala cale drzewo i czerwienila sie na wlasnym CI startera: kod byl szerszy niz jego uzasadnienie.
     """
     out = {}
-    for etykieta, korzen in (("rozpakowane", ROOT), ("starter", STARTER)):
-        for p in sorted(korzen.rglob("*")):
-            if ".git" in p.parts or not p.is_file():
-                continue
-            rel = p.relative_to(korzen)
-            if korzen is STARTER and rel.parts and rel.parts[0] == "selftest":
+    for p in sorted(ROOT.rglob("*")):
+        if ".git" in p.parts or not p.is_file():
+            continue
+        try:
+            tresc = p.read_text()
+        except (UnicodeDecodeError, OSError):
+            continue
+        if PIN_Z_KOMENTARZEM.search(tresc):
+            out[f"rozpakowane:{p.relative_to(ROOT)}"] = tresc
+    for katalog in (".github/actions", "examples"):
+        for p in sorted((STARTER / katalog).rglob("*")):
+            if not p.is_file():
                 continue
             try:
                 tresc = p.read_text()
             except (UnicodeDecodeError, OSError):
                 continue
             if PIN_Z_KOMENTARZEM.search(tresc):
-                out[f"{etykieta}:{rel}"] = tresc
+                out[f"starter:{p.relative_to(STARTER)}"] = tresc
     return out
 
 
