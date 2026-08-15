@@ -561,6 +561,51 @@ test_baseline_with_explicit_flag_passes if {
 	count(deny) == 0 with input as ok
 }
 
+# --- niezmiennik REGUL baseline'u (#2066) -------------------------------------------------------------
+#
+# Cztery testy opisuja jedno rozroznienie, ktorego do #2066 nie bylo: „ile regul zostalo" kontra „ktore
+# reguly MUSZA zostac". Pierwsza z nich przechodzila kazdy test, bo obie istniejace bramki kwantyfikuja
+# po LISCIE, wiec usuniecie wpisu daje po prostu jedna iteracje mniej.
+
+# ZBIOR KOMPLETNY -> zielono. Bez tego testu bramka odrzucajaca wszystko wygladalaby tak samo dobrze.
+test_baseline_wymagane_tytuly_komplet_przechodzi if {
+	ok := json.patch(healthy_input, [
+		{"op": "add", "path": "/policy/baseline_ingress", "value": baseline_ok},
+		{"op": "add", "path": "/policy/baseline_required_ingress_titles", "value": ["security-scanner-read"]},
+	])
+	count(deny) == 0 with input as ok
+}
+
+# SEDNO ZGLOSZENIA: usuniecie POJEDYNCZEJ reguly z niepustej listy. Przed #2066 to przechodzilo, bo lista
+# nadal byla niepusta i kazda POZOSTALA regula miala poprawny ksztalt.
+test_baseline_brak_pojedynczej_wymaganej_reguly_denied if {
+	bad := json.patch(healthy_input, [
+		{"op": "add", "path": "/policy/baseline_ingress", "value": baseline_ok},
+		{"op": "add", "path": "/policy/baseline_required_ingress_titles", "value": [
+			"security-scanner-read",
+			"platform-violations-read",
+		]},
+	])
+	count(deny) > 0 with input as bad
+}
+
+# Pusta lista przy NIEPUSTYM `baseline_ingress` = ciche wylaczenie bramki, nie „brak niezmiennikow".
+test_baseline_wymagane_tytuly_puste_denied if {
+	bad := json.patch(healthy_input, [
+		{"op": "add", "path": "/policy/baseline_ingress", "value": baseline_ok},
+		{"op": "add", "path": "/policy/baseline_required_ingress_titles", "value": []},
+	])
+	count(deny) > 0 with input as bad
+}
+
+# KLUCZ NIEOBECNY to legalny stan wdrozenia sprzed #2066 — `policy.yaml` jest plikiem srodowiska, wiec
+# synchronizacja startera go nie dotyka. Bez tego testu poprawka zaczerwienilaby kazde stojace wdrozenie
+# w chwili scalenia, czyli zostalaby wyciszona.
+test_baseline_bez_deklaracji_tytulow_przechodzi if {
+	ok := json.patch(healthy_input, [{"op": "add", "path": "/policy/baseline_ingress", "value": baseline_ok}])
+	count(deny) == 0 with input as ok
+}
+
 # Pominięcie pola NIE MOŻE dawać tego samego skutku co jego ustawienie — inaczej reguła bez warunku kontekstu
 # dla wszystkich członków przechodzi w cichym PR-ze.
 test_baseline_without_access_level_and_without_flag_denied if {

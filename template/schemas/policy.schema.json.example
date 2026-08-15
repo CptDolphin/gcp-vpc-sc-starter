@@ -80,6 +80,15 @@
       "uniqueItems": true,
       "description": "Usługi, których wypadnięcie z `restricted_services` ma być BŁĘDEM PLANU. Klucz nieobecny = [\"aiplatform.googleapis.com\"] (zachowanie sprzed DEC-50, żeby sync startera nie zmieniał zachowania stojących wdrożeń). PUSTA LISTA JEST ODRZUCANA (`minItems: 1`) — perimetr bez ani jednego niezmiennika nikomu niczego nie obiecuje; to jedyny warunek z tej pary, który schema umie wypowiedzieć sama."
     },
+    "baseline_required_ingress_titles": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true,
+      "description": "Tytuly regul `baseline_ingress`, ktorych BRAK ma byc bledem. Inny niezmiennik niz `baseline_required_services`: tamten mowi, jakie USLUGI musza zostac objete granica, ten — jakie REGULY musza pozostac w mocy. Klucz nieobecny = zachowanie sprzed #2066 (pusty zbior). Pusta lista przy niepustym `baseline_ingress` jest ODRZUCANA przez OPA jako ciche wylaczenie bramki."
+    },
     "vpc_accessible_services": {
       "type": "object",
       "additionalProperties": false,

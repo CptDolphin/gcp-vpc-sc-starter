@@ -49,6 +49,51 @@ deny contains msg if {
 	msg := sprintf("policy.yaml: restricted_services musi zawierać %q — usługa jest zadeklarowana w baseline_required_services jako niezmiennik tego perimetru (DEC-1, DEC-50)", [s])
 }
 
+# --- niezmiennik REGUŁ baseline'u, a nie tylko USŁUG (#2066) ------------------------------------------
+#
+# CZEGO NIE ŁAPAŁY DWIE REGUŁY WYŻEJ. `baseline_required_services` jest listą USŁUG i pilnuje, żeby żadna
+# nie wypadła z `restricted_services`. Reguły `baseline_ingress` to co innego: to one autoryzują skaner
+# bezpieczeństwa, odczyt naruszeń i kanarki access levelu — czyli rzeczy, bez których granica jest ślepa
+# NA SIEBIE. Usunięcie POJEDYNCZEJ reguły z tej listy nie było odrzucane przez nic.
+#
+# DLACZEGO PRZECHODZIŁO, mimo że dwie reguły niżej wyglądają na właściwe: obie kwantyfikują
+# `some rule in object.get(input.policy, "baseline_ingress", [])`, czyli po tym, CO JEST. Usunięcie wpisu
+# powoduje po prostu jedną iterację mniej — zbiór `deny` się kurczy i conftest świeci na zielono. Na tej
+# samej zasadzie znika cała sekcja: domyślną wartością `object.get` jest pusta lista.
+#
+# CO REALNIE ZNIKA. `platform-violations-read` jest dziś konsumowana przez KONTROLĘ POZYTYWNĄ sondy
+# granicy — jej usunięcie ROZBRAJA jedyny mechanizm dowodzący, że granica kogoś WPUSZCZA. Do tej pory
+# stał tam wyłącznie komentarz ostrzegawczy w `policy.yaml`, a opis nie jest bramką.
+#
+# TA REGUŁA KWANTYFIKUJE PO DEKLARACJI, NIE PO LIŚCIE — i to jest cała różnica. `some t in
+# baseline_wymagane_reguly` przebiega tytuły, które MAJĄ BYĆ; brak odpowiadającej reguły jest wtedy
+# widoczny, bo pętla nie zależy od tego, co zostało w pliku. To ten sam kształt, co DEC-57: ochrona przed
+# pustką nie jest ochroną przed niepełnym pokryciem.
+#
+# Klucz nieobecny = zachowanie sprzed tej zmiany (pusty zbiór wymaganych tytułów), z tego samego powodu
+# co przy `baseline_required_services`: `policy.yaml` jest plikiem środowiska, więc klucz wymagany
+# zaczerwieniłby każde już stojące wdrożenie w chwili scalenia synchronizacji.
+default baseline_wymagane_reguly := []
+
+baseline_wymagane_reguly := input.policy.baseline_required_ingress_titles
+
+tytuly_baseline := {rule.title | some rule in object.get(input.policy, "baseline_ingress", [])}
+
+deny contains msg if {
+	some t in baseline_wymagane_reguly
+	not t in tytuly_baseline
+	msg := sprintf("policy.yaml: baseline_ingress nie zawiera reguły %q — tytuł jest zadeklarowany w baseline_required_ingress_titles jako niezmiennik tego perimetru. Reguły baseline autoryzują skaner, raport naruszeń i kanarki: ich usunięcie nie psuje planu, tylko odbiera granicy dowód na samą siebie (#2066)", [t])
+}
+
+# Pusta lista przy NIEPUSTYM `baseline_ingress` znaczy „ktoś wyłączył tę bramkę i nie zapisał tego jako
+# decyzji" — dokładnie jak przy usługach. Rozróżniamy to od klucza NIEOBECNEGO, który jest legalnym
+# stanem wdrożenia sprzed tej zmiany.
+deny contains msg if {
+	count(input.policy.baseline_required_ingress_titles) == 0
+	count(object.get(input.policy, "baseline_ingress", [])) > 0
+	msg := "policy.yaml: baseline_required_ingress_titles jest pustą listą przy niepustym baseline_ingress — reguły baseline istnieją, ale żadna nie jest niezmiennikiem, więc każdą można usunąć bez odrzucenia. Wypisz tytuły, których brak ma być błędem, albo usuń klucz (nieobecny = zachowanie sprzed #2066)"
+}
+
 # --- członkowie -------------------------------------------------------------------------------------
 
 # Profil musi istnieć w katalogu. Literówka w nazwie inaczej przechodzi jako „członek bez reguł":

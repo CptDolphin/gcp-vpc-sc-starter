@@ -496,3 +496,41 @@ test_egress_omni_permission_przechodzi if {
 	])
 	count(deny) == 0 with input as plan_with([omni])
 }
+
+
+# --- niezmiennik regul baseline po stronie PLANU (#2066) ----------------------------------------------
+#
+# Para: ten sam plan, jedyna roznica to obecnosc wyrenderowanej reguly. Bez drugiego testu pierwszy
+# dowodzilby wylacznie, ze cos jest czerwone.
+
+plan_z_baseline := {"planned_values": {"root_module": {"resources": [{
+	"type": "google_access_context_manager_service_perimeter_dry_run_ingress_policy",
+	"values": {
+		"title": "baseline--security-scanner-read",
+		"ingress_from": [{"identities": ["serviceAccount:s@x.iam.gserviceaccount.com"], "sources": [{"access_level": "*"}]}],
+		"ingress_to": [{"resources": ["*"], "operations": [{"service_name": "storage.googleapis.com", "method_selectors": [{"method": "google.storage.buckets.get"}]}]}],
+	},
+}]}}}
+
+test_baseline_wymagany_tytul_obecny_w_planie_przechodzi if {
+	count(deny) == 0 with input as plan_z_baseline
+		with data.baseline_required_ingress_titles as ["security-scanner-read"]
+		with data.baseline_ingress as [{
+			"title": "security-scanner-read",
+			"identities": ["serviceAccount:s@x.iam.gserviceaccount.com"],
+			"operations": [{"service": "storage.googleapis.com", "methods": ["google.storage.buckets.get"]}],
+		}]
+}
+
+# SEDNO: deklaracja zostaje, regula znika z planu. Bramka deklaracyjna tego NIE WIDZI.
+test_baseline_wymagany_tytul_nieobecny_w_planie_denied if {
+	pusty := {"planned_values": {"root_module": {"resources": []}}}
+	count(deny) > 0 with input as pusty
+		with data.baseline_required_ingress_titles as ["security-scanner-read"]
+}
+
+# Brak deklaracji = zero asercji (wdrozenie sprzed #2066 po synchronizacji nie moze zaczerwieniec).
+test_baseline_bez_deklaracji_tytulow_plan_przechodzi if {
+	pusty := {"planned_values": {"root_module": {"resources": []}}}
+	count(deny) == 0 with input as pusty
+}
