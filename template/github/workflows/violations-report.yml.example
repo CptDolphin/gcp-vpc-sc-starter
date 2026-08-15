@@ -1,6 +1,8 @@
 # .github/workflows/violations-report.yml
 # Turns raw dry-run violations into something an owner can act on, and into the EVIDENCE the promotion gate
-# requires. Without this workflow "14 clean days" is a claim; with it, it is a file.
+# requires. Without this workflow the clean window is a claim; with it, it is a file.
+# The window length comes from `perimeter/policy.yaml` (`onboarding.clean_window_days`), not from
+# a literal here: a number hardcoded next to the declaration it contradicts is how #2083 happened.
 
 name: violations-report
 
@@ -11,7 +13,9 @@ on:
     inputs:
       days:
         description: "observation window in days"
-        default: "14"
+        # Puste = wez okno z deklaracji (`onboarding.clean_window_days`). Wpisz liczbe TYLKO
+        # na przelot diagnostyczny — raport z innym oknem nie jest dowodem dla bramki promocji.
+        default: ""
 
 permissions:
   contents: read
@@ -78,10 +82,26 @@ jobs:
           SINK_PROJECT: ${{ vars.VIOLATIONS_SINK_PROJECT }}
           SINK_BUCKET: ${{ vars.VIOLATIONS_SINK_BUCKET }}
           SINK_LOCATION: ${{ vars.VIOLATIONS_SINK_LOCATION }}
-          DAYS: ${{ github.event.inputs.days || '14' }}
+          DAYS_WEJSCIE: ${{ github.event.inputs.days }}
         run: |
           set -o pipefail
           FILTER='protoPayload.metadata."@type"="type.googleapis.com/google.cloud.audit.VpcServiceControlAuditMetadata"'
+
+          # OKNO POCHODZI Z DEKLARACJI, nie z literalu w tym pliku (#2083). Do tej poprawki stalo tu zaszyte
+          # `14`, podczas gdy `policy.yaml` deklarowal `clean_window_days: 7` i twierdzil, ze to wlasnie ta
+          # liczba mowi, „ile ostatnich dni musi byc bez naruszen". Raport obejmowal wiec inne okno niz to,
+          # ktore opisywala deklaracja, a bramka promocji czytala jego wynik jako dowod dla okna z deklaracji.
+          # Fail-closed: brak klucza albo brak `policy.yaml` konczy przebieg, bo raport z NIEZNANYM oknem nie
+          # jest dowodem — jest liczba bez jednostki.
+          DAYS=$(python3 -c "import yaml,sys; print(yaml.safe_load(open('perimeter/policy.yaml'))['onboarding']['clean_window_days'])") || {
+            echo "::error::nie odczytano onboarding.clean_window_days z perimeter/policy.yaml — raport bez znanego okna nie jest dowodem"
+            exit 1
+          }
+          if [ -n "${DAYS_WEJSCIE:-}" ]; then
+            echo "::warning title=OKNO Z WEJSCIA, NIE Z DEKLARACJI::raport obejmuje ${DAYS_WEJSCIE} d zamiast zadeklarowanych ${DAYS} d — przelot diagnostyczny, NIE dowod dla bramki promocji"
+            DAYS="$DAYS_WEJSCIE"
+          fi
+          echo "okno raportu: ${DAYS} d"
 
           # GUARD PRZED ODCZYTEM, i to nie jest ozdoba. Sink, który nie dostarcza, wygląda DOKŁADNIE tak samo
           # jak czyste okno: pusty kubełek, zielony przebieg, `violations.json` z zerami i przepuszczona

@@ -125,11 +125,18 @@
       "properties": {
         "dry_run_min_days": {
           "type": "integer",
-          "minimum": 1
+          "minimum": 1,
+          "description": "Minimum dni w `dry-run` przed promocja do `enforced`."
         },
         "clean_window_days": {
           "type": "integer",
-          "minimum": 1
+          "minimum": 1,
+          "description": "OKNO CZYSTOSCI: ile ostatnich dni raport naruszen obejmuje i ma miec czyste. Zrodlo `--freshness` w `violations-report.yml`. NIE mylic z `violations_report_max_age_days` — to sa dwie rozne liczby (#2083)."
+        },
+        "violations_report_max_age_days": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "SWIEZOSC DOWODU: artefakt raportu starszy niz tyle dni jest traktowany jak jego BRAK. Klucz nieobecny = wartosc `clean_window_days` (zachowanie sprzed #2083, gdy jedna liczba pelnila obie role)."
         },
         "promotion_waivers": {
           "type": "array",
