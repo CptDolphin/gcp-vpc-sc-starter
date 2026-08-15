@@ -71,6 +71,18 @@ restricted_services:
 baseline_required_services:
   - aiplatform.googleapis.com
 
+# Tytuły reguł `baseline_ingress` (niżej), których BRAK ma być błędem. To jest inny niezmiennik niż
+# `baseline_required_services` wyżej i pilnuje go inna reguła: tamten mówi, jakie USŁUGI muszą zostać
+# objęte granicą, ten — jakie REGUŁY muszą pozostać w mocy. Do #2066 usunięcie pojedynczej reguły
+# baseline nie było odrzucane przez nic, bo obie bramki kwantyfikowały po tym, CO JEST W LIŚCIE, a nie
+# po tym, co ma w niej być. `platform-violations-read` jest tu szczególnie ważna: to na niej stoi
+# KONTROLA POZYTYWNA sondy granicy, więc jej usunięcie rozbraja jedyny dowód, że granica kogoś
+# WPUSZCZA — a plan przechodzi bez ostrzeżenia.
+# ZMIANA TEJ LISTY = ZMIANA OBIETNICY GRANICY. Ta sama ścieżka review, co wyżej (CODEOWNERS Security).
+baseline_required_ingress_titles:
+  - security-scanner-read
+  - platform-violations-read
+
 # vpc_accessible_services = co wolno wołać Z WNĘTRZA perimetru. Trzymamy 1:1 z restricted_services.
 # DLACZEGO 1:1: pod-skopowana lista cicho psuje bootstrap workloadów (usługa objęta granicą, ale
 # niedostępna od środka = błąd, który wygląda jak awaria aplikacji, nie jak polityka).

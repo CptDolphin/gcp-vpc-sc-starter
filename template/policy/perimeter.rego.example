@@ -259,6 +259,40 @@ deny contains msg if {
 # `resources` ŚWIADOMIE NIE JEST porównywane: to jedyne pole, w którym reguła zbiorcza ma prawo różnić się
 # od deklaracji (deklaracja nie zna członków, renderer wstawia `*`). Gdyby je tu porównywać, predykat
 # odpowiadałby na pytanie „czy renderer zrobił to, co zrobił", a nie „czy ta treść jest zatwierdzona".
+# --- DRUGA WARSTWA niezmiennika regul baseline: czy one REALNIE SA W PLANIE (#2066) ------------------
+#
+# Bramka w `vpcsc.onboarding` pyta DEKLARACJE: czy `baseline_ingress` zawiera kazdy tytul wymieniony
+# w `baseline_required_ingress_titles`. Ta pyta EFEKT: czy renderer faktycznie te regule wyprodukowal.
+#
+# DLACZEGO OBIE, skoro renderer czyta te sama deklaracje. Bo to sa dwa rozne tryby awarii i pierwsza
+# bramka drugiego nie widzi: mozna zostawic wpis w `policy.yaml` i zgubic go w rendererze (warunek
+# w `locals.tf`, `for_each` po zawezonym zbiorze, blad w `manage_skeleton`). Zasada tego repozytorium
+# brzmi „sprawdzaj ISTNIENIE efektu, nie referencje do niego" — bramka mierzaca, czy regula jest
+# ZADEKLAROWANA, przechodzi przy rendererze, ktory jej nie renderuje.
+#
+# TYTUL W PLANIE MA PREFIKS `baseline--` (patrz `locals.tf`), wiec porownujemy przez `sprintf`, tak samo
+# jak `regula_odpowiada_baseline` nizej. Czytamy `planned_values`, czyli PELNY stan docelowy, a nie
+# `resource_changes` — plan nieruszajacy baseline'u nadal go tam ma, wiec bramka nie czerwieni sie na
+# zmianie niezwiazanej.
+#
+# BRAK `--data` = pusty zbior wymaganych tytulow = zero asercji. To jest ta sama domyslnosc, co przy
+# `data.baseline_ingress` wyzej, i ma ten sam powod: `policy.yaml` jest plikiem srodowiska.
+# `object.get(data, ...)` byloby tu bledem KOMPILACJI, nie stylu: czytanie calego `data` wciaga w graf
+# zaleznosci takze pakiet `vpcsc.perimeter`, wiec kazda regula tego pliku staje sie rekurencyjna
+# (`rego_recursion_error` na 7 regulach naraz). Wzorzec `default` + bezposrednia referencja jest ten sam,
+# co przy `baseline_wymagane` w `vpcsc.onboarding`.
+default wymagane_tytuly := []
+
+wymagane_tytuly := data.baseline_required_ingress_titles
+
+tytuly_w_planie := {object.get(r.values, "title", "") | some r in planned}
+
+deny contains msg if {
+	some t in wymagane_tytuly
+	not sprintf("baseline--%s", [t]) in tytuly_w_planie
+	msg := sprintf("plan nie zawiera reguly baseline %q — tytul jest zadeklarowany w baseline_required_ingress_titles jako niezmiennik. Deklaracja bez wyrenderowanej reguly to ochrona, ktorej nie ma (#2066)", [t])
+}
+
 regula_odpowiada_baseline(r) if {
 	some b in data.baseline_ingress
 	object.get(r.values, "title", "") == sprintf("baseline--%s", [b.title])
