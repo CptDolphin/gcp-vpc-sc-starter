@@ -88,7 +88,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: break-glass # deliberately NOT `perimeter-apply` — see header for what the separation buys
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # TOŻSAMOŚĆ I DOSTĘP DO STANU IDĄ PRZED JAKĄKOLWIEK ZMIANĄ PLIKU — patrz nagłówek. Te trzy kroki
       # nie zmieniają niczego, a padają na wszystkim, co i tak by procedurę zatrzymało: brak wiązania WIF
@@ -99,7 +99,7 @@ jobs:
           workload_identity_provider: ${{ vars.WIF_PROVIDER }}
           service_account: ${{ vars.APPLY_SERVICE_ACCOUNT }}
 
-      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
           terraform_version: "1.15.5"
           # WRAPPER WYLACZONY, BO MASKUJE KODY WYJSCIA — a na nich stoja wszystkie bramki nizej.
@@ -261,7 +261,7 @@ jobs:
       # wtedy i ma powiedzieć wprost, w którym stanie zostało środowisko.
       - name: open the postmortem issue
         if: always()
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           WYNIK: ${{ job.status }}
         with:

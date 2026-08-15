@@ -36,7 +36,7 @@ jobs:
     name: is the template material still current
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: compare the recorded starter commit with the starter's main
         id: compare
@@ -130,7 +130,7 @@ jobs:
       # every Monday: a stack of identical issues is the same thing as no issue.
       - name: open or update the drift issue
         if: steps.compare.outputs.behind == '1' || steps.decyzje.outputs.brakujace == '1'
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             const fs = require('fs');
@@ -200,7 +200,7 @@ jobs:
       # czystym ukryłoby połowę problemu, i to akurat tę połowę, której podniesienie `commit:` nie naprawia.
       - name: close the drift issue when there is none
         if: steps.compare.outputs.behind == '0' && steps.decyzje.outputs.brakujace == '0'
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             const title = 'starter-drift: this repository is behind the starter';
