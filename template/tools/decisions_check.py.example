@@ -166,6 +166,43 @@ def zdefiniowane(tekst: str) -> dict[str, int]:
     return out
 
 
+def tytuly(tekst: str) -> dict[str, str]:
+    """Numer decyzji -> tytul jej PIERWSZEJ sekcji, znormalizowany do porownania miedzy repozytoriami.
+
+    PO CO OSOBNO OD `zdefiniowane()`. Tamta funkcja odpowiada na pytanie „czy sekcja o tym numerze
+    ISTNIEJE" i to wystarcza, dopoki numer znaczy po obu stronach TO SAMO. Nie wystarcza, gdy przestaje:
+    numer nadaje KOLEJNOSC MERGE'A, wiec dwie galezie czytajace ten sam stan biora te sama liczbe, a po
+    scaleniu jedna z nich jest przenumerowywana RECZNIE — po jednej stronie, nie po obu.
+
+    ZMIERZONE (#2096, przy synchronizacji #2068): repozytorium wdrozenia mialo DEC-26 i DEC-27
+    w ODWROTNEJ kolejnosci niz starter. Trojstronny merge zobaczyl wtedy tresc DEC-27 startera jako
+    DODATEK w miejscu, gdzie wdrozenie ma DEC-28, i wstawil ja DRUGI RAZ — przy ZERO konfliktow, bo obie
+    strony byly wewnetrznie spojne. Zlapala to dopiero bramka duplikatu, czyli PO fakcie i na czerwonym
+    wniosku, ktory byl poprawny.
+
+    CZEGO TA FUNKCJA NIE ROBI I DLACZEGO. Nie jest stabilnym kluczem sekcji — takiego klucza tu nie ma
+    i jego wprowadzenie rusza 56 sekcji w dwoch repozytoriach naraz (osobne zadanie). Porownuje TYTUL,
+    ktory jest najtansza rzecza rozroznialna miedzy „ta sama decyzja pod innym numerem" a „inna decyzja
+    pod tym samym numerem". Tytul bywa poprawiany, wiec porownanie jest ZNORMALIZOWANE i celowo tepe:
+    male litery, zbite biale znaki, bez znakow innych niz alfanumeryczne. Falszywy alarm kosztuje tu
+    jedna linie w cotygodniowym zgloszeniu; przeoczenie kosztuje zablokowany sync i reczna interwencje
+    w rejestrze, ktory wszystko cytuje.
+    """
+    out: dict[str, str] = {}
+    for linia in tekst.splitlines():
+        m = NAGLOWEK.match(linia)
+        if m and m.group(1) not in out:
+            reszta = linia[m.end():]
+            out[m.group(1)] = " ".join("".join(
+                z if z.isalnum() or z.isspace() else " " for z in reszta).lower().split())
+    return out
+
+
+def kolejnosc(tekst: str) -> list[str]:
+    """Numery decyzji w KOLEJNOSCI WYSTEPOWANIA w pliku. Nie posortowane — o to wlasnie chodzi."""
+    return [m.group(1) for m in (NAGLOWEK.match(l) for l in tekst.splitlines()) if m]
+
+
 def powtorzone(tekst: str) -> dict[str, list[int]]:
     """Numery decyzji mające WIĘCEJ NIŻ JEDNĄ sekcję -> numery linii wszystkich nagłówków.
 
@@ -376,6 +413,47 @@ def main() -> int:
                 f"{numer}: jest w starterze ({wzorzec}:{tam[numer]}), nie ma jej tutaj. Nikt jej nie "
                 f"cytuje, wiec sprawdzenie wewnetrzne jej nie widzi — a jej brak znaczy, ze sync "
                 f"przeniosl commit, ale nie cala jego tresc")
+
+        # DRUGIE PYTANIE TEGO TRYBU, wezsze niz pokrycie zbioru i szersze niz duplikat w jednym pliku:
+        # czy ten sam NUMER znaczy po obu stronach TE SAMA decyzje. Bez tego `--wzgledem` przechodzi na
+        # zbiorze {1..57} po obu stronach nawet wtedy, gdy dwa numery sa zamienione miejscami — a wlasnie
+        # taka zamiana kazala trojstronnemu merge'owi wciagnac sekcje drugi raz (#2096/#2068).
+        # TRZECIE PYTANIE: czy sekcje stoja po obu stronach w TEJ SAMEJ KOLEJNOSCI.
+        #
+        # To NIE jest estetyka i nie jest to „posortuj rejestr". Trojstronny merge dopasowuje tresc po
+        # POLOZENIU: gdy ta sama sekcja stoi po dwoch stronach w innym miejscu, merge widzi ja jako DODATEK
+        # w miejscu, gdzie druga strona ma cos innego — i wciaga ja DRUGI RAZ, przy ZERO konfliktow, bo obie
+        # strony sa wewnetrznie spojne. Zmierzone (#2096, przy synchronizacji #2068): wdrozenie mialo sekcje
+        # DEC-27 PRZED DEC-26, starter odwrotnie; scalenie 116 commitow dopisalo druga sekcje `## DEC-27`
+        # i zatrzymalo poprawny wniosek na bramce duplikatu — czyli PO fakcie, na czerwonym CI.
+        #
+        # NIE zadamy kolejnosci ROSNACEJ, tylko ZGODNEJ. Dziura w numeracji jest legalna, a sekcja
+        # dopisana swiadomie nie na koncu tez — pod warunkiem, ze obie strony robia to tak samo. Zmierzone:
+        # oba rejestry maja dzis jedna wspolna „nierosnaca" pare i to jest w porzadku; rozjezdzala sie
+        # WYLACZNIE ta jedna, ktora byla po jednej stronie.
+        #
+        # Porownujemy tylko numery obecne PO OBU STRONACH — sekcja, ktorej gdzies nie ma, jest pytaniem
+        # sprawdzenia wyzej i zglaszanie jej tutaj drugi raz zamienialoby jeden problem w dwa komunikaty.
+        wspolne = set(tam) & set(tutaj)
+        kol_tutaj = [n for n in kolejnosc(tresc) if n in wspolne]
+        kol_tam = [n for n in kolejnosc(wzorzec.read_text(encoding="utf-8")) if n in wspolne]
+        if kol_tutaj != kol_tam:
+            rozne = [(a, b) for a, b in zip(kol_tutaj, kol_tam) if a != b][:3]
+            problemy.append(
+                f"kolejnosc sekcji rozni sie od startera (pierwsze rozjazdy: "
+                f"{', '.join(f'tutaj {a} / tam {b}' for a, b in rozne)}). Trojstronny merge dopasowuje "
+                f"tresc po POLOZENIU, wiec ta sama sekcja stojaca gdzie indziej zostanie wciagnieta DRUGI "
+                f"RAZ — przy zero konfliktow (zmierzone #2068). Przenies sekcje, nie zmieniaj numerow")
+
+        tytuly_tam, tytuly_tutaj = tytuly(wzorzec.read_text(encoding="utf-8")), tytuly(tresc)
+        for numer in sorted(set(tam) & set(tutaj), key=lambda s: int(s.split("-")[1])):
+            a, b = tytuly_tutaj.get(numer, ""), tytuly_tam.get(numer, "")
+            if a and b and a != b:
+                problemy.append(
+                    f"{numer}: ten sam numer znaczy tu i w starterze INNA decyzje "
+                    f"(tutaj: \"{a[:70]}\"; starter: \"{b[:70]}\"). Numer nadaje kolejnosc merge'a, wiec "
+                    f"przenumerowanie po JEDNEJ stronie rozjezdza znaczenie — a trojstronny merge widzi "
+                    f"wtedy cudza sekcje jako DODATEK i wciaga ja drugi raz (zmierzone #2068)")
 
     for z in problemy:
         print(f"::error::{z}")
