@@ -844,6 +844,44 @@ def test_kazdy_stack_sie_parsuje() -> None:
         p = sh(["terraform", f"-chdir={d}", "validate"])
         check(f"{stack}: validate", p.returncode == 0, p.stdout + p.stderr)
 
+    # --- czwarta bramka wspolna: bucket stanu jest PLACEHOLDEREM, nie literalem (#2090) -----------------
+    # DLACZEGO to nalezy tutaj, a nie do sekcji per stack: pytanie jest identyczne dla kazdego stacku,
+    # a jego pominiecie w JEDNYM z nich jest dokladnie tym, co sie zdarzylo. `terraform/` i `iam-bootstrap/`
+    # mialy `<STATE_BUCKET>`; `violations-sink/`, ktory powstal pozniej, niosl literal `bkt-tf-state-vpcsc`.
+    #
+    # DLACZEGO TO JEST DEFEKT, A NIE KOSMETYKA — trzy powody, kazdy inny:
+    #   1. Nazwy bucketow GCS sa GLOBALNIE UNIKALNE. Nazwa rodzajowa w materiale wysylanym do wielu
+    #      odbiorcow znaczy, ze pierwsze wdrozenie, ktore ja utworzy, zajmie ja WSZYSTKIM pozostalym —
+    #      a kazde kolejne dostanie 403/404 bez slowa o tym, ze problemem jest cudza wlasnosc.
+    #   2. DEFEKT NIE NAZYWA SIE SAM. Dwa stacki padaja na oczywistym placeholderze („to nie jest poprawna
+    #      nazwa bucketa"), trzeci przechodzi `init` dalej i pada pozniej, w innym miejscu i z innym
+    #      komunikatem. Gorszy jest wariant, w ktorym nie pada wcale.
+    #   3. To jest kanal PRZEJECIA STANU: kto utworzy ten bucket i nada sobie do niego zapis, dostaje stan
+    #      cudzego wdrozenia razem z konfiguracja granicy.
+    #
+    # ZBIOR Z DRZEWA, NIE Z LISTY (DEC-34/DEC-56): pytamy KAZDY blok `backend "gcs"` w rozpakowanym
+    # materiale, wiec czwarty stack bedzie objety w dniu, w ktorym powstanie. Rozlacznosc PREFIKSU jest
+    # osobnym pytaniem i ma osobna bramke (`control_plane_check.py`) — tu pytamy wylacznie o bucket.
+    BACKEND_BUCKET = re.compile(r'backend\s+"gcs"\s*\{[^}]*?bucket\s*=\s*"(?P<bucket>[^"]*)"', re.S)
+    znalezione = {}
+    for p_tf in sorted(ROOT.rglob("*.tf")):
+        for m in BACKEND_BUCKET.finditer(p_tf.read_text()):
+            znalezione[str(p_tf.relative_to(ROOT))] = m.group("bucket")
+    check("skan backendow nie jest pusta petla",
+          len(znalezione) >= 2, f"blokow `backend \"gcs\"`: {znalezione}")
+    literaly = {k: v for k, v in znalezione.items() if v != "<STATE_BUCKET>"}
+    check("kazdy backend w materiale ma PLACEHOLDER bucketa, nie literal (#2090)",
+          not literaly, f"zaszyte nazwy: {literaly}")
+
+    # ANTY-TAUTOLOGIA: bramka wyzej ma czerwieniec na literale, a nie tylko przechodzic na poprawnej tresci.
+    # Probka jest skladana w locie i nie dotyka drzewa — literal wpisany do pliku znalazlby sam siebie.
+    probka = 'terraform {\n  backend "gcs" {\n    bucket = "jakis-konkretny-kubelek"\n    prefix = "x"\n  }\n}\n'
+    m_probka = BACKEND_BUCKET.search(probka)
+    check("anty-tautologia — wzorzec ZNAJDUJE zaszyta nazwe w bloku backendu",
+          bool(m_probka) and m_probka.group("bucket") == "jakis-konkretny-kubelek")
+    check("anty-tautologia — wzorzec nie znajduje bucketa poza blokiem `backend`",
+          BACKEND_BUCKET.search('resource "google_storage_bucket" "x" {\n  bucket = "y"\n}\n') is None)
+
 
 def test_iam_bootstrap() -> None:
     """Stack nadający uprawnienia jest osobny (applikuje go zespół IAM), ale psuje się tak samo łatwo."""
