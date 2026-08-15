@@ -80,6 +80,15 @@
       "uniqueItems": true,
       "description": "Usługi, których wypadnięcie z `restricted_services` ma być BŁĘDEM PLANU. Klucz nieobecny = [\"aiplatform.googleapis.com\"] (zachowanie sprzed DEC-50, żeby sync startera nie zmieniał zachowania stojących wdrożeń). PUSTA LISTA JEST ODRZUCANA (`minItems: 1`) — perimetr bez ani jednego niezmiennika nikomu niczego nie obiecuje; to jedyny warunek z tej pary, który schema umie wypowiedzieć sama."
     },
+    "baseline_required_ingress_titles": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true,
+      "description": "Tytuly regul `baseline_ingress`, ktorych BRAK ma byc bledem. Inny niezmiennik niz `baseline_required_services`: tamten mowi, jakie USLUGI musza zostac objete granica, ten — jakie REGULY musza pozostac w mocy. Klucz nieobecny = zachowanie sprzed #2066 (pusty zbior). Pusta lista przy niepustym `baseline_ingress` jest ODRZUCANA przez OPA jako ciche wylaczenie bramki."
+    },
     "vpc_accessible_services": {
       "type": "object",
       "additionalProperties": false,
@@ -116,11 +125,18 @@
       "properties": {
         "dry_run_min_days": {
           "type": "integer",
-          "minimum": 1
+          "minimum": 1,
+          "description": "Minimum dni w `dry-run` przed promocja do `enforced`."
         },
         "clean_window_days": {
           "type": "integer",
-          "minimum": 1
+          "minimum": 1,
+          "description": "OKNO CZYSTOSCI: ile ostatnich dni raport naruszen obejmuje i ma miec czyste. Zrodlo `--freshness` w `violations-report.yml`. NIE mylic z `violations_report_max_age_days` — to sa dwie rozne liczby (#2083)."
+        },
+        "violations_report_max_age_days": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "SWIEZOSC DOWODU: artefakt raportu starszy niz tyle dni jest traktowany jak jego BRAK. Klucz nieobecny = wartosc `clean_window_days` (zachowanie sprzed #2083, gdy jedna liczba pelnila obie role)."
         },
         "promotion_waivers": {
           "type": "array",

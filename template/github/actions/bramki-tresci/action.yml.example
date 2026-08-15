@@ -518,8 +518,13 @@ runs:
     # fail-closed bez swojego wejścia to ściana, nie bramka.
     #
     # ŚWIEŻOŚĆ JEST CZĘŚCIĄ DOWODU. Raport sprzed miesiąca opisuje okno, które dawno minęło, a wygląda
-    # dokładnie tak samo jak wczorajszy. Artefakt starszy niż `clean_window_days` z `policy.yaml` jest
+    # dokładnie tak samo jak wczorajszy. Artefakt starszy niż `violations_report_max_age_days` jest
     # więc traktowany jak jego brak — odrzucamy go tutaj, zamiast pozwolić mu przejść jako świeży.
+    #
+    # TO NIE JEST OKNO CZYSTOŚCI (#2083). Do tej poprawki czytano tu `clean_window_days`, czyli klucz,
+    # którego nazwa i komentarz opisują CO INNEGO — ile ostatnich dni ma być bez naruszeń. Skutek był
+    # odwrotny do intuicji: podniesienie „okna czystości" ROZLUŹNIAŁO tę bramkę, bo dopuszczało starszy
+    # artefakt, zamiast wydłużyć okres, który raport musi objąć.
     - name: dowód naruszeń z ostatniego raportu (jeśli jest)
       shell: bash
       env:
@@ -530,7 +535,10 @@ runs:
           --status=success --limit=1 --json databaseId,createdAt > biegi.json || echo '[]' > biegi.json
         python3 - <<'PY' > wybor.txt
         import datetime, json, pathlib, yaml
-        okno = yaml.safe_load(open("perimeter/policy.yaml"))["onboarding"]["clean_window_days"]
+        onb = yaml.safe_load(open("perimeter/policy.yaml"))["onboarding"]
+        # Klucz nieobecny = stara semantyka (jedna liczba w obu rolach) — wdrozenie sprzed #2083
+        # nie moze zaczerwieniec w chwili scalenia synchronizacji.
+        okno = onb.get("violations_report_max_age_days", onb["clean_window_days"])
         biegi = json.loads(pathlib.Path("biegi.json").read_text() or "[]")
         if not biegi:
             print("brak przebiegu violations-report")
