@@ -1,0 +1,28 @@
+# Aktualizacje pinów WŁASNEGO CI startera. To repozytorium samo siebie nie aktualizowało: cztery piny SHA
+# w dwóch workflowach i w akcji `contrib/` stały na wartościach z dnia, w którym pliki powstały — łącznie
+# z ich CVE. Dokładnie ta pułapka, przed którą ostrzega `template/github/dependabot.yml.example`:
+# „pinowanie SHA bez mechanizmu aktualizacji jest gorsze niż tag; tag przynajmniej dostaje poprawki
+# bezpieczeństwa sam, a martwy pin nie dostaje nic i wygląda na kontrolę bezpieczeństwa".
+#
+# CZEGO TEN PLIK NIE OBEJMUJE — i nie da się tego naprawić jego ustawieniami (DEC-53). Dependabot czyta
+# `.github/workflows/*.yml` i pliki `action.yml`. Materiał szablonowy leży w `template/**/*.yml.example`
+# i w `examples/**`, czyli POZA jego zasięgiem — a to jest właśnie ten materiał, który jedzie do cudzych
+# repozytoriów. Ani `groups`, ani `ignore` tego nie zobaczą: to problem WIDOCZNOŚCI ŚCIEŻKI, nie polityki.
+# Świeżości materiału pilnuje osobny mechanizm — `.github/workflows/piny-szablonu.yml`, który rozpakowuje
+# `install.sh` i pyta API GitHuba o najnowsze wydania. Jednorodności — asercja `rozjazdy_wersji`
+# w selfteście. Trzy różne pytania, trzy różne mechanizmy; ten plik odpowiada tylko na pierwsze.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+    # Jeden PR zamiast pięciu — z tego samego powodu, co we wdrożeniu: pięć osobnych pull requestów
+    # tygodniowo kończy się ignorowaniem wszystkich pięciu.
+    groups:
+      github-actions:
+        patterns:
+          - "*"

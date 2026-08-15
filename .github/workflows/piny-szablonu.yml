@@ -1,0 +1,154 @@
+# Czy piny akcji w MATERIALE WYSYLANYM sa aktualne wobec wydan upstreamu.
+#
+# DLACZEGO OSOBNY WORKFLOW, A NIE DEPENDABOT. Dependabot czyta `.github/workflows/*.yml` i pliki
+# `action.yml`. Material szablonowy lezy w `template/**/*.yml.example` i w `examples/**` — POZA jego
+# zasiegiem, i zadne ustawienie w `dependabot.yml` tego nie zmieni, bo to jest problem WIDOCZNOSCI
+# SCIEZKI, nie polityki grupowania (DEC-53). `.github/dependabot.yml` tego repozytorium odpowiada wiec
+# tylko za jego WLASNE CI; za material odpowiada ten przebieg.
+#
+# DLACZEGO CYKLICZNIE, A NIE JAKO BRAMKA PR-A. „Upstream wydal nowa wersje" nie jest wina autora pull
+# requesta i nie ma go czym naprawic w jego zmianie. Bramka na PR-ze byla by czerwona losowo, wiec
+# zostalaby wyciszona — a wyciszona bramka jest gorsza niz jej brak. Na PR-ze stoja dwa INNE pytania,
+# oba offline i oba deterministyczne: czy komentarz wersji klamie (`rozjazdy_pinow`) i czy material jest
+# jednorodny (`rozjazdy_wersji`).
+#
+# FAIL-CLOSED JEST TU ISTOTNY. Skrypt zwraca 2, gdy nie da sie odczytac wydania (siec, limit API, repo
+# przeniesione) — i wtedy ten job jest CZERWONY, a zgloszenia NIE zamykamy. Odwrotna domyslnosc zamienilaby
+# caly mechanizm w wylacznik uruchamiany awaria sieci.
+name: piny szablonu
+
+on:
+  schedule:
+    # Wtorek 05:00 — dzien po `starter-drift` we wdrozeniach, zeby zaleglosc pinow i zaleglosc
+    # synchronizacji nie zglaszaly sie tego samego ranka i nie zlewaly w jedno „cos jest za".
+    - cron: "0 5 * * 2"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: piny-szablonu
+  cancel-in-progress: false
+
+jobs:
+  piny:
+    name: material wysylany kontra wydania upstreamu
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      # Self-test PRZED skanem — bramka, ktora nie umie zaplonac, cicho przepuszcza.
+      - name: self-test skanera
+        run: python3 selftest/piny_szablonu.py --self-test
+
+      - name: skan
+        id: skan
+        env:
+          # Token repozytorium wystarcza: pytamy wylacznie o PUBLICZNE wydania cudzych akcji.
+          # Bez niego limit anonimowy (60/h) wyczerpuje sie przy dziesieciu akcjach i kilku przebiegach.
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          python3 selftest/piny_szablonu.py --rozpakuj --json > wynik.json
+          kod=$?
+          set -e
+          echo "kod=$kod" >> "$GITHUB_OUTPUT"
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, pathlib
+          d = json.loads(pathlib.Path("wynik.json").read_text())
+          if d["bledy"]:
+              print("## Nie rozstrzygnieto\n")
+              for b in d["bledy"]:
+                  print(f"- {b}")
+          if d["zalegle"]:
+              print("\n## Zalegle piny\n")
+              print("| akcja | material | upstream | SHA do wpisania |")
+              print("|---|---|---|---|")
+              for z in d["zalegle"]:
+                  print(f"| `{z['akcja']}` | {z['mamy']} | **{z['najnowsze']}** | `{z['najnowsze_sha']}` |")
+          if not d["bledy"] and not d["zalegle"]:
+              print("Material szablonu jest na najnowszych wydaniach wszystkich uzywanych akcji.")
+          PY
+
+      - name: zgloszenie — otworz albo zaktualizuj
+        if: steps.skan.outputs.kod != '0'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const fs = require('fs');
+            const d = JSON.parse(fs.readFileSync('wynik.json', 'utf8'));
+            const tytul = 'piny-szablonu: material wysylany jest za wydaniami upstreamu';
+            // `state: 'all'`, nie `open` — ktos mogl zamknac zgloszenie recznie („zrobie w przyszlym
+            // tygodniu"), a material nadal zalega. Znalezione zamkniete otwieramy z powrotem.
+            const { data: zgloszenia } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: 'all', labels: 'piny-szablonu',
+            });
+            let tresc = `Przebieg: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}\n\n`;
+            if (d.bledy.length) {
+              tresc += `## Nie rozstrzygnieto — zgloszenia NIE zamykamy\n\n`;
+              tresc += d.bledy.map(b => `- ${b}`).join('\n') + '\n\n';
+            }
+            if (d.zalegle.length) {
+              tresc += `## Zalegle piny\n\n| akcja | material | upstream | SHA do wpisania |\n|---|---|---|---|\n`;
+              tresc += d.zalegle.map(z =>
+                `| \`${z.akcja}\` | ${z.mamy} | **${z.najnowsze}** | \`${z.najnowsze_sha}\` |`).join('\n');
+              tresc += `\n\n**Podnies pin W CALYM materiale naraz** — jedna akcja = jedna wersja jest ` +
+                       `pilnowana asercja \`rozjazdy_wersji\` w selftescie, wiec polowiczna zmiana zaczerwieni PR.\n`;
+            }
+            const stary = zgloszenia.find(i => i.title === tytul);
+            if (stary) {
+              await github.rest.issues.update({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: stary.number, body: tresc, state: 'open',
+              });
+              core.info(`zaktualizowano #${stary.number}`);
+            } else {
+              const { data: nowe } = await github.rest.issues.create({
+                owner: context.repo.owner, repo: context.repo.repo,
+                title: tytul, body: tresc, labels: ['piny-szablonu'],
+              });
+              core.info(`otwarto #${nowe.number}`);
+            }
+
+      # Warunek na ROWNOSC z '0', nie `!= '1'`: pusty output (krok przerwany, zmieniona nazwa) NIE jest
+      # stanem „nie ma zaleglosci". Ten sam ksztalt, co w `starter-drift.yml` po #2080.
+      - name: zgloszenie — zamknij, gdy nie ma czego zglaszac
+        if: steps.skan.outputs.kod == '0'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const tytul = 'piny-szablonu: material wysylany jest za wydaniami upstreamu';
+            const { data: otwarte } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: 'open', labels: 'piny-szablonu',
+            });
+            const stary = otwarte.find(i => i.title === tytul);
+            if (!stary) { core.info('brak otwartego zgloszenia — stan normalny'); return; }
+            // Komentarz PRZED zamknieciem: zamkniecie bez powodu jest cichym znikanieniem.
+            await github.rest.issues.createComment({
+              owner: context.repo.owner, repo: context.repo.repo, issue_number: stary.number,
+              body: `Zamykam: material jest na najnowszych wydaniach wszystkich uzywanych akcji.\n\n` +
+                    `Przebieg: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}\n` +
+                    `Commit: ${context.sha}`,
+            });
+            await github.rest.issues.update({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: stary.number, state: 'closed', state_reason: 'completed',
+            });
+
+      - name: czerwien, gdy zalega albo nie rozstrzygnieto
+        if: steps.skan.outputs.kod != '0'
+        run: |
+          if [ "${{ steps.skan.outputs.kod }}" = "2" ]; then
+            echo "::error title=WERDYKT NIEROZSTRZYGNIETY::nie odczytano wydan upstreamu — to NIE znaczy, ze material jest aktualny"
+          else
+            echo "::error title=MATERIAL WYSYLANY ZALEGA::piny w szablonie sa za wydaniami upstreamu (tabela w podsumowaniu przebiegu)"
+          fi
+          exit 1
