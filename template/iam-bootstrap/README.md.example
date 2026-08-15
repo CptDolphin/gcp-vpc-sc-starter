@@ -63,7 +63,7 @@ gcloud access-context-manager perimeters list --policy=<POLICY> \
 
 # konto plan NIE może nic zmienić (ma się nie udać — to jest ten test, który potwierdza podział)
 gcloud access-context-manager perimeters update <PERIMETER> --policy=<POLICY> \
-  --add-resources=projects/<NUM> \
+  --add-resources=projects/<NUM_CZLONKA> \
   --impersonate-service-account=sa-vpcsc-plan@<PROJ>.iam.gserviceaccount.com
 
 # konto apply też nie skasuje perimetru

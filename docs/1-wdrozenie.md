@@ -97,7 +97,7 @@ Jeśli to nie działa, `plan` też nie zadziała — i lepiej dowiedzieć się o
 
 ```bash
 ./install.sh /sciezka --only plan.yml
-gh variable set WIF_PROVIDER --body "projects/<NUM>/locations/global/workloadIdentityPools/github-actions/providers/github"
+gh variable set WIF_PROVIDER --body "projects/<NUM_ADM>/locations/global/workloadIdentityPools/github-actions/providers/github"
 gh variable set PLAN_SERVICE_ACCOUNT --body "sa-vpcsc-plan@<proj>.iam.gserviceaccount.com"
 ```
 

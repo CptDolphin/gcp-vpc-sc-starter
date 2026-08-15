@@ -76,7 +76,9 @@ a nie HCL.
 | `<MONITORING_PROJECT>` | projekt, w którym powstają metryki i alerty perimetru |
 | `<SCANNER_SA>` / `<SCANNER_PROJECT>` | konto serwisowe skanera bezpieczeństwa dla reguły `baseline_ingress` |
 | `<ORG>` / `<REPO>` | organizacja i nazwa repozytorium na GitHubie (`attribute_condition` WIF pinuje je oba) |
-| `<PROJEKT>` / `<PROJ>` / `<NUM>` / `<ID>` | projekt i jego numer w przykładach komend |
+| `<PROJEKT>` / `<PROJ>` / `<ID>` | **project_id** projektu w przykładach komend |
+| `<NUM_ADM>` | **numer** projektu ADMINISTRACYJNEGO perimetru — tego, w którym stoi pula WIF, monitoring i bucket stanu. Jeden na wdrożenie, ten sam w `WIF_PROVIDER` i w `principalSet` |
+| `<NUM_CZLONKA>` | **numer** projektu CZŁONKOWSKIEGO (dywizji) dokładanego do perimetru — INNY dla każdego wniosku. Do #2057 oba numery miały wspólny token `<NUM>`: wklejenie numeru administracyjnego tam, gdzie ma iść członkowski, daje test negatywny, który „przechodzi" z niewłaściwym argumentem, a odwrotna pomyłka daje `WIF_PROVIDER` wskazujący nieistniejącą pulę i awarię dopiero przy pierwszym `plan` w CI, z komunikatem o tokenie, nie o numerze |
 | `<PERIMETER>` / `<NAZWA>` | nazwa techniczna perimetru (niezmienialna po utworzeniu) |
 | `<FOLDER_SANDBOX>` | folder pod wariant testowy ze scoped policy (`docs/2` §4a) |
 | `<SHA_WYDANIA>` | tag/SHA paczki bramek przypinanej przez repozytoria zespołów |
