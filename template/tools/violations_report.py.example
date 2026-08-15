@@ -125,7 +125,7 @@ przekierowanie do pliku zamienia „nie wolno mi było przeczytać" w „nie by�
   gcloud logging read \\
     'protoPayload.metadata."@type"="type.googleapis.com/google.cloud.audit.VpcServiceControlAuditMetadata"' \\
     --project=<PROJEKT_ADM> --bucket=<KUBELEK> --location=<LOKALIZACJA> --view=<WIDOK> \\
-    --freshness=14d --format=json > raw.json || exit 1
+    --freshness="${DAYS}d" --format=json > raw.json || exit 1   # DAYS = onboarding.clean_window_days
 
 I JESZCZE JEDNO, ZMIERZONE PRZY ZAKŁADANIU SINKA: sink, który nie dostarcza, wygląda identycznie jak czyste
 okno. Zanim grant `logging.bucketWriter` dla jego tożsamości się rozpropagował, 9 z 18 wpisów przepadło

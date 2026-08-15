@@ -43,13 +43,16 @@ variable "bucket_location" {
 }
 
 variable "retention_days" {
-  description = "Retencja kubełka. 30 dni = SUFIT DARMOWY Cloud Logging (ponad 30 dni kosztuje 0,01 USD/GiB/mies.) i z zapasem pokrywa okno bramki promocji (dry_run_min_days 14 + clean_window_days 7)."
+  description = "Retencja kubełka. 30 dni = SUFIT DARMOWY Cloud Logging (ponad 30 dni kosztuje 0,01 USD/GiB/mies.) i z zapasem pokrywa okno bramki promocji (dry_run_min_days + clean_window_days z policy.yaml)."
   type        = number
   default     = 30
 
   validation {
     # Poniżej okna bramki kubełek cicho urywa dowód: raport za 14 dni czytałby kubełek trzymający mniej.
-    # 21 = dry_run_min_days (14) + clean_window_days (7) z baseline'u; niżej nie ma sensu nawet w labie.
+    # 28 = dry_run_min_days (14) + clean_window_days (14) z baseline'u; niżej nie ma sensu nawet w labie.
+    # Te dwie liczby zyja w `perimeter/policy.yaml` i tu ich NIE POWTARZAMY jako literalow — powtorzona
+    # liczba rozjezdza sie z deklaracja w ciszy, i dokladnie tak powstal #2083. Prog nizej jest
+    # SUFITEM bezpieczenstwa, nie kopia deklaracji: ma byc z zapasem wiekszy, nie rowny.
     condition     = var.retention_days >= 21 && var.retention_days <= 3650
     error_message = "retention_days: 21-3650. Poniżej 21 kubełek nie pokrywa okna promocji, czyli dowód urywa się przed bramką."
   }

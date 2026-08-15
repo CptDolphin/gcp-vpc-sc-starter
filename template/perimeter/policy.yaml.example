@@ -135,7 +135,19 @@ services_without_method_selectors:
 # dla wszystkich dywizji, dlatego siedzą w baseline, a nie w pliku członka.
 onboarding:
   dry_run_min_days: 14 # minimum od dry_run_since do promocji
-  clean_window_days: 7 # ostatnie N dni muszą być bez naruszeń
+  # OKNO CZYSTOŚCI: ile ostatnich dni raport naruszeń ma obejmować i mieć czyste. Ta liczba jest
+  # ŹRÓDŁEM `--freshness` w `violations-report.yml` — do #2083 stało tam zaszyte `14`, a ten klucz
+  # sterował czym innym (patrz niżej), więc nazwa i komentarz opisywały mechanizm, którego nie było.
+  # Wartość 14 (nie 7) zachowuje zachowanie SPRZED poprawki: tyle realnie obejmował raport. Zmiana
+  # nazwy, która po cichu skróciłaby okno z 14 na 7 dni, ROZLUŹNIŁABY bramkę promocji — a poprawka
+  # nazewnictwa nie jest miejscem na zmianę reżimu.
+  clean_window_days: 14
+
+  # ŚWIEŻOŚĆ DOWODU — coś zupełnie innego niż okno wyżej i dlatego osobny klucz. Raport sprzed miesiąca
+  # opisuje okno, które dawno minęło, a wygląda dokładnie tak samo jak wczorajszy; artefakt starszy niż
+  # ta liczba jest traktowany jak jego BRAK. Do #2083 tę rolę pełnił `clean_window_days`, przez co
+  # podniesienie „okna czystości" ROZLUŹNIAŁO bramkę (dopuszczało starszy dowód), zamiast ją zaostrzyć.
+  violations_report_max_age_days: 7
 
 # ZGODY SECURITY NA PROFILE WYPUSZCZAJĄCE DANE POZA GOOGLE CLOUD (DEC-23).
 #
