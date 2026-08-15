@@ -18,7 +18,7 @@ terraform {
   # której logi ten sink zbiera, mogłaby przestawić jego cel. `vpc-sc/violations-sink` jest rozłączny
   # na pierwszym członie po `vpc-sc/`.
   backend "gcs" {
-    bucket = "bkt-tf-state-vpcsc"
+    bucket = "<STATE_BUCKET>"
     prefix = "vpc-sc/violations-sink"
   }
 }
