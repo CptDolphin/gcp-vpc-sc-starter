@@ -31,7 +31,15 @@
 #     o braku danych też potrzebuje żywego silnika ewaluacji. TĘ LUKĘ ZAMYKA PIĄTA WARSTWA, POZA TYM
 #     PLIKIEM I POZA TĄ ORGANIZACJĄ: `watch.yml` wysyła po udanej publikacji metryk heartbeat do
 #     dead-man's-switcha u zewnętrznego dostawcy, a ten alarmuje sam, gdy sygnał ustanie. Okno ciszy jest
-#     ZWIĄZANE z `watchdog_absent_seconds` (3 h = trzy przebiegi). Procedura, triage i test negatywny:
+#     ZWIĄZANE z `watchdog_absent_seconds` (3 h = trzy przebiegi). UWAGA NA OBIETNICĘ: to jest PRÓG,
+#     nie czas do alertu. Zmierzone na realnej, nieplanowanej ciszy trwającej dobę: od ostatniej udanej
+#     publikacji do pierwszego incydentu minęły CZTERY GODZINY I JEDNA MINUTA — do progu dochodzi kubełek
+#     `alignment_period` (1 h) i opóźnienie ewaluacji `condition_absent`. Powrót jest szybki: incydenty
+#     zamknęły się ~3,5 min po pierwszej udanej publikacji. Ustawiając check u dostawcy DMS licz więc
+#     4 h, a nie 3 — i nie skracaj tego przez podniesienie progu: zmierzony NATURALNY poślizg
+#     harmonogramu (cron godzinowy) sięga 2 h 24 min, czyli 80 % zapasu przed fałszywym alarmem już
+#     dziś jest zjedzone. Szybsza detekcja to decyzja o KADENCJI i torze pomiaru, nie o pokrętle progu.
+#     Procedura, triage i test negatywny:
 #     `docs/7-alerty.md#dms-zewnetrzny`. Warstwa jest OPCJONALNA z konstrukcji — bez sekretu
 #     `DMS_PING_URL` `watch` chodzi dalej, tylko głośno melduje, że jest nieuzbrojona.
 # WNIOSEK, KTÓRY TRZEBA ZAPISAĆ PRZED WŁĄCZENIEM GRANICY WOKÓŁ TEGO PROJEKTU: albo `monitoring.project_id`
