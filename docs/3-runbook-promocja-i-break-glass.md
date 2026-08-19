@@ -128,9 +128,34 @@ gh workflow run violations-report.yml -f days=14
    „czysto" NIC nie znaczy (DEC-27, sekcja „Przepływ, który ZASZEDŁ…" niżej). Zapytaj właściciela wprost,
    czy jego projekt rozmawia z którymkolwiek z nich — bo tego pytania raport nie zada za Ciebie.
 
-3. Otwórz PR promocyjny: w pliku członka zmień `stage: dry-run` → `stage: enforced` i dopisz
-   `unmeasured_peers_ack:` — **listę kluczy** tych członków z raportu, z którymi ten projekt wymienia ruch.
-   **Nic więcej** — dwa pola, oba wskazane przez raport. Wypełnij sekcję *Evidence* w szablonie PR-a.
+3. Otwórz PR promocyjny. W pliku członka zmieniają się **cztery pola** — i nie wpisuje ich ta sama ręka:
+
+   | pole | skąd wartość | co wpisać |
+   |---|---|---|
+   | `stage` | decyzja promującego | `dry-run` → `enforced` |
+   | `unmeasured_peers_ack` | raport z kroku 1 | **lista kluczy** tych członków zostających w dry-run, z którymi ten projekt wymienia ruch |
+   | `change_ref` | wniosek **promocyjny** | referencja wniosku, którym poproszono o promocję — NIE tego, którym projekt wszedł do dry-run |
+   | `approved_by` | wniosek **promocyjny** | kto zatwierdził **promocję** |
+
+   Pierwsze dwa pola to cała treść decyzji promującego i oba wskazuje raport. Drugie dwa odpowiadają na
+   pytanie „na jakiej podstawie ta konfiguracja istnieje **dziś** i kogo pytać, gdy dowód trzeba
+   odtworzyć" — a od tej chwili podstawą jest wniosek promocyjny, nie onboardingowy (DEC-58).
+   Zostawienie tam wartości z onboardingu zapisuje, że pod jedyną zmianą w tym repozytorium, której
+   skutkiem jest **odmowa ruchu**, podpisał się ktoś, kto podpisał wyłącznie wejście do obserwacji.
+   Referencja onboardingowa nie ginie: zostaje w historii pliku i w PR-ze, który ją wpisał.
+
+   **Nic więcej** — `dry_run_since`, `review_by`, `profiles` i `owner_group` zostają nietknięte.
+   Ręcznie robi się to jedną komendą, żeby nie trzeba było pamiętać, które pola to „cztery":
+
+```bash
+python3 tools/promote_member.py --member <dywizja>-<project_id> \
+  --change-ref snow:RITM0000456 --approved-by <ZATWIERDZAJACY_PROMOCJE> \
+  --peer <KLUCZ_ROWIESNIKA>          # albo --bez-rowiesnikow
+```
+
+   Narzędzie **odmawia** (i nie tyka pliku), gdy: wpisu o tym kluczu nie ma · wpis jest już `enforced` ·
+   plik zawierał duplikaty **przed** tym wnioskiem · potwierdzenie wskazuje kogoś spoza pliku albo samego
+   siebie · `--change-ref` jest przepisany z onboardingu. Wypełnij sekcję *Evidence* w szablonie PR-a.
 
    Pusta lista `[]` jest legalna i jest **oświadczeniem**, że ten projekt nie rozmawia z żadnym z nich —
    pisz ją dopiero po pytaniu z kroku 1, bo to jedyne zdanie w tym pliku, które ktoś podpisuje własnym
@@ -143,8 +168,8 @@ gh workflow run violations-report.yml -f days=14
    wskazywać kogokolwiek i wracasz do kroku 1.
 
    Po zastosowaniu promocji pole zostaje w pliku jako **zapis przyjętej decyzji** i nie jest już o nic
-   pytane. Nie usuwaj go rutynowo — to nie jest potwierdzenie, które gnije, tylko lista nazw z datą
-   promocji obok (`change_ref`, `approved_by`).
+   pytane. Nie usuwaj go rutynowo — to nie jest potwierdzenie, które gnije, tylko lista nazw stojąca obok
+   referencji i podpisu **tej samej** decyzji (`change_ref`, `approved_by` — po promocji promocyjne).
 
    `violations.json` **dołącza się sam**: `validate.yml` pobiera artefakt `violations` z ostatniego udanego
    przebiegu `violations-report.yml` na gałęzi domyślnej i podaje go regułom OPA. Dlatego krok 1 nie jest

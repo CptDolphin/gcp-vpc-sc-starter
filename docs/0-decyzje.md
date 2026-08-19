@@ -3803,3 +3803,56 @@ o przyczynie).
 | badać tylko `env` joba, bo krok już działa | zostawia poziom workflow, czyli najszerszą z trzech ekspozycji. Zamknięcie dwóch wejść z trzech to ta sama klasa defektu, tylko mniejsza |
 | wyprowadzić z drzewa także zbiór jobów uprzywilejowanych | nie da się: „ten job chodzi na koncie impersonowalnym z PR-a" nie jest zapisane w strukturze pliku. Wyprowadzenie na siłę dałoby regułę zgadującą po nazwie joba — czyli bramkę, która myli się cicho |
 | `yaml.safe_dump(cały job)` zamiast trzech poziomów | złapałoby też krok heartbeatu w `publish` i wymagało wyjątku na niego. Wyjątek w bramce bezpieczeństwa jest dokładnie tym miejscem, w którym następna regresja się schowa |
+
+---
+
+## DEC-58 — Promocja przepisuje `change_ref` i `approved_by`: podstawa i podpis opisują TĘ decyzję, nie onboarding
+
+**Decyzja.** Przejście członka `dry-run` → `enforced` zmienia w jego wpisie **cztery** pola, nie dwa:
+`stage`, `unmeasured_peers_ack` oraz — na wartości z wniosku **promocyjnego** — `change_ref` i `approved_by`.
+Jedynym narzędziem, które to zapisuje, jest `tools/promote_member.py` (lustro `render_member.py`: tamten
+DOPISUJE wpis i zawsze ustawia `dry-run`, ten EDYTUJE istniejący i jako jedyny pisze `enforced`). Oba pola
+są w nim argumentami **wymaganymi** — bez wartości domyślnej „zostaw, co było" — a wartość identyczna
+z onboardingową jest **odrzucana**. `dry_run_since`, `review_by`, `profiles` i `owner_group` zostają nietknięte.
+
+**Dlaczego.** Schemat mówi wprost, na co te pola odpowiadają: `change_ref` to „skąd przyszła ta zmiana",
+`approved_by` — „kto zatwierdził zmianę po stronie wnioskującej … to pole mówi, KOGO pytać, gdy dowód
+trzeba odtworzyć" (`schemas/member.schema.json`). Pytania są w czasie **teraźniejszym**: dotyczą
+konfiguracji, która stoi w pliku dziś. Po promocji konfiguracją jest egzekwowanie — a wniosek, którym
+projekt wszedł do obserwacji, o egzekwowanie nie prosił i nikt go pod tym kątem nie zatwierdzał.
+
+Stawka jest asymetryczna i to ona rozstrzyga. Promocja to jedyna zmiana w tym repozytorium, której
+skutkiem jest **odmowa ruchu** (DEC-17) — i jedyna, w której cofnięcie konfiguracji nie równa się
+cofnięciu skutku. Zostawienie pól onboardingowych zapisuje więc, że pod tą właśnie zmianą podpisał się
+ktoś, kto podpisał wyłącznie wejście do dry-run. Przy audycie to nie jest literówka, tylko **decyzja bez
+autora**: wpis wygląda na kompletny, oba pola są wypełnione, format zgadza się ze schematem.
+
+To samo dotyczy `unmeasured_peers_ack`. Runbook nazywa je „jedynym zdaniem w tym pliku, które ktoś
+podpisuje własnym `approved_by`" (§A krok 3) — a jest to oświadczenie składane **przy promocji**, o ruchu
+z członkami zostającymi w dry-run (DEC-55). Podpis pod nim nie może pochodzić sprzed tego oświadczenia.
+
+**Dlaczego to nie mogło wyjść bez tej decyzji.** Żadna bramka tego nie widzi i widzieć nie może: obie
+wartości — onboardingowa i promocyjna — są poprawnymi referencjami, przechodzą `pattern` schematu i reguły
+OPA. Zmierzone na komplecie testów narzędzia: wariant „zostaw wartości onboardingowe" czerwieni **4 z 40**
+asercji, a wszystkie cztery zostały dopisane razem z tą decyzją. Bez nich mutant przechodzi cały zestaw na
+zielono — łącznie z asercją o kształcie diffa, bo diff bez tych dwóch linii nadal mieści się w jednym hunku.
+Odmowa na referencji przepisanej z onboardingu należy do tego samego zbioru co pozostałe odmowy tego
+narzędzia: są to wyłącznie te błędy, **których po zapisie nie widać już jako błędu**.
+
+**Konsekwencje.** Diff promocji rośnie z trzech linii do siedmiu i nadal jest **jednym hunkiem** —
+`change_ref` i `approved_by` stoją we wpisie tuż przed `stage`, więc recenzent ogląda całość w jednym
+miejscu (zmierzone: `usunięte 3 / dodane 5 / hunków 1`). Kanał ticketowy musi podać referencję i
+zatwierdzającego z wniosku promocyjnego — co jest naturalne, bo to osobna pozycja katalogu. Ponowna
+promocja po break-glassie ma z definicji świeży wniosek („Po incydencie": świeże okno, świeży raport),
+więc odmowa „referencja przepisana" nie ma jak zapalić się na treści poprawnej. Historia autoryzacji
+onboardingowej nie ginie — zostaje w historii pliku i w pull requeście, który ją wpisał.
+
+**Alternatywy odrzucone.**
+
+| wariant | dlaczego nie |
+|---|---|
+| zostawić `change_ref`/`approved_by` z onboardingu, a promocję czytać z historii gita | to jest wariant, który tu stał do dziś, i jest **niesprawdzalny w miejscu, w którym się o niego pyta**: audyt ogląda plik i widzi kompletny wpis z podpisem, a żeby dowiedzieć się, że podpis dotyczy czego innego, musiałby wiedzieć, że ma szukać. Pole, którego trzeba nie wierzyć, jest gorsze niż jego brak |
+| dołożyć osobne pola `promotion_ref` / `promoted_by` obok istniejących | dwie pary pól odpowiadające na to samo pytanie w różnym czasie. Czytający musi wiedzieć, która para obowiązuje — a wpis w dry-run miałby drugą parę pustą, więc `additionalProperties: false` i `required` przestają cokolwiek gwarantować dla połowy stanów. Rozrost schematu bez ani jednego nowego faktu |
+| ustawiać oba pola, ale bez odmowy na wartość identyczną z onboardingową | narzędzie zapisywałoby wtedy poprawnie **to, co dostanie**, a dostać może wartość przepisaną z pliku (kopiuj-wklej jest tu najkrótszą drogą). Po zapisie ta pomyłka jest nieodróżnialna od poprawnego wyniku — czyli spełnia kryterium odmowy, którym to narzędzie się kieruje |
+| wymuszać nowe wartości dopiero regułą OPA na pull requeście | reguła porównałaby wpis z… czym? Poprzednia wartość jest w bazie PR-a, a bramki tego repozytorium jadą też na ścieżce apply (DEC-16), gdzie diffu nie ma w ogóle (`workflow_dispatch`, ponowienie przebiegu). Bramka istniejąca tylko na jednym z dwóch torów jest nieobecna dokładnie tam, gdzie człowiek patrzy najmniej |
+| zostawić decyzję człowiekowi, bo runbook już o tym mówi | runbook mówił o tym **dwa razy i przeciwnie**: „nic więcej — dwa pola" w kroku 3 i „lista nazw z datą promocji obok (`change_ref`, `approved_by`)" trzy akapity niżej. Dwa zdania sprzeczne to nie jest procedura, tylko losowanie — a przy kilkuset projektach i ~50 wnioskach miesięcznie promocję i tak wypełnia kanał, nie ręka |
