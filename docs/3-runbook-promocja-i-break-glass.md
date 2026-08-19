@@ -381,7 +381,7 @@ przed sobą dwa tygodnie okna obserwacji. Jedno wywołanie promuje więc trzydzi
 których przepływów nikt nie zdążył zmierzyć. Skutek: masowe odcięcie ruchu bez ani jednego PR-a, którego
 dałoby się zrewertować, bo w gicie nic się nie zmieniło.
 
-Nasza promocja jest **per członek** i wygląda inaczej: jedno pole `stage` w jednym pliku, PR, bramki, apply.
+Nasza promocja jest **per członek** i wygląda inaczej: cztery pola w jednym pliku (`stage`, `unmeasured_peers_ack` oraz `change_ref`/`approved_by` wniosku promocyjnego — DEC-58), PR, bramki, apply.
 Terraform dokłada wtedy pojedynczy zasób do konfiguracji egzekwowanej i nie rusza pozostałych.
 
 Guard `no-dry-run-commit` w `validate.yml` pilnuje, żeby ta komenda nie trafiła do żadnego workflow ani
