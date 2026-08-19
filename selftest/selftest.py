@@ -228,6 +228,10 @@ def bootstrap() -> None:
         "violations-sink/outputs.tf",
         "tools/attribute_budget.py", "tools/collect_declarations.py", "tools/preflight_check.sh",
         "tools/render_member.py", "tools/projects_file.py", "tools/snow_verify.py",
+        # Lustro renderera: jedyne narzedzie piszace `enforced`, i jedyne podmieniajace podstawe
+        # oraz podpis wpisu na wniosek PROMOCYJNY (DEC-58). Renderer i ono nie sa zamienne — tamten
+        # DOPISUJE wpis, to EDYTUJE istniejacy, a oba tryby awarii sa inne.
+        "tools/promote_member.py",
         # Symulator Table API + harness dowodowy (DEC-46). Jada RAZEM z fixture'ami: symulator
         # bez harnessu jest kolejnym plikiem, ktory sie z nami zgadza — dopiero harness pokazuje,
         # ze stare, niesprawne zapytanie przez niego NIE przechodzi.
@@ -815,6 +819,277 @@ def test_jeden_plik_projektow() -> None:
         plik.write_text(kopia)
         for tymczasowy in ("duplikat.json",):
             (ROOT / tymczasowy).unlink(missing_ok=True)
+
+
+# ------------------------------------------------ promocja: jedyny kanal piszacy `enforced` (DEC-58)
+def _czlonek_testowy(dywizja: str, projekt: str, numer: str, stage: str = "dry-run", **nadpisz) -> dict:
+    """Wpis w tej samej kolejnosci pol, w ktorej sklada go `render_member.py`.
+
+    Kolejnosc nie jest kosmetyka: to ona decyduje, gdzie w diffie wyladuje dopisane
+    `unmeasured_peers_ack` — a wlasnie o to pyta test pozytywny.
+    """
+    return {
+        "schema_version": 1,
+        "division": dywizja,
+        "project_id": projekt,
+        "project_number": numer,
+        "owner_group": "lab@example.com",
+        "change_ref": "snow:RITM0000123",
+        "approved_by": "net-onboarding@example.com",
+        "stage": stage,
+        "dry_run_since": "2026-08-01",
+        "review_by": "2027-01-28",
+        "profiles": [{"name": "vertex-online-serving", "params": {"access_levels": ["corp_network"]}}],
+        **nadpisz,
+    }
+
+
+def test_promote_member() -> None:
+    """`promote_member.py` — piec odmow i dwie promocje, kazda na wlasnej kopii pliku czlonkow.
+
+    ODMOWY SA TU SEDNEM, NIE DODATKIEM. Kanal, ktory nigdy nie odrzuca, przechodzi kazdy test pozytywny
+    i nie chroni niczego — to samo zdanie stoi nad fixture'ami `snow-*` w `tests/README.md` (osiem
+    z dziewieciu opisuje przypadek negatywny).
+
+    KAZDA ODMOWA MA DWIE ASERCJE, I TA DRUGA JEST WAZNIEJSZA: kod wyjscia ORAZ **plik bajt w bajt taki
+    sam**. Odmowa, ktora zdazyla juz zapisac, nie jest odmowa, tylko zapisem z komunikatem — a promocja
+    jest jedyna zmiana w tym repozytorium, ktorej skutkiem jest odmowa ruchu, wiec „prawie nie zapisalo"
+    nie istnieje.
+
+    DLACZEGO PODPROCES, A NIE IMPORT FUNKCJI. Testowany jest ten sam wiersz, ktory uruchamia czlowiek
+    z runbooka i workflow z `.github/` — razem z `argparse` (grupa wykluczajaca wymuszajaca WYPOWIEDZENIE
+    pustej listy, oraz `required=True` na polach decyzji) i z `SystemExit`. Import obszedlby oba, a to
+    wlasnie one sa kontraktem narzedzia.
+
+    DLACZEGO FIXTURE Z `projects_file.zapisz`, A NIE YAML WKLEJONY DO TESTU. Plik czlonkow jest pisany
+    WYLACZNIE ta funkcja i bramka w CI pilnuje, ze w repo jest dokladnie jej wynik. Fixture napisany
+    recznie bylby wiec plikiem, ktorego w repo nie ma — a asercja o ksztalcie diffa mierzylaby moje
+    wciecia, nie zachowanie narzedzia.
+    """
+    print("\n== promocja czlonka: promote_member.py (DEC-58) ==")
+
+    sys.path.insert(0, str(ROOT / "tools"))
+    sys.modules.pop("projects_file", None)
+    import projects_file  # noqa: E402 — modul zyje w rozpakowanym repo, nie w starterze
+
+    import contextlib
+    import difflib
+
+    @contextlib.contextmanager
+    def srodowisko(*wpisy: dict):
+        """Katalog z wlasnym `perimeter/projects.yaml` w postaci KANONICZNEJ; oddaje (katalog, tresc).
+
+        Wlasny katalog na przypadek, a nie jeden wspoldzielony: kazdy konczy sie asercja o TRESCI pliku,
+        wiec przypadek, ktory zostawia po sobie zapis, falszowalby nastepny.
+        """
+        with tempfile.TemporaryDirectory(prefix="vpcsc-promocja-") as kat:
+            kat = pathlib.Path(kat)
+            (kat / "perimeter").mkdir()
+            projects_file.zapisz(kat, {"schema_version": 1, "members": list(wpisy)})
+            yield kat, (kat / projects_file.SCIEZKA).read_text()
+
+    def tresc(kat: pathlib.Path) -> str:
+        return (kat / projects_file.SCIEZKA).read_text()
+
+    def uruchom(kat: pathlib.Path, *argv: str):
+        """(kod wyjscia, stdout+stderr) — narzedzie z ROZPAKOWANEGO drzewa, na wskazanym korzeniu."""
+        p = sh([sys.executable, "tools/promote_member.py", "--root", str(kat), *argv], cwd=ROOT)
+        return p.returncode, p.stdout + p.stderr
+
+    def zmiany(przed: str, po: str):
+        """(usuniete, dodane, liczba hunkow) — trzeci element jest tu z POMIARU, nie z ostroznosci.
+
+        Asercja liczaca same linie NIE WIDZI POLOZENIA. Zmierzone na mutancie narzedzia, ktory dopisywal
+        `unmeasured_peers_ack` na koncu slownika (czyli za blokiem `profiles`, kilkanascie linii od
+        zmienionego `stage`): zbior dodanych linii jest wtedy IDENTYCZNY i komplet asercji przechodzil
+        na zielono. „Jeden hunk" znaczy jedna zmiana w JEDNYM miejscu — bez tego licznika test opisywalby
+        tylko tresc zmiany, a obietnica dotyczy tego, co widzi recenzent.
+
+        LINIE LICZYMY PRZY KONTEKSCIE 0, HUNKI PRZY 3, i to nie jest niekonsekwencja. Przy n=0 nawet wynik
+        POPRAWNY ma dwa hunki, bo zmieniony `stage` i dopisane potwierdzenie dzieli jedna niezmieniona
+        linia (`dry_run_since`). Recenzent oglada diff z kontekstem 3 (`git diff`, GitHub) i tam obie
+        zmiany sa jednym blokiem; pytamy wiec o to, co on widzi, a nie o wewnetrzna reprezentacje.
+        """
+        linie = list(difflib.unified_diff(przed.splitlines(), po.splitlines(), n=0, lineterm=""))
+        kontekst = list(difflib.unified_diff(przed.splitlines(), po.splitlines(), lineterm=""))
+        return ([w[1:] for w in linie if w.startswith("-") and not w.startswith("---")],
+                [w[1:] for w in linie if w.startswith("+") and not w.startswith("+++")],
+                sum(w.startswith("@@") for w in kontekst))
+
+    # Kolejnosc pol promowanego wpisu — `unmeasured_peers_ack` miedzy `dry_run_since` a `review_by`,
+    # dokladnie tak, jak deklaruje `schemas/member.schema.json`.
+    kolejnosc_po = ["schema_version", "division", "project_id", "project_number", "owner_group",
+                    "change_ref", "approved_by", "stage", "dry_run_since", "unmeasured_peers_ack",
+                    "review_by", "profiles"]
+
+    # Wniosek PROMOCYJNY — inny niz `change_ref`/`approved_by` w `_czlonek_testowy`, bo o te dwie roznice
+    # pyta polowa asercji nizej (DEC-58).
+    PROMO_REF, PROMO_BY = "snow:RITM0000456", "sec-promocja@example.com"
+
+    # --- ODMOWA 1: wpisu o tym kluczu nie ma ---------------------------------------------------------
+    with srodowisko(_czlonek_testowy("lab", "prj-alpha", "111111111111")) as (kat, przed):
+        rc, out = uruchom(kat, "--member", "lab-nie-ma-takiego", "--change-ref", PROMO_REF,
+                          "--approved-by", PROMO_BY, "--bez-rowiesnikow")
+        check("promocja: nieistniejacy czlonek — ODMOWA", rc != 0, out[-400:])
+        check("promocja: kieruje do kanalu wejscia (ONBOARDING), nie kaze poprawiac wpisu",
+              "ONBOARDING" in out, out[-400:])
+        check("promocja: odmowa NIE TKNELA pliku", tresc(kat) == przed)
+
+        # Literowka w DYWIZJI daje inny klucz przy tym samym projekcie — renderer pyta o oba pola osobno
+        # wlasnie z tego powodu. Tutaj ten sam blad musi skonczyc sie odmowa.
+        rc, _ = uruchom(kat, "--member", "labb-prj-alpha", "--change-ref", PROMO_REF,
+                        "--approved-by", PROMO_BY, "--bez-rowiesnikow")
+        check("promocja: literowka w dywizji tez odmawia i nie tyka pliku",
+              rc != 0 and tresc(kat) == przed)
+
+    # --- ODMOWA 2: wpis jest JUZ enforced (cichy no-op ukrylby pomylke klucza) ------------------------
+    with srodowisko(_czlonek_testowy("lab", "prj-alpha", "111111111111", stage="enforced"),
+                    _czlonek_testowy("lab", "prj-beta", "222222222222")) as (kat, przed):
+        rc, out = uruchom(kat, "--member", "lab-prj-alpha", "--change-ref", PROMO_REF,
+                          "--approved-by", PROMO_BY, "--bez-rowiesnikow")
+        check("promocja: czlonek juz `enforced` — ODMOWA zamiast no-opa", rc != 0, out[-400:])
+        check("promocja: wskazuje apply jako droge, gdy zywa granica nie egzekwuje",
+              "apply.yml" in out, out[-400:])
+        check("promocja: `enforced` — plik nietkniety", tresc(kat) == przed)
+
+    with srodowisko(_czlonek_testowy("lab", "prj-alpha", "111111111111", stage="dryrun")) as (kat, przed):
+        rc, _ = uruchom(kat, "--member", "lab-prj-alpha", "--change-ref", PROMO_REF,
+                        "--approved-by", PROMO_BY, "--bez-rowiesnikow")
+        check("promocja: etap spoza schematu odmawia i nie tyka pliku", rc != 0 and tresc(kat) == przed)
+
+    # --- ODMOWA 3: plik zawieral duplikaty PRZED tym wnioskiem ---------------------------------------
+    # DUPLIKAT NA KLUCZU PROMOWANEGO CZLONKA to przypadek, dla ktorego kolejnosc kontroli w tym narzedziu
+    # jest INNA niz w rendererze: `projects_file.mapa` zwija oba blizniaki do jednego wpisu, wiec pytanie
+    # o etap zadane wczesniej dostaloby odpowiedz o losowym blizniaku.
+    with srodowisko(_czlonek_testowy("lab", "prj-alpha", "111111111111"),
+                    _czlonek_testowy("lab", "prj-alpha", "111111111111", stage="enforced")) as (kat, przed):
+        rc, out = uruchom(kat, "--member", "lab-prj-alpha", "--change-ref", PROMO_REF,
+                          "--approved-by", PROMO_BY, "--bez-rowiesnikow")
+        check("promocja: duplikat sprzed wniosku — ODMOWA", rc != 0, out[-400:])
+        check("promocja: mowi o duplikacie, a NIE o etapie (mapa gubi blizniaka)",
+              "duplikaty JESZCZE PRZED" in out and "nie ma czego" not in out, out[-400:])
+        check("promocja: duplikat — plik nietkniety", tresc(kat) == przed)
+
+    # --- ODMOWA 4: potwierdzenie wskazuje kogos, kogo nie ma ------------------------------------------
+    with srodowisko(_czlonek_testowy("lab", "prj-alpha", "111111111111"),
+                    _czlonek_testowy("lab", "prj-beta", "222222222222")) as (kat, przed):
+        rc, out = uruchom(kat, "--member", "lab-prj-alpha", "--change-ref", PROMO_REF,
+                          "--approved-by", PROMO_BY, "--peer", "lab-widmo")
+        check("promocja: rowiesnik spoza pliku — ODMOWA nazywajaca klucz wprost",
+              rc != 0 and "lab-widmo" in out, out[-400:])
+        check("promocja: rowiesnik spoza pliku — plik nietkniety", tresc(kat) == przed)
+
+        # Wskazanie SAMEGO SIEBIE to w regule OPA ten sam blad: para „czlonek z samym soba" nie istnieje.
+        rc, _ = uruchom(kat, "--member", "lab-prj-alpha", "--change-ref", PROMO_REF,
+                        "--approved-by", PROMO_BY, "--peer", "lab-prj-alpha")
+        check("promocja: wlasny klucz w potwierdzeniu odmawia", rc != 0 and tresc(kat) == przed)
+
+        # Poprawny klucz obok blednego nie ratuje wniosku — odmowa dotyczy calej listy.
+        rc, _ = uruchom(kat, "--member", "lab-prj-alpha", "--change-ref", PROMO_REF,
+                        "--approved-by", PROMO_BY, "--peer", "lab-prj-beta", "--peer", "lab-widmo")
+        check("promocja: jeden zly klucz w liscie poprawnych tez odmawia", rc != 0 and tresc(kat) == przed)
+
+        # BRAK DEKLARACJI to nie jest pusta deklaracja — milczenie nie moze produkowac oswiadczenia.
+        rc, _ = uruchom(kat, "--member", "lab-prj-alpha", "--change-ref", PROMO_REF, "--approved-by", PROMO_BY)
+        check("promocja: brak deklaracji rowiesnikow odmawia (argparse, grupa wykluczajaca)",
+              rc != 0 and tresc(kat) == przed)
+
+    # --- ODMOWA 5: podstawa i podpis MUSZA byc wypowiedziane, i to promocyjne (DEC-58) ----------------
+    #
+    # Ta grupa jest cala trescia DEC-58. Bez niej narzedzie moze zostawic we wpisie referencje i podpis
+    # z onboardingu, a wynik BEDZIE zgodny ze schematem, przejdzie kazda bramke i nie da sie go odroznic
+    # od poprawnego — bo obie wartosci sa poprawnymi referencjami.
+    with srodowisko(_czlonek_testowy("lab", "prj-alpha", "111111111111")) as (kat, przed):
+        for brakujace, argv in (("--change-ref", ("--approved-by", PROMO_BY)),
+                                ("--approved-by", ("--change-ref", PROMO_REF))):
+            rc, out = uruchom(kat, "--member", "lab-prj-alpha", *argv, "--bez-rowiesnikow")
+            check(f"promocja: brak `{brakujace}` — ODMOWA (pole nie ma domyslnej „zostaw stare”)",
+                  rc != 0 and brakujace in out, out[-300:])
+            check(f"promocja: brak `{brakujace}` — plik nietkniety", tresc(kat) == przed)
+
+        # Referencja PRZEPISANA Z ONBOARDINGU: format poprawny, wartosc klamie o podstawie decyzji.
+        rc, out = uruchom(kat, "--member", "lab-prj-alpha", "--change-ref", "snow:RITM0000123",
+                          "--approved-by", PROMO_BY, "--bez-rowiesnikow")
+        check("promocja: `--change-ref` przepisany z onboardingu — ODMOWA", rc != 0, out[-400:])
+        check("promocja: odmowa nazywa POWOD (podstawa egzekwowania, nie format)",
+              "DEC-58" in out and "PROMOCYJNEGO" in out, out[-400:])
+        check("promocja: przepisana referencja — plik nietkniety", tresc(kat) == przed)
+
+    # --- POZYTYW 1: promocja z rowiesnikami ----------------------------------------------------------
+    with srodowisko(_czlonek_testowy("lab", "prj-alpha", "111111111111"),
+                    _czlonek_testowy("lab", "prj-beta", "222222222222"),
+                    _czlonek_testowy("div", "prj-gamma", "333333333333", stage="enforced")) as (kat, przed):
+        rc, out = uruchom(kat, "--member", "lab-prj-alpha", "--change-ref", PROMO_REF,
+                          "--approved-by", PROMO_BY, "--peer", "lab-prj-beta")
+        check("promocja: poprawny wniosek konczy sie zerem", rc == 0, out[-400:])
+
+        po = tresc(kat)
+        usuniete, dodane, hunki = zmiany(przed, po)
+        # Literaly, a nie wynik tej samej funkcji, ktorej uzywa narzedzie — inaczej test potwierdzalby
+        # sam siebie. To jest zdanie o tym, co zobaczy recenzent pull requesta.
+        check("promocja: diff usuwa DOKLADNIE stara podstawe, stary podpis i `stage: dry-run`",
+              usuniete == ["  change_ref: snow:RITM0000123",
+                           "  approved_by: net-onboarding@example.com",
+                           "  stage: dry-run"], repr(usuniete))
+        check("promocja: diff dodaje podstawe promocyjna, podpis promocyjny, `enforced` i potwierdzenie",
+              dodane == [f"  change_ref: {PROMO_REF}",
+                         f"  approved_by: {PROMO_BY}",
+                         "  stage: enforced",
+                         "  unmeasured_peers_ack:",
+                         "  - lab-prj-beta"], repr(dodane))
+        check("promocja: cala zmiana miesci sie w JEDNYM hunku (recenzent widzi jedno miejsce)",
+              hunki == 1, f"hunkow: {hunki}")
+
+        doc = projects_file.dokument(po)
+        mapa = projects_file.mapa(doc["members"])
+        wpis = mapa["lab-prj-alpha"]
+        check("promocja: promowany wpis ma `stage: enforced`", wpis["stage"] == "enforced")
+        # DEC-58 — dwie asercje, ktorych brak przepuszczal wariant „zostaw wartosci onboardingowe".
+        check("promocja: `change_ref` opisuje PROMOCJE, nie onboarding (DEC-58)",
+              wpis["change_ref"] == PROMO_REF, repr(wpis.get("change_ref")))
+        check("promocja: `approved_by` wskazuje zatwierdzajacego PROMOCJE (DEC-58)",
+              wpis["approved_by"] == PROMO_BY, repr(wpis.get("approved_by")))
+        check("promocja: potwierdzenie stoi miedzy `dry_run_since` a `review_by` (kolejnosc ze schematu)",
+              list(wpis) == kolejnosc_po, repr(list(wpis)))
+        check("promocja: potwierdzenie zapisane jako LISTA kluczy (nie liczba)",
+              wpis["unmeasured_peers_ack"] == ["lab-prj-beta"])
+        check("promocja: `dry_run_since` NIETKNIETE — bramka okna liczy dni wlasnie od niego",
+              wpis["dry_run_since"] == "2026-08-01")
+        check("promocja: `review_by` NIETKNIETE — promocja nie jest przegladem czlonkostwa",
+              wpis["review_by"] == "2027-01-28")
+        check("promocja: pozostali czlonkowie bez zmian",
+              [w for w in doc["members"] if projects_file.klucz(w) != "lab-prj-alpha"]
+              == [w for w in projects_file.dokument(przed)["members"]
+                  if projects_file.klucz(w) != "lab-prj-alpha"])
+        check("promocja: plik nadal w postaci kanonicznej", projects_file.zrzut(doc) == po)
+        check("promocja: wyjscie wypisuje, kto zostaje w dry-run (zakres oswiadczenia)",
+              "lab-prj-beta" in out, out[-400:])
+
+    # --- POZYTYW 2: pusta lista jest legalna i jest OSWIADCZENIEM -------------------------------------
+    with srodowisko(_czlonek_testowy("lab", "prj-alpha", "111111111111"),
+                    _czlonek_testowy("lab", "prj-beta", "222222222222")) as (kat, przed):
+        rc, out = uruchom(kat, "--member", "lab-prj-alpha", "--change-ref", PROMO_REF,
+                          "--approved-by", PROMO_BY, "--bez-rowiesnikow")
+        usuniete, dodane, hunki = zmiany(przed, tresc(kat))
+        check("promocja bez rowiesnikow: `unmeasured_peers_ack: []` zapisane, nie pominiete",
+              rc == 0 and dodane[-1] == "  unmeasured_peers_ack: []" and hunki == 1,
+              f"rc={rc} {dodane!r} hunkow={hunki}")
+        check("promocja bez rowiesnikow: wyjscie nazywa to OSWIADCZENIEM", "OSWIADCZENIE" in out,
+              out[-300:])
+
+    # WPIS BEZ `dry_run_since` — jedyna sciezka, na ktorej narzedzie nie ma gdzie wstawic potwierdzenia
+    # „przy dacie". Schemat takiego wpisu nie dopuszcza (`required`) i w pliku po bramkach go nie ma, ale
+    # gdyby sie zdarzyl, potwierdzenie ma zostac ZAPISANE (na koncu wpisu), a nie zgubione razem z pozycja:
+    # cicho pominiete pole daje `stage: enforced` bez ani jednego sladu po oswiadczeniu. Bez tej asercji
+    # mutacja usuwajaca fallback przechodzi caly zestaw na zielono (zmierzone na szkicu narzedzia).
+    wpis_bez_daty = _czlonek_testowy("lab", "prj-alpha", "111111111111")
+    del wpis_bez_daty["dry_run_since"]
+    with srodowisko(wpis_bez_daty) as (kat, _):
+        rc, out = uruchom(kat, "--member", "lab-prj-alpha", "--change-ref", PROMO_REF,
+                          "--approved-by", PROMO_BY, "--bez-rowiesnikow")
+        zapisany = projects_file.mapa(projects_file.dokument(tresc(kat))["members"]).get("lab-prj-alpha", {})
+        check("promocja: wpis bez `dry_run_since` — potwierdzenie mimo to ZAPISANE",
+              rc == 0 and zapisany.get("unmeasured_peers_ack") == [], f"rc={rc} {out[-300:]}")
 
 
 def test_kazdy_stack_sie_parsuje() -> None:
@@ -8833,6 +9108,7 @@ def main() -> int:
     test_samodzielnosc()
     test_terraform()
     test_jeden_plik_projektow()
+    test_promote_member()
     test_kazdy_stack_sie_parsuje()
     test_iam_bootstrap()
     test_deny_check()
