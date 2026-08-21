@@ -1605,6 +1605,11 @@ def test_deny_check() -> None:
     sciezke `200`, przeszedlby takze na implementacji raportujacej odmowe odczytu jako „nie ma" — czyli
     na dokladnie tym bledzie, dla ktorego to narzedzie powstalo. Dlatego mierzymy WSZYSTKIE trzy kody.
 
+    DRUGA POLOWA tego testu pyta o NAZWY, ktorymi skrypt operuje w komunikatach. Rola odczytu i polityka
+    deny sa obiektami ORG-LEVEL, wiec druga instancja toru w tej samej organizacji rozni je
+    `org_resource_suffix` — nazwa wpisana na sztywno przestaje wtedy opisywac cokolwiek istniejacego,
+    a robi to w komunikacie czytanym przez kogos, kto wlasnie ustalil, ze o guardrailu nie wie nic.
+
     `curl` i `gcloud` sa tu podmienione na zaslepki: sprawdzamy LOGIKE werdyktu, a nie API Google.
     """
     print("\n== deny_check ==")
@@ -1628,10 +1633,11 @@ def test_deny_check() -> None:
         (stub / f).chmod(0o755)
 
     srodowisko = dict(os.environ, PATH=f"{stub}:{os.environ['PATH']}")
-    kody = {}
+    kody, wyjscia = {}, {}
     for http, oczekiwany, opis in (("200", 0, "ISTNIEJE"), ("404", 1, "NIE MA"), ("403", 2, "NIE WIADOMO")):
         p = sh([str(skrypt), "--org", "123456789012"], env=dict(srodowisko, STUB_HTTP=http))
         kody[http] = p.returncode
+        wyjscia[http] = p.stdout + p.stderr
         check(f"deny_check: HTTP {http} -> {opis} (kod {oczekiwany})", p.returncode == oczekiwany,
               f"rc={p.returncode}, out={p.stdout[-200:]}{p.stderr[-200:]}")
 
@@ -1639,6 +1645,41 @@ def test_deny_check() -> None:
     # moglyby zostac przepisane pod nowe kody, a ten warunek nadal odrzuci sklejenie odmowy z brakiem.
     check("deny_check: 403 i 404 daja ROZNE kody wyjscia (odmowa to nie „nie ma”)",
           kody.get("403") != kody.get("404"), f"kody={kody}")
+    # --- NAZWY OBIEKTOW ORG-LEVEL W KOMUNIKATACH ----------------------------------------------------
+    # DLACZEGO TO JEST ASERCJA, A NIE AKAPIT. Rola odczytu i polityka deny sa obiektami ORG-LEVEL, wiec
+    # druga instancja toru w tej samej organizacji rozni je `org_resource_suffix` — i wtedy nazwa wpisana
+    # w skrypcie na sztywno przestaje opisywac cokolwiek istniejacego. Cena jest asymetryczna wlasnie tu:
+    # podpowiedz przy `403` czyta ktos, kto WLASNIE ustalil, ze nie wie nic o guardrailu, wiec nie ma czym
+    # jej zweryfikowac; nadanie nieistniejacej roli konczy sie `INVALID_ARGUMENT`, a pierwsza hipoteza
+    # brzmi „mam za malo uprawnien", nie „skrypt podal zla nazwe".
+    p = sh([str(skrypt), "--org", "123456789012", "--reader-role", "vpcScDenyReaderdr",
+            "--name", "vpcsc-ci-no-destroy-dr"], env=dict(srodowisko, STUB_HTTP="403"))
+    z_sufiksem = p.stdout + p.stderr
+    # TA asercja jest czerwona na wersji sprzed poprawki (nazwa byla literalem, a `--reader-role`
+    # nieznanym argumentem konczacym sie kodem 3).
+    check("deny_check: 403 przy sufiksie -> podpowiedz niesie PELNA nazwe roli tego wdrozenia",
+          "organizations/123456789012/roles/vpcScDenyReaderdr'" in z_sufiksem, z_sufiksem[-400:])
+    check("deny_check: 403 przy sufiksie -> werdykt nadal „nie wiadomo” (kod 2)",
+          p.returncode == 2, f"rc={p.returncode}, out={z_sufiksem[-300:]}")
+    # Domkniecie od drugiej strony: „wypiszmy obie nazwy, ktoras bedzie dobra" daje komende, ktora w tej
+    # organizacji nie zadziala, obok tej, ktora zadziala — czyli z powrotem zgadywanie. Sama ta asercja
+    # NIE jest negatywem starej wersji (tam podpowiedz nie pada w ogole); jest guardem przyszlego skrotu.
+    check("deny_check: 403 przy sufiksie -> NIE zostaje komenda z nazwa kanoniczna",
+          "roles/vpcScDenyReader'" not in z_sufiksem, z_sufiksem[-400:])
+
+    # DRUGA POLOWA, bez ktorej powyzsze mierzy wylacznie hydraulike flagi: gdy nikt nazwy nie podal,
+    # skrypt nie ma jak jej poznac — w drzewie nie stoi ona doslownie ani razu (`main.tf` interpoluje,
+    # `outputs.tf` wylicza), a state i API wymagaja dostepu, ktorego przy `403` z definicji brakuje.
+    # Wolno mu wiec wypisac nazwe kanoniczna, ale NIE wolno milczec, ze tylko ja zalozyl.
+    check("deny_check: 403 bez --reader-role -> komunikat zastrzega, ze nazwa jest tylko KANONICZNA",
+          "org_resource_suffix" in wyjscia["403"] and "deny_reader_role_id" in wyjscia["403"],
+          wyjscia["403"][-400:])
+    # Ten sam defekt na drugim wejsciu ma skutek grozniejszy niz zla podpowiedz: `--name` steruje
+    # WERDYKTEM, wiec kanoniczna domyslna nazwa daje stabilne „NIE MA" (kod 1) na dzialajacym guardrailu.
+    # Zdanie „guardrail nie chroni dzis niczego" musi wiec niesc warunek, pod ktorym jest prawdziwe.
+    check("deny_check: werdykt 404 niesie WARUNEK (nazwa polityki z TEGO wdrozenia)",
+          "org_resource_suffix" in wyjscia["404"], wyjscia["404"][-400:])
+
     shutil.rmtree(stub, ignore_errors=True)
 
     # --- procedura testu warstwy Deny: MUSI niesc kontrole pozytywna ---------------------------------
