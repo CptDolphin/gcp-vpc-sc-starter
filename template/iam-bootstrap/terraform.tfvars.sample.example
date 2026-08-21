@@ -12,10 +12,20 @@ state_bucket        = "bkt-tf-state-vpcsc"  # versioning + soft-delete, BEZ rete
 # monitoring_project_id = "prj-cloud-monitoring"
 
 # DRUGA INSTANCJA TORU W TEJ SAMEJ ORGANIZACJI (próba generalna, pilot obok produkcji, ćwiczenie DR).
-# Trzy obiekty tego stacku są ORG-LEVEL i mają nazwę globalną dla organizacji: role własne
-# `vpcScPerimeterWriter` i `vpcScDenyReader` oraz polityka Deny `vpcsc-ci-no-destroy`. Bez sufiksu drugi
-# apply pada w POŁOWIE (`already exists and must be imported`) — po utworzeniu większości zasobów, więc
-# zostawia stan rozjechany z kodem. Puste = nazwy kanoniczne, czyli pierwsza (produkcyjna) instancja.
+# Część obiektów tego stacku ma nazwę GLOBALNĄ DLA ORGANIZACJI — role własne i polityka Deny. Bez sufiksu
+# drugi apply pada w POŁOWIE (`already exists and must be imported`), po utworzeniu większości zasobów,
+# więc zostawia stan rozjechany z kodem. Puste = nazwy kanoniczne, czyli pierwsza (produkcyjna) instancja.
+#
+# KTÓRYCH DOKŁADNIE obiektów to dotyczy, ten komentarz świadomie nie wylicza: poprzednia wersja wyliczała
+# („trzy obiekty: `vpcScPerimeterWriter`, `vpcScDenyReader`, polityka Deny") i pomijała czwarty
+# (`vpcScSinkReader`), który przez to został bez sufiksu — czyli druga instancja dalej padała, tyle że
+# w innym miejscu i po cichu. Listę utrzymuje dziś `tools/org_suffix_check.py`, wyprowadzając ją z drzewa
+# (DEC-59); tutaj zostaje wyłącznie WŁASNOŚĆ, bo tylko ona się nie starzeje.
+#
+# CZEGO SUFIKS NIE ZAŁATWIA — i bez czego próba generalna i tak padnie: konta serwisowe, pula WIF i role
+# w projekcie monitoringu są PROJECT-scoped, a ich nazwy sufiksu nie biorą. Druga instancja musi więc
+# dostać WŁASNY `identity_project_id` (i własny `state_bucket`); w tym samym projekcie zderzy się na
+# `sa-vpcsc-plan`, zanim w ogóle dojdzie do obiektów org-level.
 # org_resource_suffix = "pilot"
 
 # Projekt sondujący KONTROLI POZYTYWNEJ sondy granicy. MUSI BYĆ CZŁONKIEM perimetru — inaczej sonda mierzy
