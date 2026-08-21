@@ -237,6 +237,20 @@ runs:
       shell: bash
       run: python3 tools/codeowners_check.py
 
+    # CZY TEN TOR DA SIĘ POSTAWIĆ DRUGI RAZ W TEJ SAMEJ ORGANIZACJI — pytanie, na które `validate`,
+    # `plan` ani `tflint` nie odpowiadają, bo nazwa wpisana na sztywno jest dla nich POPRAWNA.
+    # Niepoprawna staje się dopiero przy DRUGIM apply w tej samej organizacji, czyli w sytuacji, której
+    # żadne z tych narzędzi nie modeluje — a która jest jedynym sensownym momentem na próbę generalną
+    # (DR, pilot obok produkcji, próba przed go-live).
+    #
+    # DLACZEGO TO NIE JEST BRAMKA ŻYWA: pyta wyłącznie o kształt wyrażeń w drzewie, więc nie potrzebuje
+    # ani poświadczeń, ani sieci, i może biec na każdym wniosku — tam, gdzie poprawka jest darmowa.
+    # W chmurze ten sam błąd kosztuje 44 dni: skasowanej roli własnej nie da się od razu odtworzyć pod
+    # tym samym `role_id` (DEC-59).
+    - name: guard - obiekty org-scoped daja sie postawic drugi raz
+      shell: bash
+      run: python3 tools/org_suffix_check.py
+
     # DECYZJA, NA KTÓRĄ POWOŁUJE SIĘ KOD, MUSI BYĆ W REPO — inaczej odsyłacz prowadzi w pustkę.
     #
     # To NIE jest dublet `starter-drift`. Tamta bramka porównuje świadomie sam WSKAŹNIK (commit startera

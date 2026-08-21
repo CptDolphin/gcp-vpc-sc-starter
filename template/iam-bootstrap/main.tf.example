@@ -160,10 +160,19 @@ locals {
   # weryfikacyjne z `outputs.tf`. Rozjazd tych dwóch miejsc dałby operatorowi komendę pytającą o politykę
   # o innej nazwie niż ta, którą stack tworzy — czyli stabilne `NOT_FOUND` na działającym guardrailu.
   #
-  # Sufiks org-level (`var.org_resource_suffix`, domyślnie pusty) dokleja się TU i do dwóch `role_id`
-  # niżej — to jedyne trzy obiekty tego stacku, których nazwa jest globalna dla organizacji. Reszta
-  # (konta serwisowe, pula WIF, rola monitoringu) jest project-scoped i drugiej instancji nie blokuje.
-  # Pusty sufiks = nazwy sprzed tej zmiany, więc istniejące wdrożenia nie widzą jej w planie.
+  # Sufiks org-level (`var.org_resource_suffix`, domyślnie pusty) dokleja się TU, bo nazwa polityki deny
+  # jest globalna dla organizacji. KTÓRE JESZCZE obiekty tego stacku są w tej sytuacji — nie jest zapisane
+  # w tym komentarzu z premedytacją: poprzednia wersja deklarowała „TU i do dwóch `role_id` niżej, to
+  # jedyne trzy obiekty", a ról org-level jest TRZY, nie dwie. Rozjazd był niewidoczny, bo listę
+  # utrzymywała czyjaś uwaga, a nie mechanizm — i kosztował dokładnie to, przed czym sufiks miał chronić:
+  # `vpcScSinkReader` został bez sufiksu, więc drugi apply w tej samej organizacji padał w połowie mimo
+  # zmiennej wprowadzonej po to, żeby nie padał (DEC-59).
+  #
+  # Zbiór obiektów org-scoped tego repozytorium wyprowadza z DRZEWA `tools/org_suffix_check.py` i on
+  # odrzuca każdy, którego nazwa jest w organizacji stała. Czwarty obiekt tej klasy nie wymaga dopisania
+  # linijki tutaj — wymaga przejścia tamtej bramki.
+  #
+  # Pusty sufiks = nazwy sprzed wprowadzenia zmiennej, więc istniejące wdrożenia nie widzą jej w planie.
   deny_policy_name = var.org_resource_suffix == "" ? "vpcsc-ci-no-destroy" : "vpcsc-ci-no-destroy-${var.org_resource_suffix}"
 }
 
@@ -208,7 +217,7 @@ resource "google_organization_iam_custom_role" "sink_reader" {
   count = var.grant_sink_reader ? 1 : 0
 
   org_id      = var.org_id
-  role_id     = "vpcScSinkReader"
+  role_id     = "vpcScSinkReader${var.org_resource_suffix}"
   title       = "VPC-SC violations sink config reader (CI)"
   description = "Odczyt KONFIGURACJI sinków na organizacji — guard raportu naruszeń. Bez dostępu do treści logów."
   stage       = "GA"
