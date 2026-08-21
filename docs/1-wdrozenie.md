@@ -279,10 +279,10 @@ Minimalny zestaw dla instancji próbnej:
 
 ```bash
 # własny projekt tożsamości i własny kubełek stanu — NIE produkcyjne
-gcloud projects create prj-drill-a --organization=<ORG_ID>
-gcloud billing projects link prj-drill-a --billing-account=<BILLING_ID>
-gcloud services enable iam.googleapis.com iamcredentials.googleapis.com storage.googleapis.com sts.googleapis.com --project=prj-drill-a
-gcloud storage buckets create gs://bkt-drill-a --project=prj-drill-a --location=<LOKALIZACJA> --uniform-bucket-level-access
+gcloud projects create prj-example-drill-a --organization=<ORG_ID>
+gcloud billing projects link prj-example-drill-a --billing-account=<BILLING_ID>
+gcloud services enable iam.googleapis.com iamcredentials.googleapis.com storage.googleapis.com sts.googleapis.com --project=prj-example-drill-a
+gcloud storage buckets create gs://bkt-example-drill-a --project=prj-example-drill-a --location=<LOKALIZACJA> --uniform-bucket-level-access
 ```
 
 …i `terraform.tfvars` instancji próbnej z `org_resource_suffix = "dra"` (drugiej: `"drb"`), wskazujący

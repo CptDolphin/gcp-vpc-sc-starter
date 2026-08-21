@@ -3909,7 +3909,7 @@ zderza się na `sa-vpcsc-plan`, zanim dojdzie do obiektów org-level.
 
 **Dowód na żywo — domknięty 2026-08-21, po fakcie.** Sekcja wyżej powstała, gdy próba generalna nie była
 jeszcze wykonana. Została: dwie instancje (`dra`, `drb`) postawione obok żywego wdrożenia w organizacji
-`179248107504`, każda z własnym projektem tożsamości i własnym kubełkiem stanu. **Oba `terraform apply`
+testowej, każda z własnym projektem tożsamości i własnym kubełkiem stanu. **Oba `terraform apply`
 przeszły w całości** — `Apply complete! Resources: 21 added, 0 changed, 0 destroyed` każdy — a na
 organizacji stanęło obok siebie **dziewięć** ról własnych: `vpcSc{PerimeterWriter,SinkReader,DenyReader}`
 bez sufiksu (wdrożenie produkcyjne) plus dwa komplety z sufiksem. `destroy` obu zszedł do zera, zostawiając
