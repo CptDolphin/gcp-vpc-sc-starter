@@ -265,3 +265,61 @@ If a metric was created recently, it could take up to 10 minutes to become avail
 
 To propagacja po stronie API — `depends_on` jej nie rozwiązuje. Drugi apply przechodzi. Sekcja `monitoring`
 jest opcjonalna, więc alternatywą jest pominięcie jej przy bootstrapie i dołożenie osobnym PR-em.
+
+## Próba generalna: druga instancja toru w TEJ SAMEJ organizacji
+
+Ćwiczenie odtworzenia (DR, pilot obok produkcji, próba przed go-live) ma sens wyłącznie w organizacji,
+która ten tor **już ma** — a wtedy zderza się z obiektami, których nazwa jest globalna dla organizacji.
+Od tego jest `org_resource_suffix` (DEC-59). **Sam sufiks nie wystarcza**: konta serwisowe, pula WIF
+i role w projekcie monitoringu są **project-scoped** i sufiksu nie biorą, więc druga instancja musi
+dostać **własny `identity_project_id` i własny `state_bucket`**. Bez tego padnie na `sa-vpcsc-plan`,
+zanim w ogóle dojdzie do obiektów org-level.
+
+Minimalny zestaw dla instancji próbnej:
+
+```bash
+# własny projekt tożsamości i własny kubełek stanu — NIE produkcyjne
+gcloud projects create prj-example-drill-a --organization=<ORG_ID>
+gcloud billing projects link prj-example-drill-a --billing-account=<BILLING_ID>
+gcloud services enable iam.googleapis.com iamcredentials.googleapis.com storage.googleapis.com sts.googleapis.com --project=prj-example-drill-a
+gcloud storage buckets create gs://bkt-example-drill-a --project=prj-example-drill-a --location=<LOKALIZACJA> --uniform-bucket-level-access
+```
+
+…i `terraform.tfvars` instancji próbnej z `org_resource_suffix = "dra"` (drugiej: `"drb"`), wskazujący
+**te** wartości. Stan trzymaj lokalnie (`backend "local"` w pliku `*_override.tf`) — bucket stanu
+wdrożenia produkcyjnego nie ma powodu brać udziału w próbie.
+
+**ZMIERZONE** (2026-08-21, dwie instancje `dra`/`drb` obok żywego wdrożenia): oba `terraform apply`
+przeszły w całości — `Apply complete! Resources: 21 added, 0 changed, 0 destroyed` każdy — a na
+organizacji stanęło obok siebie **dziewięć** ról własnych: trzy produkcyjne bez sufiksu oraz dwa
+komplety z sufiksem. `terraform destroy` obu instancji zszedł do zera, zostawiając trzy produkcyjne
+nietknięte.
+
+### Dwie pułapki, obie zmierzone
+
+**1. `invalid_rapt` w połowie apply — Terraform NIE używa sesji `gcloud`.** Organizacja z polityką
+reauth (session length) odbija wywołania Terraforma:
+
+```
+Error: Error creating service account: ... oauth2: "invalid_grant" "reauth related error (invalid_rapt)"
+```
+
+…mimo że `gcloud` w tej samej powłoce działa. Powód: `gcloud auth login` odświeża **sesję CLI**,
+a provider `google` bierze **Application Default Credentials** — to dwa różne poświadczenia. Odśwież to,
+którego używa Terraform (`gcloud auth application-default login`), albo podaj mu token z odświeżonej
+sesji (`GOOGLE_OAUTH_ACCESS_TOKEN`). Tryb awarii jest paskudny, bo **częściowy**: zmierzone —
+apply położył 10 zasobów project-scoped i wywrócił się dopiero na org-level, zostawiając stan
+rozjechany z kodem.
+
+**2. Warstwa Deny wymaga `roles/iam.denyAdmin` — i nie ma jej żaden org-admin z urzędu.** Bez niej
+apply pada na `google_iam_deny_policy`. Na czas próby albo nadaj tę rolę i odbierz po niej (procedura:
+README `iam-bootstrap/`), albo ustaw w tfvars próby `manage_deny_policy = false` — **świadomie i z
+komentarzem**, bo wtedy próba nie obejmuje tej jednej warstwy.
+
+### Sprzątanie — i czego NIE cofa
+
+`terraform destroy` obu instancji, potem kubełki i projekty. **Identyfikatory ról własnych nie wracają
+od ręki:** kasowanie ma 7-dniowe okno `undelete`, a pełne zwolnienie `role_id` trwa **44 dni**. Sufiksy
+próbne dobieraj więc jednorazowo (`dra`, `drb`, a nie `pilot`), bo tej nazwy nie użyjesz ponownie przez
+półtora miesiąca. Kasowanie projektu to osobno **30-dniowy soft-delete z zajętym ID**, a `undelete`
+nie przywraca powiązania z kontem rozliczeniowym — planuj odtworzenie z nowym identyfikatorem.
