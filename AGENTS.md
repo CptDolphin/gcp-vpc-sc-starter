@@ -169,12 +169,11 @@ python3 selftest/selftest.py          # rozpakowuje starter do katalogu tymczaso
 Wymaga na PATH: `terraform` (1.15.5), `conftest`, `tflint`, `python3` z `pyyaml`; opcjonalnie `actionlint`
 i `check-jsonschema` (ich brak daje SKIP z nazwą, nigdy ciche zielone).
 
-Oczekiwany wynik: **wszystkie asercje zielone** — ostatni zmierzony przebieg to **530/530** w środowisku
-**bez `tflint`** na PATH (wtedy część lintu wypisuje SKIP z nazwą i po prostu się nie wykonuje).
-**Porównuj z przebiegiem na `main`, nie z liczbą zapisaną tutaj**: liczba asercji rośnie z każdą bramką,
-a różni się też między środowiskami — brakujące narzędzie zmienia mianownik, nie licznik. Czerwona jest
-dopiero asercja z `FAIL`; niższa suma sama w sobie nie jest błędem startera, tylko informacją, czego
-w tym środowisku nie sprawdzono.
+Oczekiwany wynik: **wszystkie asercje zielone**. Liczby asercji nie ma tu świadomie (DEC-20): rośnie z każdą
+bramką, a różni się też między środowiskami — brakujące narzędzie (np. `tflint` poza PATH) daje SKIP
+z nazwą, czyli zmienia mianownik, nie licznik. **Odniesieniem jest przebieg na `main`, nie liczba
+w dokumencie.** Czerwona jest dopiero asercja z `FAIL`; niższa suma sama w sobie nie jest błędem
+startera, tylko informacją, czego w tym środowisku nie sprawdzono.
 
 Pułapka środowiskowa (kosztowała pełny przebieg): gdy `terraform` na PATH jest **shimem** menedżera wersji
 bez ustawionej wersji globalnej, testy odpalane w katalogu tymczasowym padają na `No version is set for
