@@ -241,6 +241,10 @@ def bootstrap() -> None:
         "tools/bootstrap_github.sh", "docs/access-request.md",
         "tools/check_supported_services.py",
         "tools/control_plane_check.py",
+        # Czy obiekty org-scoped daja sie postawic DRUGI RAZ w tej samej organizacji — jedyna bramka
+        # pytajaca o sytuacje, ktorej `validate`/`plan`/`tflint` nie modeluja: nazwa wpisana na sztywno
+        # jest dla nich poprawna, a kosztuje 44 dni blokady `role_id` (DEC-59).
+        "tools/org_suffix_check.py",
         # Rozdzielenie wlasnosci, na ktorym stoi zgoda Security na egress poza GCP (DEC-23).
         "tools/codeowners_check.py",
         # Kompletnosc rejestru decyzji — druga bramka rozjazdu ze starterem, obok wskaznika (DEC-20).
@@ -1519,6 +1523,78 @@ def test_iam_bootstrap() -> None:
     check("iam-bootstrap: przyklad deny_reader_principals z tfvars.sample przechodzi walidacje",
           bool(przyklad_deny) and plan_principals(przyklad_deny).returncode == 0,
           f"przyklad={przyklad_deny!r}")
+
+
+# ------------------------------------- czy tor da sie postawic DRUGI RAZ w tej samej organizacji (DEC-59)
+def test_org_suffix() -> None:
+    """Bramka `tools/org_suffix_check.py` na wsadzie dobrym i na CZTERECH zlych.
+
+    DLACZEGO negatywy sa tu wazniejsze od pozytywu — i to nie jest ogolna zasada, tylko historia tego
+    konkretnego pliku. Zmienna `org_resource_suffix` powstala po to, zeby drugi apply w tej samej
+    organizacji przechodzil, i doklejono ja do TRZECH obiektow z CZTERECH. Wszystkie testy byly wtedy
+    zielone: `fmt`, `validate`, `tflint` i caly selftest. Nazwa wpisana na sztywno jest POPRAWNA — staje
+    sie bledem dopiero przy DRUGIM apply, czyli w sytuacji, ktorej zaden z nich nie modeluje.
+
+    Pozytyw sam w sobie niczego by tu nie dowiodl: przechodzi go rowniez bramka, ktora nigdy nie odrzuca.
+    """
+    print("\n== obiekty org-scoped: druga instancja w tej samej organizacji ==")
+    narzedzie = ["python3", "tools/org_suffix_check.py"]
+
+    p = sh(narzedzie, cwd=ROOT)
+    check("org_suffix_check na rozpakowanym starterze: zielono", p.returncode == 0,
+          p.stdout[-600:] + p.stderr[-400:])
+    # Anty-tautologia: zielony wynik ma znaczyc „przejrzalem obiekty", a nie „nie znalazlem zadnego".
+    # Bramka, ktora nic nie oglada, przechodzi kazdy pozytyw i nie chroni niczego.
+    check("org_suffix_check faktycznie cos przejrzal (nie zielono od pustego zbioru)",
+          " 0 obiektow org-scoped" not in p.stdout, p.stdout[-300:])
+
+    main_tf = ROOT / "iam-bootstrap/main.tf"
+    kopia = main_tf.read_text()
+    try:
+        # (a) DOKLADNIE ten defekt, ktory ta bramke wywolal: `role_id` bez zadnego wejscia.
+        main_tf.write_text(kopia.replace('role_id     = "vpcScSinkReader${var.org_resource_suffix}"',
+                                         'role_id     = "vpcScSinkReader"'))
+        p = sh(narzedzie, cwd=ROOT)
+        check("org_suffix_check: role_id org-level bez zadnego wejscia -> czerwono",
+              p.returncode != 0 and "sink_reader" in p.stdout, p.stdout[-500:])
+
+        # (b) PROBA UCISZENIA BRAMKI: nazwa zalezy od zmiennej, ale od takiej, ktora w obu wdrozeniach
+        #     w TEJ SAMEJ organizacji ma te sama wartosc. Bez tego przypadku bramke zdaje sie
+        #     doklejeniem czegokolwiek, czyli mierzy skladnie zamiast wlasciwosci.
+        main_tf.write_text(kopia.replace('role_id     = "vpcScSinkReader${var.org_resource_suffix}"',
+                                         'role_id     = "vpcScSinkReader${var.org_id}"'))
+        p = sh(narzedzie, cwd=ROOT)
+        check("org_suffix_check: nazwa zalezna WYLACZNIE od var.org_id -> czerwono",
+              p.returncode != 0 and "org_id" in p.stdout, p.stdout[-500:])
+    finally:
+        main_tf.write_text(kopia)
+
+    # (c) FAIL-CLOSED NA NIEZNANYM TYPIE. To jest ta czesc, ktora ma przezyc autora bramki: zbior typow
+    #     org-scoped nie jest zamkniety, a typ nieznany przepuszczony „bo nieznany" powtorzylby defekt
+    #     przy piatym obiekcie dokladnie tak, jak powtorzyl sie przy czwartym.
+    nowy_typ = ROOT / "iam-bootstrap/zz_selftest_nowy_typ.tf"
+    nowy_typ.write_text('resource "google_org_policy_custom_constraint" "probny" {\n'
+                        '  name   = "custom.vpcScProbny"\n'
+                        '  parent = "organizations/${var.org_id}"\n}\n')
+    try:
+        p = sh(narzedzie, cwd=ROOT)
+        check("org_suffix_check: NIEZNANY typ org-scoped -> czerwono z zadaniem klasyfikacji",
+              p.returncode != 0 and "NIE ZNA" in p.stdout, p.stdout[-500:])
+    finally:
+        nowy_typ.unlink()
+
+    # (d) DRZEWO BEZ STACKOW. Ochrona przed pustka nie jest ochrona przed niepelnym pokryciem (DEC-57),
+    #     ale jej brak jest osobnym trybem awarii: bramka odpalona nie tam, gdzie trzeba, byla zielona.
+    with tempfile.TemporaryDirectory() as pusto:
+        p = sh(narzedzie + ["--korzen", pusto], cwd=ROOT)
+        check("org_suffix_check: drzewo bez ani jednego stacku -> czerwono", p.returncode != 0,
+              p.stdout[-300:] + p.stderr[-300:])
+
+    # WPIECIE. Bramka poza pipeline'em jest skryptem, nie bramka — a ten defekt wchodzi przez `main`
+    # tak samo jak przez pull requesta, wiec sprawdzamy powierzchnie WSPOLNA obu torow.
+    akcja = (ROOT / ".github/actions/bramki-tresci/action.yml").read_text()
+    check("org_suffix_check jest wpiety w bramki tresci (oba tory)",
+          "tools/org_suffix_check.py" in akcja, akcja[-400:])
 
 
 # --------------------------------------------------------------------- narzedzie deny_check
@@ -9111,6 +9187,7 @@ def main() -> int:
     test_promote_member()
     test_kazdy_stack_sie_parsuje()
     test_iam_bootstrap()
+    test_org_suffix()
     test_deny_check()
     test_contract()
     test_kontrakt_dwie_publikacje()
