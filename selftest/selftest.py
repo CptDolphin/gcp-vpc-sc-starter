@@ -5482,8 +5482,20 @@ def test_paths_pokrycie() -> None:
     check("swiezo rozpakowany starter ma PELNE pokrycie paths", p.returncode == 0,
           p.stdout + p.stderr)
     # Anty-tautologia do powyzszego: zielono moze znaczyc takze „skaner nic nie policzyl".
+    #
+    # LICZBY WYCIAGAMY, A NIE SZUKAMY ICH JAKO PODCIAGU. Poprzedni ksztalt (`"0 czytanych wejść" not in
+    # p.stdout`) czerwienil sie na KAZDYM liczniku konczacym sie zerem — `80 czytanych wejść` zawiera
+    # `0 czytanych wejść` jako podciag. Zmierzone: dolozenie JEDNEGO narzedzia do bramek tresci podbilo
+    # `apply.yml` z 79 na 80 i wywrocilo ten check, mimo ze zaden workflow nie mial zera wejsc.
+    #
+    # Kierunek pomylki byl przy tym gorszy niz sam falszywy alarm: `"0 czytanych wejść"` NIE trafialoby
+    # w `0` stojace na poczatku liczby wielocyfrowej, ale trafia w kazde `…0` na koncu — czyli check
+    # milczal tam, gdzie mial krzyczec (licznik `10`, `100`) tak samo przypadkowo, jak krzyczal tam,
+    # gdzie nie mial. Test na WARTOSC nie ma tej klasy bledu w ogole.
+    liczniki = [int(x) for x in re.findall(r"(\d+) czytanych wejść", p.stdout)]
     check("guard policzyl niezerowa liczbe wejsc na kazdym workflow z filtrem",
-          "0 czytanych wejść" not in p.stdout and p.stdout.count("ok  ") >= 4, p.stdout)
+          bool(liczniki) and min(liczniki) > 0 and p.stdout.count("ok  ") >= 4,
+          f"liczniki={liczniki}\n{p.stdout}")
 
     # WSAD 1 — dokladnie ten defekt, ktory zglosil #2077: wejscie bramki poza filtrem.
     walidacja = baza / ".github/workflows/validate.yml"
