@@ -3856,3 +3856,64 @@ onboardingowej nie ginie — zostaje w historii pliku i w pull requeście, któr
 | ustawiać oba pola, ale bez odmowy na wartość identyczną z onboardingową | narzędzie zapisywałoby wtedy poprawnie **to, co dostanie**, a dostać może wartość przepisaną z pliku (kopiuj-wklej jest tu najkrótszą drogą). Po zapisie ta pomyłka jest nieodróżnialna od poprawnego wyniku — czyli spełnia kryterium odmowy, którym to narzędzie się kieruje |
 | wymuszać nowe wartości dopiero regułą OPA na pull requeście | reguła porównałaby wpis z… czym? Poprzednia wartość jest w bazie PR-a, a bramki tego repozytorium jadą też na ścieżce apply (DEC-16), gdzie diffu nie ma w ogóle (`workflow_dispatch`, ponowienie przebiegu). Bramka istniejąca tylko na jednym z dwóch torów jest nieobecna dokładnie tam, gdzie człowiek patrzy najmniej |
 | zostawić decyzję człowiekowi, bo runbook już o tym mówi | runbook mówił o tym **dwa razy i przeciwnie**: „nic więcej — dwa pola" w kroku 3 i „lista nazw z datą promocji obok (`change_ref`, `approved_by`)" trzy akapity niżej. Dwa zdania sprzeczne to nie jest procedura, tylko losowanie — a przy kilkuset projektach i ~50 wnioskach miesięcznie promocję i tak wypełnia kanał, nie ręka |
+
+---
+
+## DEC-59 — Zbiór obiektów org-scoped wylicza DRZEWO; komentarz nie deklaruje, ile ich jest
+
+**Decyzja.** Warunek „ten tor da się postawić drugi raz w tej samej organizacji" przestaje być pilnowany
+przez komentarz wyliczający obiekty, a zaczyna być pilnowany przez bramkę `tools/org_suffix_check.py`.
+Bramka wyprowadza zbiór obiektów org-scoped **z drzewa** (blok zasobu z `org_id` albo z rodzicem
+`organizations/…`, we **wszystkich** stackach — DEC-34) i pyta o **własność**, nie o obecność sufiksu:
+
+> nazwa obiektu org-scoped MUSI zależeć od wejścia, które da się USTAWIĆ INACZEJ w drugim wdrożeniu
+> w TEJ SAMEJ organizacji
+
+Wyklucza to literał (kolizja pewna) **oraz** `var.org_id` — zmienną, która w obu wdrożeniach w tej samej
+organizacji ma tę samą wartość. Typ org-scoped, którego bramka nie zna, jest **czerwony z żądaniem
+klasyfikacji**, a nie przepuszczany jako „nieznany, więc pewnie w porządku". Komentarze przy
+`local.deny_policy_name` i w `iam-bootstrap/terraform.tfvars.sample` przestają wyliczać obiekty.
+
+**Dlaczego.** `var.org_resource_suffix` powstał po to, żeby drugi apply w tej samej organizacji nie padał
+w połowie na `already exists and must be imported` — i **doklejono go do trzech obiektów z czterech**.
+Bez sufiksu został `vpcScSinkReader`, więc cel zmiany nie był osiągnięty, ale **wyglądał** na osiągnięty:
+`fmt`, `validate`, `tflint` i cały selftest były zielone, bo nazwa wpisana na sztywno jest **poprawna** —
+niepoprawna staje się dopiero przy drugim apply, czyli w sytuacji, której żadne z tych narzędzi nie
+modeluje. Zbiór objętych sufiksem opisywał komentarz („to jedyne **trzy** obiekty tego stacku"), a ról
+org-level było w tym samym pliku **trzy, nie dwie** — komentarz mylił się już w chwili pisania.
+
+To nie jest wpadka jednego autora, tylko kształt, który tu wraca: **lista stojąca obok mechanizmu
+rozjeżdża się z nim w ciszy**. Tak samo zginął trzeci stack Terraforma (`violations-sink` bez ani jednej
+bramki, DEC-34), tak samo trzeci plik z alertami (martwa kotwica przy `rc=0`, DEC-57). Za każdym razem
+mierzalna była nie treść listy, tylko fakt, że nic jej z rzeczywistością nie konfrontuje.
+
+**Dlaczego akurat bramka, a nie „popraw i uważaj".** Koszt tego błędu jest **asymetryczny i odroczony**.
+Nieudany apply zostawia stan częściowo zastosowany, a odzyskanie identyfikatora roli własnej nie jest
+natychmiastowe: kasowanie ma 7-dniowe okno `undelete`, a pełne zwolnienie `role_id` trwa **44 dni**.
+„Skasuj i spróbuj ponownie" nie jest obejściem — po pierwszej pomyłce próba generalna stoi półtora
+miesiąca. Bramka treści kosztuje sekundę na wniosku i łapie to, zanim cokolwiek powstanie w chmurze.
+
+**Co ta bramka mierzy, a czego nie.** Nie pyta, czy sufiks jest **niepusty** — pusty jest domyślny
+i poprawny (pierwsza, produkcyjna instancja). Pyta o **zdolność** do rozróżnienia. Dlatego przechodzi też
+`google_logging_organization_sink` w `violations-sink`, którego nazwa idzie wprost z `var.bucket_id`:
+druga instancja różnicuje ją bez żadnego sufiksu, a żądanie sufiksu akurat tam byłoby wymuszaniem jednego
+sposobu na własność, którą można osiągnąć kilkoma.
+
+**Konsekwencje.** Zmierzone przed poprawką i po niej, na tym samym drzewie: `rc=1` ze wskazaniem
+`iam-bootstrap/main.tf: google_organization_iam_custom_role.sink_reader` → `rc=0` i `10 obiektów
+org-scoped w 17 plikach *.tf (3 stacki)`. Rozszerzenie bramki na wszystkie stacki mogło od razu znaleźć
+kolejne obiekty tej klasy — sprawdzone, nie znalazło: oba sinki org-level biorą nazwę z wejścia
+operatora. Osobno zapisany zostaje warunek, którego sufiks **nie** załatwia: konta serwisowe i pula WIF
+są project-scoped, więc druga instancja i tak potrzebuje własnego `identity_project_id` — bez niego
+zderza się na `sa-vpcsc-plan`, zanim dojdzie do obiektów org-level.
+
+**Alternatywy odrzucone.**
+
+| wariant | dlaczego nie |
+|---|---|
+| dopisać `vpcScSinkReader` do sufiksu i poprawić liczbę w komentarzu („cztery obiekty") | naprawia jeden egzemplarz i zostawia mechanizm, który go wyprodukował. Piąty obiekt rozjedzie tę liczbę tak samo, a nikt tego nie zauważy — bo trzy pierwsze nadal będą miały sufiks i wszystko będzie zielone |
+| bramka pytająca „czy nazwa zawiera `var.org_resource_suffix`" | zapisuje JEDNĄ poprawną odpowiedź na pytanie, które ma ich kilka. Odrzuciłaby sinki z `violations-sink` (poprawne) i wymusiłaby doklejenie tam sufiksu, którego ten stack nie ma i nie potrzebuje |
+| bramka po **prefiksie nazwy typu** (`google_organization_*`) | przepuszcza `google_iam_deny_policy`, czyli dokładnie ten obiekt org-level, który w nazwie typu nie ma słowa „organization". Klasyfikacja po nazwie myli się cicho — zbiór wyprowadzamy z TREŚCI bloku (`org_id`, rodzic `organizations/…`) |
+| przepuszczać typ nieznany („bramka nie wie, więc nie blokuje") | to jest ten sam fail-open, który ta decyzja zamyka: nowy typ org-scoped wchodziłby bez ani jednego sprawdzenia, a zielony wynik oznaczałby „nie rozpoznałem", nie „sprawdziłem" |
+| walidacja `precondition` w samym Terraformie | działa dopiero na `plan`, czyli po `init` z backendem i poświadczeniami — na wniosku od zewnętrznego zespołu nie odpali się w ogóle. Bramka treści biegnie bez tożsamości w chmurze i na obu torach, także na ścieżce apply (DEC-16) |
+| pilnować tego w przeglądzie człowieka (CODEOWNERS) | człowiek przeglądał tę zmianę i przepuścił ją razem z komentarzem, który już wtedy mylił się o jeden. Przegląd łapie to, co widać w diffie; brak sufiksu w czwartym miejscu nie jest w diffie widoczny — bo tam nic się nie zmieniło |
