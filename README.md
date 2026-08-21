@@ -19,7 +19,7 @@ Osiem decyzji, na których to stoi — wraz z odrzuconymi wariantami — jest w
 ./install.sh /sciezka/do/nowego/repo          # rozpakuj wszystko
 ./install.sh /sciezka --dry-run               # tylko pokaż mapowanie nazw
 ./install.sh /sciezka --only validate.yml     # jeden plik — wdrożenie etapami
-python3 selftest/selftest.py                  # dowód, że to działa (270 testów)
+python3 selftest/selftest.py                  # dowód, że to działa
 ```
 
 Po rozpakowaniu podmień placeholdery (`<ORG_ID>`, `<ACCESS_POLICY_NUMBER>`, `<STATE_BUCKET>`,
@@ -35,7 +35,7 @@ i przeczytaj [`docs/1-wdrozenie.md`](docs/1-wdrozenie.md) — kolejność krokó
 | `perimeter/projects.yaml` | jedna lista = wszyscy członkowie perimetru | całą granicę widać w jednym pliku, a diff w PR pokazuje dokładnie tyle, ile zmienia wniosek; duplikat wpisu łapią cztery niezależne bramki (DEC-12) |
 | `terraform/` | renderer YAML → **granularne** zasoby ACM | błąd w jednym wniosku wywraca własny zasób, nie apply całego perimetru |
 | `policy/*.rego` | bramki: brak `ANY_*`, brak `method: "*"`, ingress bez access-levelu, promocja bez okna | reguła oceniana na **planie**, nie na deklaracji — plan jest tym, co zmieni granicę |
-| `terraform/tests/*.tftest.hcl` | natywne testy renderera (14 przypadków, bez credentiali) | `locals.tf` to jedyne miejsce z logiką — reszta to deklaracje, więc tu jest jedyne, co może się cicho zepsuć |
+| `terraform/tests/*.tftest.hcl` | natywne testy renderera (bez credentiali) | `locals.tf` to jedyne miejsce z logiką — reszta to deklaracje, więc tu jest jedyne, co może się cicho zepsuć |
 | `policy.yaml` §`baseline_ingress` | reguły dla **każdego** członka: skanery, backup, monitoring | jako profil per-member pierwsza dywizja, która zapomni go wybrać, wypada ze skanowania w momencie promocji |
 | `policy.yaml` §`control_plane_projects` | lista projektów, w których leży maszyneria perimetru (stan Terraform, kontrakty, monitoring); bramka OPA odrzuca członka wskazującego którykolwiek z nich | **jedyny tryb awarii tego repo, którego `git revert` nie cofa**: projekt z bucketem stanu w konfiguracji egzekwowanej odcina konto apply od własnego stanu (apply woła spoza granicy), a apply rewertu też potrzebuje stanu — wyjście tylko przez człowieka z uprawnieniami org-level. Furtka `control_plane_exception` w pliku członka zamiast wyłączania bramki |
 | `tools/control_plane_check.py` | konfrontuje **listę** wyżej z tym, gdzie maszyneria leży naprawdę: backend ↔ `contract.state_bucket`, `monitoring.project_id` ↔ lista, stack tożsamości ↔ lista, a przy `--live` — **właściciel bucketa stanu odczytany z API** | bramka wyżej pilnuje listy, więc projekt płaszczyzny sterowania, którego na niej NIE MA, przechodzi jak zwykły wniosek. Deklaracja, której nikt z niczym nie konfrontuje, chroni zbiór wyglądający na pełny — ta sama klasa błędu co bramka czytająca nieistniejący plik |
@@ -44,7 +44,7 @@ i przeczytaj [`docs/1-wdrozenie.md`](docs/1-wdrozenie.md) — kolejność krokó
 | `.github/actions/contrib/` (tutaj) + `contrib/validate-local.sh` + `perimeter/contributors.yaml` | trzeci kanał wejścia: repo zespołu waliduje u siebie i **uruchamia** `external-intake.yml` (`workflow_dispatch`) | zespół dostaje `actions: write` — prawo URUCHOMIENIA workflowa, bez zapisu kodu i bez `servicePerimeters.update` na organizacji (DEC-7) |
 | `terraform/contract.tf` + `publish-gates.yml` | publikuje wąski JSON (~4 KB) **w dwóch miejscach z jednego kroku apply** (bucket + asset release'u) i paczkę bramek | submodule oddawał `members/` wszystkich dywizji i zakresy IP, żeby zwalidować jeden plik; sam bucket kosztował dywizję tożsamość w GCP i grant IAM po to, by przeczytać 4 KB (DEC-8) |
 | `.tflint.hcl` + job `tflint` | statyczna analiza HCL: martwe zmienne, brak pinów providerów, literówki w atrybutach Google | `validate` przechodzi na konfiguracji z martwym knobem i niepinowanym providerem — jedno i drugie boli na obiekcie org-plane |
-| `tests/` + `docs/5-servicenow-intake.md` | fixture'y kanału ServiceNow (3 z 5 negatywne) + specyfikacja formularza i mapowania pól | kanał wejścia musi dać się przetestować **bez** działającej instancji ServiceNow — inaczej pierwszy test odbywa się na produkcji |
+| `tests/` + `docs/5-servicenow-intake.md` | fixture'y kanału ServiceNow (**przewaga przypadków negatywnych**, rozpiska w `tests/README.md`) + specyfikacja formularza i mapowania pól | kanał wejścia musi dać się przetestować **bez** działającej instancji ServiceNow — inaczej pierwszy test odbywa się na produkcji |
 | `.github/dependabot.yml` | aktualizacje pinów SHA akcji i lock providera | pin SHA bez mechanizmu aktualizacji to stara wersja z odznaką bezpieczeństwa |
 | `iam-bootstrap/` | **osobny stack**: 2 konta serwisowe, custom rola (`update` bez `create`/`delete`), role read-only pre-flight, pula WIF z `attribute_condition`, IAM Deny | applikuje go **zespół IAM**, nie ten pipeline — kod nadający uprawnienia nie może być stosowany przez tożsamość, która z nich korzysta |
 
@@ -112,11 +112,15 @@ sprzątanie. Uruchom, zanim ktoś podejmie decyzję na podstawie opinii — kosz
 ## Dowód, że działa
 
 `python3 selftest/selftest.py` rozpakowuje starter do katalogu tymczasowego i uruchamia na nim realne bramki —
-**270/270** przy ostatnim przebiegu: `terraform fmt`/`validate`/**`test`** (14 przypadków renderera),
-`conftest verify` (47 testów reguł), **`tflint`** na każdym stacku Terraforma, narzędzia na realnych deklaracjach
-(w tym cztery fixture'y kanału ticketowego), `actionlint` na dwunastu workflow **i na workflow przykładu
-dywizji**, realny `validate-local.sh` uruchomiony na `examples/division-repo/vpc-sc/request.yaml`, guardy
-na treść stacku IAM, kontraktu, nazwy obiektów ACM i pinowanie akcji.
+**wszystkie asercje zielone** przy ostatnim przebiegu: `terraform fmt`/`validate`/**`test`** (natywne testy
+renderera), `conftest verify` na regułach, **`tflint`** na każdym stacku Terraforma, narzędzia na realnych
+deklaracjach (w tym fixture'y kanału ticketowego), `actionlint` na **każdym** workflow **i na workflow
+przykładu dywizji**, realny `validate-local.sh` uruchomiony na `examples/division-repo/vpc-sc/request.yaml`,
+guardy na treść stacku IAM, kontraktu, nazwy obiektów ACM i pinowanie akcji.
+
+Liczby asercji nie ma tu świadomie (DEC-20): rośnie z każdą bramką, a różni się też między środowiskami —
+brakujące narzędzie daje SKIP z nazwą, czyli zmienia mianownik, nie licznik. **Odniesieniem jest przebieg
+na `main`, nie liczba w dokumencie.**
 
 Testy są w połowie **negatywne** i to jest sedno: sprawdzają, że bramka **PADA** na złym wejściu — promocja
 przed oknem obserwacji, baseline bez usługi zadeklarowanej jako niezmiennik, plan z `ANY_IDENTITY`/`method: "*"`, ticket bez
